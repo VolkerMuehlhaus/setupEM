@@ -61,6 +61,8 @@ To start setupEM, open a terminal window and activate the venv. Then with the ve
 
 The user interface of setupEM is organized in multiple tabs, which guide you through the model setup and simulation process. Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
 
+In setupEM, **yellow** input fields always require your attention, whereas **white** fields can often be left to default values.
+
 ## Input Files
 Here, you configure input files: the GDSII layout file that provides geometry information and the XML file that provides stackup information. 
 Some pre-processing of the layout is also defined here: You can also specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box. If your layout includes **polygons with holes**, you need to set the "Preprocess GDSII file" checkbox, otherwise you will get error messages during meshing.
