@@ -47,12 +47,11 @@ This module also installs these dependencies:
     
 
 # Using setupEM
-The user interface of setupEM is organized multiple tabs, which guide you through the model setup and simulation process. Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
+The user interface of setupEM is organized in multiple tabs, which guide you through the model setup and simulation process. Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
 
 ## Input Files
-Here, you configure the GDSII layout file that provide geometry information and the XML file that provides stackup information. 
-You can also specify a distance (in micron) which is used for via array merging. If your layout includes polygons with holes, 
-you need to set the "Preprocess GDSII file" checkbox, otherwise you will get error messages during meshing.
+Here, you configure input files: the GDSII layout file that provides geometry information and the XML file that provides stackup information. 
+Some pre-processing of the layout is also defined here: You can also specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box. If your layout includes **polygons with holes**, you need to set the "Preprocess GDSII file" checkbox, otherwise you will get error messages during meshing.
 
 <img src="./doc/png/inputfiles1.png" alt="input files" width="700">
 
