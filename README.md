@@ -5,12 +5,14 @@ setupEM provides a Python-based graphical user interface (Qt based) to configure
 An overview of the user interface is given below in chapter "Using setupEM"
 
 # Installation
+setupEM can be used on Linux, Windows, MacOS and other platforms. 
+
 To install the setupEM, activate the venv where you want to install.
 
 Documentation for the gds2palace workflow assumes that you have created a Python venv 
-named "palace" in ~/venv/palace and installed the modules there.
+named "palace" in ~/venv/palace and installed the modules there. 
 
-If you follow this, you would first activate the venv: 
+If you follow these instructions, you would first activate the venv: 
 ```
     source ~\venv\palace\bin\activate
 ```
@@ -38,7 +40,7 @@ sudo apt update
 sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-render0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinput0 libxcb-xv0 libxcb-util1 libxkbcommon-x11-0
 ```
 
-# Dependencies
+## Dependencies
 This module also installs these dependencies:
     gds2palace
     PySide6
@@ -47,6 +49,15 @@ This module also installs these dependencies:
     
 
 # Using setupEM
+To start setupEM, open a terminal window and activate the venv. Then with the venv activated, type setupEM to start the module application:
+
+```
+    setupEM    
+```
+
+
+## User Interface
+
 The user interface of setupEM is organized in multiple tabs, which guide you through the model setup and simulation process. Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
 
 ## Input Files
