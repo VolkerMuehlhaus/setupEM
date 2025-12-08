@@ -33,7 +33,7 @@ from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect
 
 
 # we expect gds2palace in the same directory as this code, or installed as module
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'gds2palace')))
+# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'gds2palace')))
 from gds2palace import *
 
 
@@ -295,8 +295,14 @@ class FileInputTab(QWidget):
         previous_file = self.gds_file_edit.text()
         previous_directory = os.path.dirname(previous_file)
         if not os.path.isdir(previous_directory):
-            previous_directory = ""
+            # try to get XML files bundled in setupEM package
+            package_data = os.path.join(os.path.dirname(__file__), "examples")
+            if os.path.exists(package_data):
+                previous_directory = package_data
+            else:    
+                previous_directory = ""
         
+
         filename, _ = QFileDialog.getOpenFileName(self, "Select GDSII File",previous_directory,"*.gds;;*.*")
         if filename:
             self.set_gds_file(filename)
@@ -314,7 +320,12 @@ class FileInputTab(QWidget):
         previous_file = self.XML_file_edit.text()
         previous_directory = os.path.dirname(previous_file)
         if not os.path.isdir(previous_directory):
-            previous_directory = ""
+            # try to get XML files bundled in setupEM package
+            package_data = os.path.join(os.path.dirname(__file__), "data")
+            if os.path.exists(package_data):
+                previous_directory = package_data
+            else:    
+                previous_directory = ""
 
         filename, _ = QFileDialog.getOpenFileName(self, "Select XML Stackup File",previous_directory,"*.xml;;*.*")
         if filename:
@@ -332,8 +343,8 @@ class FileInputTab(QWidget):
         self.gds_file_edit.setText(get_saved_value("GdsFile","Please choose a file ===>"))
         XML = get_saved_value("SubstrateFile","Please choose a file ===>")
         self.XML_file_edit.setText(XML)
-        self.viamerge_edit.setText(str(get_saved_value("merge_polygon_size","0")))
-        self.preprocess_gds_checkbox.setChecked(bool(get_saved_value("preprocess_gds",False)))
+        self.viamerge_edit.setText(str(get_saved_value("merge_polygon_size","0.5")))
+        self.preprocess_gds_checkbox.setChecked(bool(get_saved_value("preprocess_gds",True)))
 
         int_list  = saved_values.get("purpose","0")
         purpose_string = str(int_list).replace('[','').replace(']','')
@@ -389,7 +400,7 @@ class FrequenciesTab(QWidget):
 
         self.start_layout = QVBoxLayout()
         self.start_layout.addWidget(QLabel("fstart [GHz]"))
-        self.start_edit = QLineEdit("0.1")
+        self.start_edit = QLineEdit("0")
         self.start_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
         self.start_layout.addWidget(self.start_edit)
         self.sweep_layout.addLayout(self.start_layout)
@@ -492,7 +503,7 @@ class FrequenciesTab(QWidget):
         return True  # Tab change only possible when returning True
 
     def load_values(self):
-        self.start_edit.setText(str(saved_values.get("fstart","0.1")))
+        self.start_edit.setText(str(saved_values.get("fstart","0")))
         self.stop_edit.setText(str(saved_values.get("fstop","50")))
         self.step_edit.setText(str(saved_values.get("fstep","")))
 
@@ -541,7 +552,7 @@ class PortsTab(QWidget):
         # details rigis top group
         self.details_layout = QVBoxLayout()
 
-        left_label_width = 200
+        left_label_width = 230
 
         self.sourcelayer_layout =  QHBoxLayout()
         label = QLabel("Port geometry on layer number")
@@ -2528,7 +2539,10 @@ class MainWindow(QMainWindow):
 
     def save_ask_filenamefile(self):
         # make sure all tabs save their values
-        file_path, _ = QFileDialog.getSaveFileName(self, "Select Settings File", filter=f"{APP_NAME} (*.{CONFIG_SUFFIX})")
+        # set gds filename as default for saving config 
+        gds_name = saved_values.get("GdsFile")
+        default_config = gds_name.replace('.gds','.simcfg')
+        file_path, _ = QFileDialog.getSaveFileName(self, "Select Settings File", default_config, filter=f"{APP_NAME} (*.{CONFIG_SUFFIX})")
         # Ensure filename ends with CONFIG_SUFFIX
         if file_path:
             if not file_path.lower().endswith('.' + CONFIG_SUFFIX):
@@ -2683,7 +2697,6 @@ def main():
     win.simulator_menu.setEnabled(elmer)
     # if elmer:
     #     win.setElmerMode()
-
 
     sys.exit(app.exec())
 
