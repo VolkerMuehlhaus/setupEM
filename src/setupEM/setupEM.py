@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QAbstractItemView,QStyleFactory,QTableWidgetItem, QPlainTextEdit, QDialog
     )
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QSyntaxHighlighter, QPainter, QPen, QActionGroup
-from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect
+from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths
 
 
 # we expect gds2palace in the same directory as this code, or installed as module
@@ -295,12 +295,7 @@ class FileInputTab(QWidget):
         previous_file = self.gds_file_edit.text()
         previous_directory = os.path.dirname(previous_file)
         if not os.path.isdir(previous_directory):
-            # try to get XML files bundled in setupEM package
-            package_data = os.path.join(os.path.dirname(__file__), "examples")
-            if os.path.exists(package_data):
-                previous_directory = package_data
-            else:    
-                previous_directory = ""
+            previous_directory = ""
         
 
         filename, _ = QFileDialog.getOpenFileName(self, "Select GDSII File",previous_directory,"*.gds;;*.*")
@@ -564,7 +559,6 @@ class PortsTab(QWidget):
         self.sourcelayer_layout.addWidget(self.sourcelayer_edit)
         label = QLabel(" in GDSII file")
         self.sourcelayer_layout.addWidget(label)
-        # label.setFixedWidth(200) 
         self.sourcelayer_layout.addStretch()
         self.details_layout.addLayout(self.sourcelayer_layout)
 
@@ -579,7 +573,6 @@ class PortsTab(QWidget):
         self.direction_layout.addWidget(self.direction_box)
         label2 = QLabel(" (negative for reversed polarity)")
         self.direction_layout.addWidget(label2)
-        # label2.setFixedWidth(200) 
         self.direction_layout.addStretch()
         self.details_layout.addLayout(self.direction_layout)
 
@@ -659,11 +652,8 @@ class PortsTab(QWidget):
         self.remove_button.setFixedWidth(button_width) 
         self.remove_button.clicked.connect(self.remove_port_values_from_table)
 
-        # self.buttons_layout.addStretch()
-        # self.details_layout.addSpacing(20)
         self.details_layout.addLayout(self.buttons_layout)
 
-        # self.details_layout.addStretch()
         self.top_layout.addLayout(self.details_layout)
 
         self.bottom_group.setLayout(self.bottom_layout)
@@ -673,7 +663,6 @@ class PortsTab(QWidget):
         self.main_layout.addSpacing(20)
                                  
         self.main_layout.addWidget(self.bottom_group)
-        # self.main_layout.addStretch()
         self.setLayout(self.main_layout)
 
 
@@ -700,8 +689,6 @@ class PortsTab(QWidget):
         self.direction_box.currentTextChanged.connect(on_direction_changed)
         self.direction_box.setCurrentIndex(2)
         
-        # self.apply_port_values_to_table()
-
         # set this AFTER apply_port_values_to_table(), not earlier!
         self.portslist.itemSelectionChanged.connect(self.portslist_selection_changed)
 
@@ -767,8 +754,6 @@ class PortsTab(QWidget):
             safe_get_for_combobox(4,self.from_box,0)
             safe_get_for_combobox(5,self.to_box,0)
             safe_get_for_combobox(6,self.direction_box,2)
-
-            # self.apply_port_values_to_table()
 
 
     # callback when removing selected port settings
@@ -881,28 +866,6 @@ class PortsTab(QWidget):
         self.portslist.selectRow(0)
 
 
-    def update_port_from_EMStudio (self, ports):
-        # update ports from imported EM Studio data, which uses other keywords 
-
-        self.portslist.clearContents()
-        for port in ports:
-            # each port is a dictionary
-            portnum = port.get("Num", None)
-            if portnum is not None:    
-                portnum = int(portnum)
-                self.portslist.setItem(portnum-1, 0, QTableWidgetItem(str(port.get("Z0",50))))
-                self.portslist.setItem(portnum-1, 1, QTableWidgetItem(str(port.get("Voltage",1.0))))
-                self.portslist.setItem(portnum-1, 2, QTableWidgetItem(str(port.get("Source Layer",""))))
-                self.portslist.setItem(portnum-1, 3, QTableWidgetItem(str(port.get("Target Layername",""))))
-                self.portslist.setItem(portnum-1, 4, QTableWidgetItem(str(port.get("From Layer",""))))
-                self.portslist.setItem(portnum-1, 5, QTableWidgetItem(str(port.get("To Layer",""))))
-                self.portslist.setItem(portnum-1, 6, QTableWidgetItem(str(port.get("Direction","")).upper()))
-
-        self.portslist.selectRow(1)
-        self.portslist.selectRow(0)
-
-
-
 
 class MeshTab(QWidget):
     def __init__(self, MainWindow):
@@ -972,15 +935,55 @@ class MeshTab(QWidget):
         self.mesh_order_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.mesh_order_box.addItems(["faster, less accurate","most accurate"])
         self.meshorder_layout.addWidget(self.mesh_order_box)
-        self.mesh_order_box.setCurrentIndex(1)
+        self.mesh_order_box.setCurrentIndex(0)
         self.meshorder_layout.addStretch()
         self.mesh_layout.addLayout(self.meshorder_layout)
-
 
         self.mesh_group.setLayout(self.mesh_layout)
         self.main_layout.addWidget(self.mesh_group)
         self.main_layout.addSpacing(20)
 
+        self.mesh_order_box.currentTextChanged.connect(self.on_meshorder_changed)        
+        self.mesh_order_box.setCurrentIndex(1)
+
+        # ---------- ELMER SOLVER GROUP ----------
+        self.Elmer_group = QGroupBox("Elmer solver settings")
+        self.Elmer_layout = QVBoxLayout()
+
+        self.solver_layout = QHBoxLayout()
+        self.solverlabel = QLabel("Solver")
+        self.solverlabel.setFixedWidth(label_width)  
+        self.solver_layout.addWidget(self.solverlabel)
+
+        self.solver_box = QComboBox()
+        self.solver_box.setFixedWidth(250)
+        self.solver_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.solver_box.addItems(["direct","iterative"])
+        self.solver_layout.addWidget(self.solver_box)
+        self.solver_box.setCurrentIndex(0)
+        self.solver_layout.addStretch()
+        self.Elmer_layout.addLayout(self.solver_layout)
+
+        # number of Threads input, only for Elmer
+        self.threads_layout = QHBoxLayout()
+        self.labelthreads = QLabel("Multithreading:")
+        self.labelthreads.setFixedWidth(label_width)
+        self.threads_layout.addWidget(self.labelthreads)
+        self.threads_box = QComboBox()
+        self.threads_box.setFixedWidth(250)
+        self.threads_box.setStyleSheet(COMBO_STYLE_REQUIRED)
+        self.threads_box.addItems(["1 thread running ElmerSolver","2 threads using MPI","4 threads using MPI","8 threads using MPI","16 threads using MPI"])
+        self.threads_layout.addWidget(self.threads_box)
+        self.threads_box.setCurrentIndex(2)
+        self.threads_layout.addStretch()
+        self.Elmer_layout.addLayout(self.threads_layout)
+
+        # disable unless Elmer mode is enabled
+        self.Elmer_group.setVisible(False)
+        
+
+        self.Elmer_group.setLayout(self.Elmer_layout)
+        self.main_layout.addWidget(self.Elmer_group)
 
         # ---------- MESH GROUP ----------
         self.AMR_group = QGroupBox("Adaptive mesh refinement (AMR)")
@@ -1135,6 +1138,19 @@ class MeshTab(QWidget):
 
         self.setLayout(self.main_layout)
 
+
+    def on_meshorder_changed(self, value):
+    # callback when mesh order changed, so that we can show/hide edit fields
+        try:
+            self.solver_box.setCurrentIndex(0)
+            if  "faster" in value:
+                self.solver_box.setDisabled(True)
+            else:    
+                self.solver_box.setDisabled(False)
+        except:    
+            pass
+
+
     def save_values(self):
         try:
             value = float(self.refinement_edit.text())
@@ -1169,6 +1185,10 @@ class MeshTab(QWidget):
             self.AMR_iterations_edit.setText("0")
             return False
         saved_values ["adaptive_mesh_iterations"] = int(value)
+
+        
+        # iterative or direct solver for Elmer
+        saved_values["iterative"] = "iterative" in self.solver_box.currentText()
 
         BC = self.boundary_box.currentText()
         if BC=="PEC":
@@ -1219,6 +1239,20 @@ class MeshTab(QWidget):
                 return False
             saved_values ["air_around"] = [xmin, xmax, ymin, ymax, zmin, zmax]
 
+        # check value for number of threads
+        index = self.threads_box.currentIndex()
+        if index==1:
+            n = 2
+        elif index==2:
+            n = 4
+        elif index==3:
+            n = 8
+        elif index==4:
+            n = 16
+        else:
+            n = 1    
+        saved_values['ELMER_MPI_THREADS'] = n
+
         # all saved
         return True
     
@@ -1230,8 +1264,13 @@ class MeshTab(QWidget):
         self.AMR_iterations_edit.setText(str(saved_values.get("adaptive_mesh_iterations","0")))        
         self.margins_edit.setText(str(saved_values.get("margin","200")))        
 
-        self.mesh_order_box.setCurrentIndex(saved_values.get("order", 2)-1) 
-        
+        self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1) 
+
+        if saved_values.get("iterative", False):
+            self.solver_box.setCurrentIndex(1)
+        else:    
+            self.solver_box.setCurrentIndex(0)
+                
         if 'PEC' in saved_values.get("boundary",""):
             self.boundary_box.setCurrentIndex(1)
         elif 'PMC' in saved_values.get("boundary",""):
@@ -1262,6 +1301,19 @@ class MeshTab(QWidget):
                 # we have air_around defined as a single value
                 self.airaround_box.setCurrentIndex(0)
                 self.airaround_edit.setText(str(air))
+
+        # MPI multithreading for Elmer
+        n = saved_values.get('ELMER_MPI_THREADS',4)
+        if n<2:
+            self.threads_box.setCurrentIndex(0)
+        elif n<4:
+            self.threads_box.setCurrentIndex(1)
+        elif n<8:
+            self.threads_box.setCurrentIndex(2)
+        elif n<16:
+            self.threads_box.setCurrentIndex(3)
+        else:    
+            self.threads_box.setCurrentIndex(4)
 
 
 
@@ -1307,16 +1359,17 @@ class CreateModelTab(QWidget):
         self.modelname_layout.addStretch()
         self.file_layout.addLayout(self.modelname_layout)
 
+
         self.preview_model_btn = QPushButton("⚙️ Preview model geometry in gmsh")
         self.preview_model_btn.clicked.connect(self.preview_model)
         self.file_layout.addWidget(self.preview_model_btn)
 
-        self.create_model_btn = QPushButton("⚙️ Create mesh and model file")
+        self.create_model_btn = QPushButton("⚙️ Create mesh and simulation settings file")
         self.create_model_btn.clicked.connect(self.create_mesh)
         self.file_layout.addWidget(self.create_model_btn)
 
         self.run_layout = QHBoxLayout()
-        self.create_run_btn = QPushButton("▶️ Run Palace")
+        self.create_run_btn = QPushButton("▶️ Start Simulation")
         self.create_run_btn.clicked.connect(self.run_model)
         self.run_layout.addWidget(self.create_run_btn)
         self.kill_btn = QPushButton("🛑 Terminate ")
@@ -1390,6 +1443,7 @@ class CreateModelTab(QWidget):
     def save_values(self):
         saved_values['model_basename'] = self.modelname_edit.text()
         saved_values['sim_path'] = self.targetdir_edit.text().replace('\\','/')
+
         return True # Tab change only possible when returning True
 
 
@@ -1400,13 +1454,14 @@ class CreateModelTab(QWidget):
         model_basename = saved_values.get('model_basename','')
         if model_basename == "":
             if gdsfile != "":
-                if self.MainWindow.ElmerMode:
-                    prefix = 'elmer_'
-                else:
-                    prefix = 'palace_'    
-                model_basename = prefix + os.path.basename(gdsfile).replace('.gds', '')
+                model_basename = os.path.basename(gdsfile).replace('.gds', '')
                 if "===" in model_basename:
                     model_basename = ""
+
+        # no simulator name prefix
+        model_basename = model_basename.replace('palace_','')
+        model_basename = model_basename.replace('elmer_','')
+            
         self.modelname_edit.setText(model_basename)
 
         sim_path = saved_values.get('sim_path','')
@@ -1422,7 +1477,6 @@ class CreateModelTab(QWidget):
         else:
             if os.path.exists(sim_path):
                 self.targetdir_edit.setText(sim_path)
-                    
 
 
     def preview_model(self):
@@ -1512,46 +1566,76 @@ class CreateModelTab(QWidget):
 
         # clear log
         self.log_area.clear()
-        self.log_area.appendPlainText("Trying to start Palace using script ./run_sim now")
 
-        run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+        if self.MainWindow.PalaceMode:
+            self.log_area.appendPlainText("Trying to start Palace using script ./run_sim now")
+            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+
+            if os.name == "nt":
+                #  Windows
+
+                def windows_to_wsl_path(win_path: str) -> str:
+                    """
+                    Convert a Windows-style path like:
+                        C:\\Users\\Volker\\Projects\\SimApp
+                    into a WSL-style path like:
+                        /mnt/c/Users/Volker/Projects/SimApp
+                    """
+                    win_path = win_path.strip()
+                    if not win_path or ":" not in win_path:
+                        return win_path  # Already looks like a Linux path or invalid
+                    drive, rest = win_path.split(":", 1)
+                    drive = drive.lower()
+                    rest = rest.replace("\\", "/").lstrip("/")
+                    return f"/mnt/{drive}/{rest}"
+
+
+                wsl_run_path = windows_to_wsl_path(run_path)
+                # tell user what to do, we can open WSL in the right place but not start simulation
+                self.log_area.appendPlainText("Running on Windows with WSL, you need to type ./run_sim in the terminal yourself!")
+                self.log_area.appendPlainText("Note that this works for LOCAL drives only, we can't open WSL on network drive.")
+                self.process.start("cmd.exe", ["/c", "start", "wt.exe", "wsl", "--cd", wsl_run_path])       
+            else:
+                # Linux
+                self.log_area.appendPlainText('Setting work directory ' + run_path)
+                # make file executable
+                run_file = os.path.join(run_path, 'run_sim')
+                os.chmod(run_file, 0o755)
+
+                self.process.setWorkingDirectory(run_path)
+                # start simulation
+                self.process.start(".//run_sim")
         
-        if os.name == "nt":
-            #  Windows
-
-            def windows_to_wsl_path(win_path: str) -> str:
-                """
-                Convert a Windows-style path like:
-                    C:\\Users\\Volker\\Projects\\SimApp
-                into a WSL-style path like:
-                    /mnt/c/Users/Volker/Projects/SimApp
-                """
-                win_path = win_path.strip()
-                if not win_path or ":" not in win_path:
-                    return win_path  # Already looks like a Linux path or invalid
-                drive, rest = win_path.split(":", 1)
-                drive = drive.lower()
-                rest = rest.replace("\\", "/").lstrip("/")
-                return f"/mnt/{drive}/{rest}"
-
-
-            wsl_run_path = windows_to_wsl_path(run_path)
-            # tell user what to do, we can open WSL in the right place but not start simulation
-            self.log_area.appendPlainText("Running on Windows with WSL, you need to type ./run_sim in the terminal yourself!")
-            self.log_area.appendPlainText("Note that this works for LOCAL drives only, we can't open WSL on network drive.")
-            self.process.start("cmd.exe", ["/c", "start", "wt.exe", "wsl", "--cd", wsl_run_path])       
         else:
-            # Linux
-            self.log_area.appendPlainText('Setting work directory ' + run_path)
-            # make file executable
-            run_file = os.path.join(run_path, 'run_sim')
-            os.chmod(run_file, 0o755)
+            # Elmer mode
 
-            self.process.setWorkingDirectory(run_path)
-            # start simulation
-            self.process.start(".//run_sim")
+            # try to start from output directory
+            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
 
+            if os.name == "nt":
+                #  Windows
 
+                self.log_area.appendPlainText('Setting work directory ' + run_path)
+                
+                # rename file to batch file
+                run_file_orig = os.path.join(run_path, 'run_elmer')
+                run_file = run_file_orig.replace('run_elmer','run_elmer.bat')
+                os.rename(run_file_orig, run_file)
+
+                self.process.setWorkingDirectory(run_path)
+                # start simulation
+                self.process.start("run_elmer.bat")
+            else:
+                # Linux
+                self.log_area.appendPlainText('Setting work directory ' + run_path)
+                # make file executable
+                run_file = os.path.join(run_path, 'run_elmer')
+                os.chmod(run_file, 0o755)
+
+                self.process.setWorkingDirectory(run_path)
+                # start simulation
+                self.process.start(".//run_elmer")
+      
 
 class ModelEditorTab(QWidget):
     def __init__(self, MainWindow):
@@ -1614,10 +1698,7 @@ class ModelEditorTab(QWidget):
         add_text("# Model for IHP OpenPDK EM workflow created using " + APP_NAME)
         add_text("import os, sys, subprocess")
 
-        add_text("\n# We expect gds2palace in PYTHONPATH *or* in the same directory as this model file")
-        add_text("# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'gds2palace')))")
-        # add_text(f"sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname('{this_app_path}'), 'gds2palace')))")
-        add_text("from gds2palace import *")
+        add_text("\nfrom gds2palace import *")
         
         add_text("\n# get path for this simulation file")
         add_text("script_path = utilities.get_script_path(__file__)")
@@ -1631,13 +1712,16 @@ class ModelEditorTab(QWidget):
             add_text("sim_path = utilities.create_sim_path (script_path,model_basename)")
 
         add_text("\n# ========================= workflow settings ==========================")
-        if self.MainWindow.PalaceMode and forExport:
+        if forExport:
             add_text("# preview model/mesh only, without running solver?")
             add_text("start_simulation = False")
-
             add_text("\n# Command to start simulation")
-            add_text("# run_command = ['start', 'wsl.exe']  # Windows Subsystem for Linux")   
-            add_text("run_command = ['./run_sim']         # Linux")   
+
+            if self.MainWindow.PalaceMode:
+                add_text("# run_command = ['start', 'wsl.exe']  # Windows Subsystem for Linux")   
+                add_text("run_command = ['./run_sim']         # Linux")   
+            elif self.MainWindow.ElmerMode:    
+                add_text("run_command = ['./run_elmer']     # Linux")   
 
         add_text("\n# ===================== input files and settings =======================")
         add_text("settings={}")
@@ -1648,6 +1732,11 @@ class ModelEditorTab(QWidget):
                            'layernumbers','allpolygons']
         # List of keys that we don't write to Python model code editor
         ignore_list     = ['model_basename','sim_path']
+
+
+        # Keywords that are excluded in Palace mode
+        if self.MainWindow.PalaceMode:
+            ignore_list.append('iterative')
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
@@ -1714,7 +1803,7 @@ class ModelEditorTab(QWidget):
         else:    
             add_text("config_name, data_dir = simulation_setup.create_palace (excite_ports, settings)")
 
-        # Only for Palace, add helper function to start simulation from script
+        # Palace, add helper function to start simulation from script
         if self.MainWindow.PalaceMode:
             add_text("\n# for convenience, write run script to model directory")
             add_text("utilities.create_run_script(settings['sim_path'])")
@@ -1728,6 +1817,22 @@ class ModelEditorTab(QWidget):
                 add_text("      subprocess.run(run_command, shell=True)")
                 add_text("  except:")
                 add_text("      print(f'Unable to run Palace using command ',run_command)\n")
+
+        # Elmer, add helper function to start simulation from script
+        if self.MainWindow.ElmerMode:
+            add_text("\n# for convenience, write run script to model directory")
+            add_text("utilities.create_elmer_run_script(settings['sim_path'],settings)")
+
+            # When running the model from setupEM GUI, we start the script differently, only write this for export
+            if forExport:
+                add_text("\n# run after creating mesh and Elmer model files ")
+                add_text("if start_simulation:")
+                add_text("  try:")
+                add_text("      os.chdir(sim_path)")
+                add_text("      subprocess.run(run_command, shell=True)")
+                add_text("  except:")
+                add_text("      print(f'Unable to run Elmer using command ',run_command)\n")
+
 
 
     def save_values(self):
@@ -2291,8 +2396,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME + ' Palace')
         self.frequencies_tab.dump_group.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(True)
-        self.create_model_tab.create_run_btn.setVisible(True)
-        self.create_model_tab.kill_btn.setVisible(True)
+        self.mesh_tab.Elmer_group.setVisible(False)
+
+        # update mesh settings that are not always visible
+        self.mesh_tab.on_meshorder_changed(self.mesh_tab.mesh_order_box.currentText())
+      
 
     def setElmerMode(self):
         self.optionElmer.setChecked(True)
@@ -2301,8 +2409,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME + ' Elmer')
         self.frequencies_tab.dump_group.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(False)
-        self.create_model_tab.create_run_btn.setVisible(False)
-        self.create_model_tab.kill_btn.setVisible(False)
+        self.mesh_tab.Elmer_group.setVisible(True)
+
+        # update mesh settings that are not always visible
+        self.mesh_tab.on_meshorder_changed(self.mesh_tab.mesh_order_box.currentText())
+
 
     def show_version(self):
         setupEM_version = importlib.metadata.version("setupEM")
@@ -2385,7 +2496,7 @@ class MainWindow(QMainWindow):
 
 
     def load_configuration_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Settings File", filter=f"*.{CONFIG_SUFFIX};;EM Studio *.json;;Python model code *.py")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Settings File", filter=f"*.{CONFIG_SUFFIX};;Python model code *.py")
         # we can load JSON or Python models, decide which suffix we have
         if file_path:
             self.load_configuration_from_file(file_path)
@@ -2410,45 +2521,12 @@ class MainWindow(QMainWindow):
                     self.create_model_tab.log_area.clear()
                 else:
                     QMessageBox.information(self, "Failed", "Unknown data format")
-            elif extension.upper() == ".JSON":
-                # try to extract variable values from EMStudio JSON
-                self.user_inputs_file = file_path
-                # call the native config file loading function
-                data = self.load_user_inputs(file_path)
-
-                # clear existing settings                   
-                saved_values.clear()
-
-                # get GDSII and XML filenames
-                for key in ["GdsFile","SubstrateFile"]:
-                    value = data.get(key)
-                    if os.path.isfile(value):
-                        saved_values[key]=value                        
-
-                # get frequencies
-                for key in ["fstart","fstop"]:
-                    value = data.get(key)
-                    saved_values[key]=value/1e9   
-
-                # get Boundaries
-                boundaries =  data.get("Boundaries", None)                         
-                if boundaries is not None:
-                    boundary_list = []
-                    for key in ["X-","X+","Y-","Y+","Z-","Z+"]:
-                        boundary_list.append(boundaries.get(key,'??'))
-                    saved_values["boundary"] = boundary_list
-
-                # get Ports from EMStudio format (same structure, but other keywords)
-                self.ports_tab.update_port_from_EMStudio (data.get("Ports", []))
-
-                self.load_all_tabs()
-                QMessageBox.information(self, "Loaded", f"Settings loaded from {file_path}")
-                self.create_model_tab.log_area.clear()
             elif extension.upper() == ".PY":
                 import_mapping = {
                     "gds_filename":"GdsFile",
                     "XML_filename":"SubstrateFile",
                     "GdsFile":"GdsFile",
+                    "purpose":"purpose",
                     "SubstrateFile":"SubstrateFile",
                     "merge_polygon_size":"merge_polygon_size",
                     "preprocess_gds":"preprocess_gds",
@@ -2464,7 +2542,10 @@ class MainWindow(QMainWindow):
                     "refined_cellsize":"refined_cellsize",
                     "cells_per_wavelength":"cells_per_wavelength",
                     "meshsize_max":"meshsize_max",
-                    "adaptive_mesh_iterations":"adaptive_mesh_iterations"
+                    "adaptive_mesh_iterations":"adaptive_mesh_iterations",
+                    "order":"order",
+                    "iterative":"iterative",
+                    "elmer":"elmer"
                 }
 
                 # remove old settings, so that we don't keep old values that don't exist in loaded file
@@ -2504,9 +2585,16 @@ class MainWindow(QMainWindow):
                 ports = parse_python_ports_definitions(file_path)
                 self.ports_tab.update_port_from_import (ports)
 
+                # set simulator
+                if saved_values["elmer"]:
+                    self.setElmerMode()
+                else:
+                    self.setPalaceMode()                        
+
                 self.load_all_tabs()
                 QMessageBox.information(self, "Loaded", f"Settings loaded from {file_path}")
                 self.create_model_tab.log_area.clear()
+
             else:
                 QMessageBox.information(self, "Error", f"Could not load file {file_path}")
 
@@ -2613,7 +2701,8 @@ def parse_assignments(file_path):
             param = param.replace('settings','')
             param = param.strip("[]'").strip('"')
             value = value.strip("'").strip('"') 
-            parameters[param] = value
+            if not "settings" in value: # make sure we don't read the USE of a parameter
+                parameters[param] = value
 
     return parameters
 
@@ -2670,7 +2759,7 @@ def main():
     parser.add_argument("-xmlfile",  type=str, default = '', help="XML stackup file to read")
     parser.add_argument("-simcfg",   type=str, default = '', help="*.simcfg file that is loaded prior to reading files")
     # Optional argument --elmer to enable menu with solver choices
-    parser.add_argument("--elmer",   action="store_true", help="Enable menu to choose solver engine")
+    parser.add_argument("--elmer",   action="store_true", help="Set Elmer as default simulator")
     args = parser.parse_args()
 
     # evaluate optional parameters
@@ -2693,10 +2782,11 @@ def main():
     if gdsfile !=  '':
         win.file_tab.set_gds_file(gdsfile)
 
-    # enable choice of target system only with option --elmer
-    win.simulator_menu.setEnabled(elmer)
-    # if elmer:
-    #     win.setElmerMode()
+    if elmer:
+        # start in Elmer mode (instead of default choice Palace)
+        win.setElmerMode()
+    else:
+        win.setPalaceMode()    
 
     sys.exit(app.exec())
 

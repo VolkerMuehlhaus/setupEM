@@ -43,10 +43,18 @@ def parse_elmer_results(found_filename, freq, S_dB, S_arg):
     omega_column = column_names.index('angular frequency')
     
     # find column with re{S11}
-    re_s11_column = column_names.index('cmf 11')
+    if 'cmf 11' in column_names:
+        re_s11_column = column_names.index('cmf 11')
+    else:
+        re_s11_column = column_names.index('cmf 1 1')
+
 
     # find column with im{S11}
-    im_s11_column = column_names.index('cmf im 11')
+    if 'cmf im 11' in column_names:
+        im_s11_column = column_names.index('cmf im 11')
+    else:
+        im_s11_column = column_names.index('cmf im 1 1')
+
 
     if re_s11_column+num_ports**2 != im_s11_column:
         print('Incorrect number of values in data file, does not match port count') 
@@ -56,9 +64,15 @@ def parse_elmer_results(found_filename, freq, S_dB, S_arg):
     # read data file
     data = np.loadtxt(data_filename)
 
-    omegalist = data[:, omega_column]
+    if data.ndim==2:
+        # we have multiple frequencies
+        omegalist = data[:, omega_column]
+    else:
+        # we have only one freqiency point
+        omegalist = [data[omega_column]]
     for omega in omegalist:
         freq.append(omega / (1e9*2*math.pi))
+
 
     # -------------------------
     # Build S-matrices
@@ -73,8 +87,15 @@ def parse_elmer_results(found_filename, freq, S_dB, S_arg):
             for n in range(num_ports):
                 key = str(m+1) + ' ' + str(n+1)
                 data_offset = m*num_ports + n
-                real_part = data[f_index, re_s11_column + data_offset]
-                imag_part = data[f_index, im_s11_column + data_offset]
+                if data.ndim==2:
+                    # more than 1 frequency point
+                    real_part = data[f_index, re_s11_column + data_offset]
+                    imag_part = data[f_index, im_s11_column + data_offset]
+                else:
+                    # single frequency data    
+                    real_part = data[re_s11_column + data_offset]
+                    imag_part = data[im_s11_column + data_offset]
+
                 Smn = real_part + 1j * imag_part
                 dB[key] = todb(Smn)
                 arg[key] = toangle(Smn)
