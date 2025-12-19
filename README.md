@@ -8,7 +8,7 @@ An overview of the SetupEM user interface is given below in chapter "Using setup
 
 
 ## Installing the AWS Palace FEM solver engine
-setupEM creates and runs simulation models for the AWS Palace FEM solver engine. AWS Palace itself can be installed in multiple ways. For a smooth interaction with the gds2palace workflow, it is recommended to create some scripts that help running the model and convert the Palace results to SnP Touchstone files.
+**setupEM** creates and runs simulation models for the AWS Palace FEM solver engine. The underlying solver **AWS Palace** can be installed in multiple ways. For a smooth interaction with the gds2palace workflow, it is recommended to create some scripts that help running the model and convert the Palace results to SnP Touchstone files.
 
 For development of this workflow, Palace was installed using the Singularity/Apptainer installation method. This was rather simple and straightforward, even with no knowledge about container usage. The resulting apptainer file palace.sif can be integrated very easily in a Linux system like the Ubuntu 24.04 system used here, and can then be moved to other Linux machines using simple copy of the container file. The script to start Palace from the apptainer is included in the scripts directory in this repository.
 
