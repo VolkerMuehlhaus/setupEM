@@ -2,7 +2,7 @@
 
 [gds2palace](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2) enables an **RFIC FEM simulation** workflow where GDSII layout files are simulated using the [Palace FEM solver by AWS](https://awslabs.github.io/palace/stable/). setupEM provides a Python-based graphical user interface to configure and run gds2palace, instead of creating the simulation model code manually.
 
-When you install setupEM, the gds2palace workflow is installed in the background. This enables **creating** a simulation model for AWS Palace. To actually run the simulation, you need to have AWS Palace installed. 
+When you install setupEM, the gds2palace workflow is installed in the background. This enables **creating a simulation model** for AWS Palace. To actually **run the simulation**, you need to have AWS Palace installed, as described below. 
 
 An overview of the SetupEM user interface is given below in chapter "Using setupEM"
 
