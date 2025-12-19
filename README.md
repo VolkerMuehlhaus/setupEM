@@ -15,7 +15,7 @@ named "palace" in ~/venv/palace and installed the gds2palace module there.
 
 If you follow these instructions, you now need to activate that venv and then install setupEM and dependencies via PyPI: 
 ```
-    source ~\venv\palace\bin\activate
+    source ~/venv/palace/bin/activate
     pip install setupEM    
 ```
 
