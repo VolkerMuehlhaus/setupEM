@@ -456,17 +456,25 @@ class FrequenciesTab(QWidget):
         try:
             fstart = float(self.start_edit.text())
         except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for fstart")
-            self.start_edit.setText("0")
-            return False
+            # the only case when this field can be empty is when fpoint or fdump are defined
+            if self.start_edit.text()=="" and (self.fpoint_edit.text() != "" or self.fdump_edit.text() != ""):
+                return True
+            else:
+                QMessageBox.warning(self, "Error", "Not a valid value for fstart")
+                self.start_edit.setText("0")
+                return False
         saved_values ["fstart"] = float(fstart)
 
         try:
             fstop = float(self.stop_edit.text())
         except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for fstop")
-            self.stop_edit.setText("50")
-            return False
+            # the only case when this field can be empty is when fpoint or fdump are defined
+            if self.stop_edit.text()=="" and (self.fpoint_edit.text() != "" or self.fdump_edit.text() != ""):
+                return True
+            else:            
+                QMessageBox.warning(self, "Error", "Not a valid value for fstop")
+                self.stop_edit.setText("50")
+                return False
         saved_values ["fstop"] = float(fstop)
 
         if self.step_edit.text() != "":
@@ -493,6 +501,15 @@ class FrequenciesTab(QWidget):
             saved_values ["fdump"] = ast.literal_eval('['+text+']')
         else:    
             saved_values.pop("fdump",None)
+
+        # if fstart == fstop == fdump or fstart == fstop == fstep, then remove fstart, fstop
+        if saved_values ["fstart"] == saved_values ["fstop"]:
+            discrete_list1 = saved_values.get("fpoint", [])
+            discrete_list2 = saved_values.get("fdump", [])
+            if saved_values ["fstart"] in discrete_list1 or saved_values ["fstart"] in discrete_list2:
+                self.start_edit.setText("")
+                self.stop_edit.setText("")
+                self.step_edit.setText("")
 
 
         return True  # Tab change only possible when returning True
@@ -1240,18 +1257,19 @@ class MeshTab(QWidget):
             saved_values ["air_around"] = [xmin, xmax, ymin, ymax, zmin, zmax]
 
         # check value for number of threads
-        index = self.threads_box.currentIndex()
-        if index==1:
-            n = 2
-        elif index==2:
-            n = 4
-        elif index==3:
-            n = 8
-        elif index==4:
-            n = 16
-        else:
-            n = 1    
-        saved_values['ELMER_MPI_THREADS'] = n
+        if self.MainWindow.ElmerMode:     
+            index = self.threads_box.currentIndex()
+            if index==1:
+                n = 2
+            elif index==2:
+                n = 4
+            elif index==3:
+                n = 8
+            elif index==4:
+                n = 16
+            else:
+                n = 1    
+            saved_values['ELMER_MPI_THREADS'] = n
 
         # all saved
         return True
@@ -1742,7 +1760,6 @@ class ModelEditorTab(QWidget):
             # these commands are only used within this GUI application to control gmsh
             ignore_list.append(['preview_only','no_preview'])
 
-
         for key in saved_values.keys():
             if not key in special_keylist: 
                 if not key in ignore_list:
@@ -2130,7 +2147,7 @@ class VectorWidget(QWidget):
                         resistance_string = 'INVALID MATERIAL REFERENCE: ' + metal.material 
 
                     painter.setPen(penBlack)
-                    drawText_left(xmetal+10, flipy(ymetal), wmetal, part_height/2, metal.name)   
+                    drawText_left(xmetal+10, flipy(ymetal), wmetal, part_height/2, f"{metal.name} ({metal.layernum})" )   
                     painter.setPen(penGray)
                     drawText_right(xmetal, flipy(ymetal), wmetal-10, part_height/2, resistance_string)   
                     # store the drawing position, because vias will refer to that
@@ -2216,7 +2233,7 @@ class VectorWidget(QWidget):
 
                     painter.setPen(penBlack)
                     painter.drawRect(xvia, flipy(y1), w, -h)
-                    painter.drawText(xvia+5, flipy(y1+5), metal.name)   
+                    painter.drawText(xvia+5, flipy(y1+5), f"{metal.name} ({metal.layernum})")   
 
         painter.end()
 
@@ -2372,16 +2389,19 @@ class MainWindow(QMainWindow):
         
 
         help_menu = menu_bar.addMenu("&Help")
-        self.web_gds2palace_action = QAction("gds2palace", self)
-        self.web_manual_action = QAction("Documentation", self)
+        self.web_manual1_action = QAction("Documentation gds2palace", self)
+        self.web_gds2palace_action = QAction("github gds2palace", self)
+        self.web_manual2_action = QAction("github setupEM", self)
         self.web_examples_action = QAction("Examples", self)
-        self.version_action = QAction("Version information", self)
+        self.version_action = QAction("Version information...", self)
         self.web_gds2palace_action.triggered.connect(lambda: webbrowser.open("https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2"))
-        self.web_manual_action.triggered.connect(lambda: webbrowser.open("https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/tree/main/doc"))
+        self.web_manual1_action.triggered.connect(lambda: webbrowser.open("https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf"))
+        self.web_manual2_action.triggered.connect(lambda: webbrowser.open("https://github.com/VolkerMuehlhaus/setupEM"))
         self.web_examples_action.triggered.connect(lambda: webbrowser.open("https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/tree/main/workflow"))
         self.version_action.triggered.connect(lambda: self.show_version())
+        help_menu.addAction(self.web_manual1_action)
         help_menu.addAction(self.web_gds2palace_action)
-        help_menu.addAction(self.web_manual_action)
+        help_menu.addAction(self.web_manual2_action)
         help_menu.addAction(self.web_examples_action)
         help_menu.addSeparator()
         help_menu.addAction(self.version_action)
@@ -2586,7 +2606,7 @@ class MainWindow(QMainWindow):
                 self.ports_tab.update_port_from_import (ports)
 
                 # set simulator
-                if saved_values["elmer"]:
+                if saved_values.get("elmer", False):
                     self.setElmerMode()
                 else:
                     self.setPalaceMode()                        
