@@ -77,8 +77,6 @@ To start setupEM, open a terminal window and activate the venv where you install
 
 <img src="./doc/png/start.png" alt="start" width="700">
 
-# Using setupThermal for thermal simulation
-
 The package now includes setupThermal also, which is the equivalent of setupEM for thermal models using gds2palace with the [Elmer](https://www.elmerfem.org/blog/) solver. With the venv activated, you can simply type setupThermal to start the Thermal GUI. 
 
 AWS Palace is not used/required in thermal workflow, although we use the same gds2palace package. 
