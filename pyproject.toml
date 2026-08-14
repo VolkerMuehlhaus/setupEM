@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "setupEM"
+version = "0.3.5"
+description = "Python tool for configuration of gds2palace workflow with GUI."
+readme = "README.md"
+authors = [
+    { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
+]
+dependencies = [
+    "gds2palace>=0.3.3",
+    "PySide6",
+    "scipy",
+    "requests",
+    "scikit-rf",
+    "matplotlib"   
+]
+requires-python = ">=3.9"
+
+[project.scripts]
+setupEM = "setupEM.setupEM:main"
+setupThermal = "setupEM.setupThermal:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["setupEM*"]
+
+[tool.setuptools.package-data]
+"setupEM" = ["data/*.xml"]
+

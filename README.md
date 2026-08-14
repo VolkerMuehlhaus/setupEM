@@ -4,6 +4,8 @@
 
 When you install setupEM, the gds2palace workflow is automatically installed in the background. This enables **creating a simulation model** for AWS Palace. To actually **run the simulation**, you need to have AWS Palace installed, as described below. Palace installation is **not** done automatically!
 
+The setupEM package now includes setupThermal also, which is the equivalent of setupEM for thermal models using [Elmer](https://www.elmerfem.org/blog/). To run a thermal model in Elmer, you need to have Elmer installed. Elmer installation is **not** done automatically!
+
 An overview of the SetupEM user interface is given below in chapter "Using setupEM"
 
 
@@ -70,10 +72,17 @@ The setupEM module also installs these dependencies:
     
 ---
 
-# Using setupEM
-To start setupEM, open a terminal window and activate the venv where you installed the setupEM module. Then with the venv activated, you can simply type setupEM to start the module main program.
+# Using setupEM for S-Parameter simulation
+To start setupEM, open a terminal window and activate the venv where you installed the setupEM module. Then with the venv activated, you can simply type setupEM to start the module main program. 
 
 <img src="./doc/png/start.png" alt="start" width="700">
+
+# Using setupThermal for thermal simulation
+
+The package now includes setupThermal also, which is the equivalent of setupEM for thermal models using gds2palace with the [Elmer](https://www.elmerfem.org/blog/) solver. With the venv activated, you can simply type setupThermal to start the Thermal GUI. 
+
+AWS Palace is not used/required in thermal workflow, although we use the same gds2palace package. 
+
 
 ## User Interface
 
