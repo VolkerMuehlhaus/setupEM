@@ -1,4 +1,4 @@
-# What's New in setupEM
+# What's New - August 15, 2026
 
 Changes since the version from about 3 months ago, focused on features that matter to end users. For general usage, see the main [README](../README.md).
 
@@ -22,6 +22,3 @@ The editor lets you manage all parts of a stackup file:
 
 Edits are shown live in a cross-section preview, the same visualization used by "Show stackup" elsewhere in the app. Saving preserves any comments and formatting in the original XML file that the editor doesn't touch.
 
-## Smaller improvements
-
-- Both setupEM.py and setupThermal.py can now also be run directly as a script (e.g. for debugging), not only via the installed `setupEM` / `setupThermal` commands.
