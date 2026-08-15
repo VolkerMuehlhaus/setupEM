@@ -38,11 +38,20 @@ from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPat
 from gds2palace import *
 
 # shared building blocks used by both setupEM.py and setupThermal.py
-from .setup_common import (
-    EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
-    FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-    VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
-)
+# __package__ is None/"" when this file is run directly (e.g. `python setupThermal.py`)
+# rather than imported as part of the setupEM package, so relative import fails.
+if __package__ in (None, ""):
+    from setup_common import (
+        EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
+        FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+    )
+else:
+    from .setup_common import (
+        EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
+        FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+    )
 
 
 '''

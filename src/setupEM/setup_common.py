@@ -1499,8 +1499,13 @@ class MainWindowBase(QMainWindow):
             return
 
         # local import: stackup_editor.py imports from this module, so importing
-        # it at module load time here would be circular
-        from .stackup_editor import StackupEditorWindow
+        # it at module load time here would be circular.
+        # __package__ is None/"" when this module was itself loaded outside the
+        # setupEM package (e.g. setupEM.py run directly), so relative import fails.
+        if __package__ in (None, ""):
+            from stackup_editor import StackupEditorWindow
+        else:
+            from .stackup_editor import StackupEditorWindow
 
         if getattr(self, "stackup_editor_window", None) is not None:
             self.stackup_editor_window.raise_()

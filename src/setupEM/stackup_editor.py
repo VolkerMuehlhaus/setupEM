@@ -46,7 +46,13 @@ from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
 from PySide6.QtCore import Qt, QTimer, Signal
 
 from gds2palace import stackup_reader, stackup_writer
-from .setup_common import VectorWidget
+
+# __package__ is None/"" when this file is run directly rather than imported
+# as part of the setupEM package, so relative import fails.
+if __package__ in (None, ""):
+    from setup_common import VectorWidget
+else:
+    from .setup_common import VectorWidget
 
 
 # ------------------------------------------------------------------
