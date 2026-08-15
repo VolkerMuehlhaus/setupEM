@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog,
+    QScrollArea, QColorDialog, QMenuBar,
 )
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -77,9 +77,11 @@ MATERIAL_COLUMNS = [
 DIELECTRIC_COLUMNS = [
     ("Name", "Name", "text"),
     ("Material", "Material", "materialref"),
+    ("Reference", "Reference (optional)", "dielectricref"),
+    ("ReferenceEdge", "Ref. Edge", "referenceedge"),
     ("Thickness", "Thickness", "text"),
-    ("Zmin", "Zmin (absolute)", "text"),
-    ("Zmax", "Zmax (absolute)", "text"),
+    ("Zmin", "Zmin", "text"),
+    ("Zmax", "Zmax", "text"),
     ("ResultZmin", "Zmin (resulting)", "computed"),
     ("ResultZmax", "Zmax (resulting)", "computed"),
     ("Boundary", "Optional Boundary (GDS layer)", "text"),
@@ -90,10 +92,20 @@ LAYER_COLUMNS = [
     ("Layer", "GDSII Layer #", "text"),
     ("Type", "Type", "layertype"),
     ("Material", "Material", "materialref"),
+    ("Reference", "Reference (optional)", "layerref_or_dielectricref"),
+    ("ReferenceEdge", "Ref. Edge", "referenceedge"),
     ("Zmin", "Zmin", "text"),
     ("Zmax", "Zmax", "text"),
     ("Thickness", "Thickness (resulting)", "computed"),
+    ("ResultZmin", "Zmin (resulting)", "computed"),
+    ("ResultZmax", "Zmax (resulting)", "computed"),
 ]
+
+REFERENCE_EDGE_CHOICES = ["Top", "Bottom"]
+
+# sentinel shown in the Reference combo for "no Reference set" (absolute positioning);
+# mapped back to "" (removes the attribute) when selected - never written to the XML
+REFERENCE_NONE_LABEL = "(none)"
 
 
 def _compute_layer_thickness(elements):
@@ -112,10 +124,54 @@ def _compute_layer_thickness(elements):
     return computed
 
 
+def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
+    """Read-only ResultZmin/ResultZmax columns for the Layers tab: the absolute
+       resolved z-position for every row, whether it's plain absolute Zmin/Zmax or
+       Reference-based (offset from a Dielectric/Layer edge) - this is the main
+       point of Reference-based positioning, so it stays visible regardless of which
+       kind a given row uses. Runs the same resolution the reader uses
+       (dielectric_layers_list.calculate_zpositions() +
+       metal_layers_list.resolve_references() + metal_layers_list.add_offset())
+       over the current (possibly mid-edit) Dielectrics/Layers tab state. Returns {}
+       - blanking those columns - if the current data isn't complete/valid enough to
+       resolve yet (including a dangling/ambiguous/circular Reference, which the
+       reader reports via exit(1) rather than a normal exception - see
+       _refresh_preview() for the same pattern).
+    Args:
+        offset (float): the file's <Substrate Offset>, if any. Only applied when no
+            Layer uses Reference, exactly like parse_substrate() does - Reference and
+            a nonzero Offset are mutually exclusive (see validate_stackup()), so a
+            file with any Reference-based Layer never reaches add_offset() there either.
+    """
+    try:
+        dielectrics_list = stackup_reader.dielectric_layers_list()
+        for element in dielectrics_elements:
+            dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+        dielectrics_list.calculate_zpositions()
+
+        metals_list = stackup_reader.metal_layers_list()
+        for element in elements:
+            metals_list.append(stackup_reader.metal_layer(element))
+        metals_list.resolve_references(dielectrics_list)
+        if offset and not metals_list.has_references():
+            metals_list.add_offset(offset)
+    except (Exception, SystemExit):
+        return {}
+
+    computed = {}
+    for element, metal in zip(elements, metals_list.metals):
+        computed[id(element)] = {
+            "ResultZmin": f"{metal.zmin:.4f}" if metal.zmin is not None else "",
+            "ResultZmax": f"{metal.zmax:.4f}" if metal.zmax is not None else "",
+        }
+    return computed
+
+
 def _layer_gray_fn(_element, attr):
-    # Thickness is always derived/read-only here (unlike the Dielectric stack's
-    # resulting Zmin/Zmax, there's no mode where it's the "source of truth")
-    return attr == "Thickness"
+    # Thickness/ResultZmin/ResultZmax are always derived/read-only here (unlike the
+    # Dielectric stack's resulting Zmin/Zmax, there's no mode where they're the
+    # "source of truth")
+    return attr in ("Thickness", "ResultZmin", "ResultZmax")
 
 
 # ------------------------------------------------------------------
@@ -178,40 +234,48 @@ def _material_blank_if_default(element, attr, value):
 
 
 # ------------------------------------------------------------------
-# Dielectric Stack tab: a dielectric is positioned either by explicit
-# absolute Zmin/Zmax, or by Thickness (stacked automatically on top of its
-# neighbors, top-to-bottom, by dielectric_layers_list.calculate_zpositions()).
-# The "resulting" columns show that computed position either way, so the
-# effective z-range is visible even for Thickness-based rows; whichever pair
-# of columns isn't the row's actual source of truth is grayed out.
+# Dielectric Stack tab: a dielectric is positioned one of three ways - absolute
+# (explicit Zmin/Zmax), Reference-relative (offset from another Dielectric's edge,
+# Thickness sizing it by default), or implicit (Thickness-stacked on its neighbors,
+# top-to-bottom, by dielectric_layers_list.calculate_zpositions()). The "resulting"
+# columns show the computed position in all three cases, so the effective z-range is
+# always visible; Zmin/Zmax/Thickness are grayed out for whichever mode isn't that
+# row's actual source of truth.
 # ------------------------------------------------------------------
 
-def _dielectric_has_absolute(element):
-    return bool(element.get("Zmin")) and bool(element.get("Zmax"))
+def _dielectric_position_mode(element):
+    if element.get("Reference"):
+        return "reference"
+    if element.get("Zmin") and element.get("Zmax"):
+        return "absolute"
+    return "thickness"
 
 
 def _dielectric_gray_fn(element, attr):
-    has_absolute = _dielectric_has_absolute(element)
+    mode = _dielectric_position_mode(element)
+    if attr == "Thickness":
+        return mode == "absolute"  # unused/ignored once Zmin+Zmax fix the position
     if attr in ("Zmin", "Zmax"):
-        return not has_absolute
+        return mode == "thickness"  # unused in implicit mode; still meaningful (optional) overrides in reference mode
     if attr in ("ResultZmin", "ResultZmax"):
-        return has_absolute
+        return mode == "absolute"  # redundant with the already-editable Zmin/Zmax there
     return False
 
 
 def _compute_dielectric_zpositions(elements):
-    """Runs the same top-to-bottom stacking algorithm the reader uses
-       (dielectric_layers_list.calculate_zpositions()) over the current
-       (possibly mid-edit) Dielectric elements, so the "resulting" columns
-       show real effective z-positions. Returns {} - blanking those columns -
-       if the current data isn't complete/valid enough to compute yet.
+    """Runs the same resolution the reader uses (dielectric_layers_list.calculate_zpositions(),
+       covering absolute/Reference/implicit-stacked dielectrics alike) over the current (possibly
+       mid-edit) Dielectric elements, so the "resulting" columns show real effective z-positions.
+       Returns {} - blanking those columns - if the current data isn't complete/valid enough to
+       compute yet, including a dangling/ambiguous/circular Reference, which the reader reports
+       via exit(1) rather than a normal exception - see _refresh_preview() for the same pattern.
     """
     try:
         dielectrics_list = stackup_reader.dielectric_layers_list()
         for element in elements:
             dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
         dielectrics_list.calculate_zpositions()
-    except Exception:
+    except (Exception, SystemExit):
         return {}
 
     computed = {}
@@ -271,7 +335,8 @@ class ElementTableEditor(QWidget):
                  move_fn=None, material_choices_fn=None, type_choices=None,
                  strip_fn=None, not_applicable_fn=None, blank_if_default_fn=None,
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
-                 pre_set_attr_fn=None):
+                 pre_set_attr_fn=None, reference_choices_fn=None, header_tooltips=None,
+                 operand_lookup_fn=None):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -304,6 +369,19 @@ class ElementTableEditor(QWidget):
              handled applying the change (and any side effects, e.g. a confirmation
              dialog with cross-tab consequences) and the normal element.set()/attrib
              deletion is skipped; False means apply the value normally.
+           reference_choices_fn() -> list[str]: choices for the "layerref_or_dielectricref"/
+             "dielectricref" kinds. For Layers this combines two different element containers
+             (Dielectrics + Layers) - unlike material_choices_fn, which only ever spans one; for
+             Dielectrics it's Dielectric names only (a Dielectric's Reference can't target a
+             Layer - Layers are resolved after Dielectrics).
+           header_tooltips: {attr: tooltip text} for columns whose header label alone
+             could be misread (e.g. Zmin/Zmax meaning different things depending on
+             whether the row uses Reference).
+           operand_lookup_fn() -> {layer number string: layer name}: for the "operands"
+             kind, used to build a per-cell tooltip resolving each GDSII layer number to
+             its Layers-tab Name where possible, falling back to the bare number for
+             whichever operands don't resolve (e.g. a pure intermediate derived layer
+             with no <Layer> entry of its own).
         """
         super().__init__()
         self.columns = columns
@@ -313,6 +391,8 @@ class ElementTableEditor(QWidget):
         self.move_fn = move_fn
         self.default_attrs_fn = default_attrs_fn
         self.material_choices_fn = material_choices_fn
+        self.operand_lookup_fn = operand_lookup_fn
+        self.reference_choices_fn = reference_choices_fn
         self.type_choices = type_choices or []
         self.on_changed = on_changed
         self.strip_fn = strip_fn
@@ -333,6 +413,11 @@ class ElementTableEditor(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(len(columns))
         self.table.setHorizontalHeaderLabels([c[1] for c in columns])
+        if header_tooltips:
+            for col, (attr, _header, _kind) in enumerate(columns):
+                tooltip = header_tooltips.get(attr)
+                if tooltip:
+                    self.table.horizontalHeaderItem(col).setToolTip(tooltip)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         header = self.table.horizontalHeader()
@@ -409,16 +494,25 @@ class ElementTableEditor(QWidget):
                 self.table.setItem(row, col, item)
             elif kind == "color":
                 self._make_color_cell(row, col, element, attr, value)
-            elif kind in ("materialtype", "layertype", "operationtype"):
-                self._make_combo_cell(row, col, element, attr, value, self.type_choices, editable=False)
+            elif kind in ("materialtype", "layertype", "operationtype", "referenceedge"):
+                choices = REFERENCE_EDGE_CHOICES if kind == "referenceedge" else self.type_choices
+                self._make_combo_cell(row, col, element, attr, value, choices, editable=False)
             elif kind == "materialref":
                 choices = self.material_choices_fn() if self.material_choices_fn else []
                 self._make_combo_cell(row, col, element, attr, value, choices, editable=True)
+            elif kind in ("layerref_or_dielectricref", "dielectricref"):
+                choices = [REFERENCE_NONE_LABEL] + (self.reference_choices_fn() if self.reference_choices_fn else [])
+                self._make_combo_cell(row, col, element, attr, value or REFERENCE_NONE_LABEL, choices, editable=True,
+                                       value_out_fn=lambda text: "" if text == REFERENCE_NONE_LABEL else text)
             elif kind == "operands":
-                operands_text = ", ".join(stackup_writer.get_operand_layers(element))
-                self.table.setItem(row, col, QTableWidgetItem(operands_text))
+                operand_numbers = stackup_writer.get_operand_layers(element)
+                item = QTableWidgetItem(", ".join(operand_numbers))
+                if self.operand_lookup_fn and operand_numbers:
+                    lookup = self.operand_lookup_fn()
+                    item.setToolTip(", ".join(lookup.get(num, num) for num in operand_numbers))
+                self.table.setItem(row, col, item)
 
-    def _make_combo_cell(self, row, col, element, attr, value, choices, editable):
+    def _make_combo_cell(self, row, col, element, attr, value, choices, editable, value_out_fn=None):
         combo = NoScrollComboBox()
         combo.setEditable(editable)
         items = list(choices)
@@ -427,8 +521,11 @@ class ElementTableEditor(QWidget):
         combo.addItems(items)
         if value:
             combo.setCurrentText(value)
-        combo.currentTextChanged.connect(
-            lambda text, el=element, a=attr: self._set_attr(el, a, text))
+
+        def _emit(text, el=element, a=attr):
+            self._set_attr(el, a, value_out_fn(text) if value_out_fn else text)
+
+        combo.currentTextChanged.connect(_emit)
         self.table.setCellWidget(row, col, combo)
 
     def _make_color_cell(self, row, col, element, attr, value):
@@ -611,54 +708,81 @@ class StackupEditorWindow(QDialog):
         self._last_snapshot = None
         self._undo_snapshot = None
 
+        # asked once per loaded/new file (reset in new_file()/_load_file()): whether to
+        # write auto-assigned implicit-Dielectric-stacking References into the XML at
+        # Save time (see _maybe_offer_explicit_dielectric_references())
+        self._asked_about_implicit_dielectric_references = False
+
+        # schemaVersion as of the last successful load/save (reset in new_file()/
+        # _load_file(), refreshed in _save_to() on success) - lets save() notice when a
+        # plain Save would silently upgrade an old-format ("2.0") file on disk to the
+        # newer format (e.g. after Convert to Reference position format bumps it to
+        # "3.0"), so it can offer Save As instead of overwriting quietly
+        self._loaded_schema_version = None
+
         outer_layout = QVBoxLayout()
 
-        # ---------- file toolbar ----------
-        file_row = QHBoxLayout()
-        self.new_button = QPushButton("New")
-        self.new_button.setAutoDefault(False)
-        self.new_button.clicked.connect(self.new_file)
-        file_row.addWidget(self.new_button)
+        # ---------- menu bar ----------
+        # QMenuBar works as a normal widget here even though this is a QDialog, not a
+        # QMainWindow - QLayout.setMenuBar() below reserves it a dedicated full-width row
+        # at the very top, same visual result as QMainWindow's built-in menu bar.
+        self.menu_bar = QMenuBar()
 
-        self.open_button = QPushButton("Open...")
-        self.open_button.setAutoDefault(False)
-        self.open_button.clicked.connect(self.open_file_dialog)
-        file_row.addWidget(self.open_button)
+        # kept as self.*_menu (not just locals) so the Python-side wrapper stays alive
+        # for the lifetime of the window, matching the QMenuBar's C++ ownership of them
+        self.file_menu = self.menu_bar.addMenu("&File")
 
-        self.save_button = QPushButton("Save")
-        self.save_button.setAutoDefault(False)
-        self.save_button.clicked.connect(lambda: self.save())
-        file_row.addWidget(self.save_button)
+        self.new_action = QAction("&New", self)
+        self.new_action.triggered.connect(self.new_file)
+        self.file_menu.addAction(self.new_action)
 
-        self.saveas_button = QPushButton("Save As...")
-        self.saveas_button.setAutoDefault(False)
-        self.saveas_button.clicked.connect(self.save_as_dialog)
-        file_row.addWidget(self.saveas_button)
+        self.open_action = QAction("&Open...", self)
+        self.open_action.setShortcut(QKeySequence.Open)
+        self.open_action.triggered.connect(self.open_file_dialog)
+        self.file_menu.addAction(self.open_action)
 
-        self.undo_button = QPushButton("Undo")
-        self.undo_button.setAutoDefault(False)
-        self.undo_button.setEnabled(False)
-        self.undo_button.clicked.connect(self.undo)
-        file_row.addWidget(self.undo_button)
+        self.file_menu.addSeparator()
 
-        self.undo_action = QAction("Undo", self)
+        self.save_action = QAction("&Save", self)
+        self.save_action.setShortcut(QKeySequence.Save)
+        self.save_action.triggered.connect(lambda: self.save())
+        self.file_menu.addAction(self.save_action)
+
+        self.saveas_action = QAction("Save &As...", self)
+        self.saveas_action.setShortcut(QKeySequence.SaveAs)
+        self.saveas_action.triggered.connect(self.save_as_dialog)
+        self.file_menu.addAction(self.saveas_action)
+
+        self.edit_menu = self.menu_bar.addMenu("&Edit")
+
+        self.undo_action = QAction("&Undo", self)
         self.undo_action.setShortcut(QKeySequence.Undo)
         self.undo_action.setEnabled(False)
         self.undo_action.triggered.connect(self.undo)
-        self.addAction(self.undo_action)
+        self.edit_menu.addAction(self.undo_action)
 
+        self.tools_menu = self.menu_bar.addMenu("&Tools")
+
+        self.convert_to_reference_action = QAction("Convert to Reference position format", self)
+        self.convert_to_reference_action.triggered.connect(self._on_convert_to_reference_clicked)
+        self.tools_menu.addAction(self.convert_to_reference_action)
+
+        self.view_menu = self.menu_bar.addMenu("&View")
+
+        self.preview_action = QAction("Show &Preview", self)
+        self.preview_action.triggered.connect(self._open_preview_window)
+        self.view_menu.addAction(self.preview_action)
+
+        outer_layout.setMenuBar(self.menu_bar)
+
+        # ---------- filename row ----------
+        file_row = QHBoxLayout()
         self.filename_label = QLabel("(no file loaded)")
         # cap the width so a long path can't force the window to grow; the full
         # path is still available as a tooltip and via _set_filename_label()'s eliding
         self.filename_label.setMaximumWidth(400)
         file_row.addWidget(self.filename_label)
         file_row.addStretch()
-
-        self.preview_button = QPushButton("Show Preview")
-        self.preview_button.setAutoDefault(False)
-        self.preview_button.clicked.connect(self._open_preview_window)
-        file_row.addWidget(self.preview_button)
-
         outer_layout.addLayout(file_row)
 
         # ---------- materials / dielectrics / layers tabs ----------
@@ -683,14 +807,19 @@ class StackupEditorWindow(QDialog):
             remove_fn=stackup_writer.remove_dielectric,
             move_fn=stackup_writer.move_dielectric,
             default_attrs_fn=self._default_dielectric_attrs,
-            on_changed=self._on_changed,
+            on_changed=self._on_dielectrics_changed,
             material_choices_fn=self._material_names,
+            reference_choices_fn=self._dielectric_names,
             gray_fn=_dielectric_gray_fn,
             compute_fn=_compute_dielectric_zpositions,
-            # these three drive the resulting-Zmin/Zmax computation and the
-            # absolute-vs-resulting gray-out state, so they must live-refresh
-            reload_on_attr_change={"Thickness", "Zmin", "Zmax"},
+            # these four drive the resulting-Zmin/Zmax computation and the
+            # position-mode gray-out state, so they must live-refresh
+            reload_on_attr_change={"Thickness", "Zmin", "Zmax", "Reference", "ReferenceEdge"},
             pre_set_attr_fn=self._handle_dielectric_thickness_change,
+            header_tooltips={
+                "Zmin": "Absolute position, or offset from Reference if set",
+                "Zmax": "Absolute position, or offset from Reference if set",
+            },
         )
 
         self.layers_editor = ElementTableEditor(
@@ -701,11 +830,16 @@ class StackupEditorWindow(QDialog):
             default_attrs_fn=self._default_layer_attrs,
             on_changed=self._on_changed,
             material_choices_fn=self._material_names,
+            reference_choices_fn=self._reference_target_names,
             type_choices=list(stackup_writer.VALID_LAYER_TYPES),
-            compute_fn=_compute_layer_thickness,
+            compute_fn=self._compute_layer_zpositions_and_thickness,
             gray_fn=_layer_gray_fn,
-            # Thickness is derived from these - must live-refresh when they change
-            reload_on_attr_change={"Zmin", "Zmax"},
+            # Thickness/ResultZmin/ResultZmax are derived from these - must live-refresh
+            reload_on_attr_change={"Zmin", "Zmax", "Reference", "ReferenceEdge"},
+            header_tooltips={
+                "Zmin": "Absolute position, or offset from Reference if set",
+                "Zmax": "Absolute position, or offset from Reference if set",
+            },
         )
 
         layers_tab = QWidget()
@@ -729,6 +863,7 @@ class StackupEditorWindow(QDialog):
             default_attrs_fn=self._default_derived_layer_attrs,
             on_changed=self._on_changed,
             type_choices=list(stackup_writer.VALID_DERIVED_OPERATIONS),
+            operand_lookup_fn=self._layer_name_by_number,
         )
 
         derived_layers_tab = QWidget()
@@ -831,8 +966,8 @@ class StackupEditorWindow(QDialog):
         }
 
     def _handle_dielectric_thickness_change(self, element, attr, new_value):
-        """pre_set_attr_fn for the Dielectrics editor: when a Thickness-stacked
-           (non-absolute) dielectric's Thickness actually changes, its resulting
+        """pre_set_attr_fn for the Dielectrics editor: when a non-absolute (implicit-stacked
+           or Reference-based) dielectric's Thickness actually changes, its resulting
            Zmax moves by the same delta - offer to apply that same delta to
            every drawn Layer whose z-position is affected: layers entirely
            above the (old) Zmax are shifted (Zmin and Zmax both += delta);
@@ -844,7 +979,7 @@ class StackupEditorWindow(QDialog):
            (handled unconditionally, whether or not there were layers to
            adjust / the user accepted).
         """
-        if attr != "Thickness" or self.tree is None or _dielectric_has_absolute(element):
+        if attr != "Thickness" or self.tree is None or _dielectric_position_mode(element) == "absolute":
             return False
 
         old_text = element.get("Thickness")
@@ -899,6 +1034,13 @@ class StackupEditorWindow(QDialog):
         layers_above = []
         layers_straddling = []
         for layer_el in self._layers_container(root):
+            if layer_el.get("Reference"):
+                # Reference-based layers' Zmin/Zmax are offsets from their reference
+                # edge, not positions - adding Offset to them is meaningless, and they
+                # already auto-track this dielectric's new Thickness via
+                # resolve_references() once it's re-run, so this shift/stretch
+                # heuristic must not touch them (that would double-count the movement)
+                continue
             try:
                 layer_zmin = float(layer_el.get("Zmin")) + offset
                 layer_zmax = float(layer_el.get("Zmax")) + offset
@@ -989,6 +1131,46 @@ class StackupEditorWindow(QDialog):
             return []
         return [m.get("Name") for m in self._materials_container(self.tree.getroot()) if m.get("Name")]
 
+    def _layer_names(self):
+        if self.tree is None:
+            return []
+        return [l.get("Name") for l in self._layers_container(self.tree.getroot()) if l.get("Name")]
+
+    def _dielectric_names(self):
+        if self.tree is None:
+            return []
+        return [d.get("Name") for d in self._dielectrics_container(self.tree.getroot()) if d.get("Name")]
+
+    def _layer_name_by_number(self):
+        # for the Derived Layers tab's Operands tooltip: a GDSII layer number used as an
+        # operand doesn't always have a Layers-tab entry (a pure intermediate derived
+        # layer legitimately doesn't need one - see XML_stackup_format.md), so this is a
+        # best-effort lookup, not a complete mapping
+        if self.tree is None:
+            return {}
+        return {l.get("Layer"): l.get("Name") for l in self._layers_container(self.tree.getroot())
+                if l.get("Layer") and l.get("Name")}
+
+    def _reference_target_names(self):
+        # a Layer's Reference choices span two different element containers (unlike
+        # material_choices_fn, which only ever spans Materials); a Dielectric's Reference
+        # is Dielectric-only, so it just uses _dielectric_names() directly (see its wiring
+        # in dielectrics_editor's construction)
+        return self._layer_names() + self._dielectric_names()
+
+    def _compute_layer_zpositions_and_thickness(self, elements):
+        root = self.tree.getroot() if self.tree is not None else None
+        dielectrics_elements = self._dielectrics_container(root) if root is not None else []
+        offset_el = stackup_writer.get_substrate_offset_element(root) if root is not None else None
+        try:
+            offset = float(offset_el.get("Offset")) if offset_el is not None else 0.0
+        except (TypeError, ValueError):
+            offset = 0.0
+        computed = _compute_layer_thickness(elements)
+        for key, values in _compute_layer_zpositions(elements, dielectrics_elements, offset).items():
+            computed.setdefault(key, {}).update(values)
+        return computed
+
     # ---------- container accessors (Element -> list[Element]) ----------
 
     @staticmethod
@@ -1025,6 +1207,8 @@ class StackupEditorWindow(QDialog):
         self.tree = stackup_writer.new_stackup_tree()
         self.current_filename = None
         self._set_filename_label("(new, unsaved)")
+        self._asked_about_implicit_dielectric_references = False
+        self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
@@ -1043,6 +1227,8 @@ class StackupEditorWindow(QDialog):
             return
         self.current_filename = filename
         self._set_filename_label(filename)
+        self._asked_about_implicit_dielectric_references = False
+        self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
@@ -1066,7 +1252,45 @@ class StackupEditorWindow(QDialog):
             return False
         if not self.current_filename:
             return self.save_as_dialog()
+
+        current_schema_version = self.tree.getroot().get("schemaVersion")
+        if self._loaded_schema_version == "2.0" and current_schema_version != "2.0":
+            # a plain Save would silently overwrite the original 2.0-format file on disk
+            # with the newer format (typically right after Convert to Reference position
+            # format bumped it) - ask once, rather than surprise the user
+            choice = self._ask_overwrite_or_save_as(current_schema_version)
+            if choice == "cancel":
+                return False
+            if choice == "save_as":
+                return self.save_as_dialog()
+            # choice == "overwrite": fall through to the normal save below
+
         return self._save_to(self.current_filename)
+
+    def _ask_overwrite_or_save_as(self, current_schema_version):
+        """This file's on-disk schemaVersion is "2.0" but the in-memory content is now a
+           newer format (current_schema_version) - ask whether to overwrite the original
+           file or save the upgraded content to a new file instead.
+        Returns:
+            string: "overwrite", "save_as", or "cancel"
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("File format changed")
+        box.setText(
+            f'This file was loaded as schemaVersion="2.0". Saving now would overwrite it '
+            f'with the newer schemaVersion="{current_schema_version}" format.\n\n'
+            "Overwrite the original file, or save the upgraded version as a new file?")
+        overwrite_btn = box.addButton("Overwrite", QMessageBox.AcceptRole)
+        saveas_btn = box.addButton("Save As...", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(saveas_btn)  # non-destructive default
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is overwrite_btn:
+            return "overwrite"
+        if clicked is saveas_btn:
+            return "save_as"
+        return "cancel"
 
     def save_as_dialog(self):
         if self.tree is None:
@@ -1077,6 +1301,58 @@ class StackupEditorWindow(QDialog):
             return False
         return self._save_to(filename)
 
+    def _compute_auto_dielectric_references(self, dielectrics_elements):
+        """Returns {dielectric name: (reference, reference_edge)} for dielectrics that would
+           get a Reference auto-assigned from implicit (Thickness-only) stacking - see
+           util_stackup_reader.dielectric_layers_list._assign_implicit_references(). Empty
+           (not an error) if the current data can't be resolved yet.
+        """
+        try:
+            dielectrics_list = stackup_reader.dielectric_layers_list()
+            for element in dielectrics_elements:
+                dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+            dielectrics_list.calculate_zpositions()
+        except (Exception, SystemExit):
+            return {}
+        return {
+            dielectric.name: (dielectric.reference, dielectric.reference_edge)
+            for dielectric in dielectrics_list.dielectrics
+            if dielectric.reference_is_auto
+        }
+
+    def _maybe_offer_explicit_dielectric_references(self, root):
+        """Called once per file per editing session, right before Save actually writes the
+           file: if any Dielectric would get a Reference auto-assigned from implicit
+           Thickness-stacking, ask once whether to write it into the XML now - purely
+           cosmetic/documentary, the computed z-positions are identical either way.
+        """
+        if self._asked_about_implicit_dielectric_references:
+            return
+        self._asked_about_implicit_dielectric_references = True
+
+        dielectrics_elements = self._dielectrics_container(root)
+        auto_refs = self._compute_auto_dielectric_references(dielectrics_elements)
+        if not auto_refs:
+            return
+
+        names = ", ".join(auto_refs.keys())
+        reply = QMessageBox.question(
+            self, "Make implicit dielectric stacking explicit?",
+            "These dielectrics use implicit (Thickness-based) stacking, which can now be "
+            f"recorded explicitly with Reference:\n\n{names}\n\n"
+            "Add Reference/ReferenceEdge attributes to these dielectrics now? Their computed "
+            "position stays exactly the same either way - this is asked only once per file.",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            for element in dielectrics_elements:
+                name = element.get("Name")
+                if name in auto_refs:
+                    reference, reference_edge = auto_refs[name]
+                    element.set("Reference", reference)
+                    element.set("ReferenceEdge", reference_edge)
+            self.dielectrics_editor.reload()
+            self.layers_editor.reload()
+
     def _save_to(self, filename):
         root = self.tree.getroot()
         errors = stackup_writer.validate_stackup(root)
@@ -1085,6 +1361,8 @@ class StackupEditorWindow(QDialog):
                 self, "Cannot save - validation errors",
                 "Fix these problems before saving:\n\n" + "\n".join(f"- {e}" for e in errors))
             return False
+
+        self._maybe_offer_explicit_dielectric_references(root)
 
         app_name = getattr(self.MainWindow, "APP_NAME", "setupEM")
         stackup_writer.stamp_header_comments(root, app_name, self.description_edit.toPlainText())
@@ -1097,6 +1375,9 @@ class StackupEditorWindow(QDialog):
 
         self.current_filename = filename
         self._set_filename_label(filename)
+        # reflects what's now actually on disk, so save() only asks about a format
+        # upgrade again if the version changes further from here, not on every save
+        self._loaded_schema_version = root.get("schemaVersion")
 
         saved_values = getattr(self.MainWindow, "saved_values", {}) or {}
         substrate_file = saved_values.get("SubstrateFile")
@@ -1140,6 +1421,24 @@ class StackupEditorWindow(QDialog):
             old_value = float(old_offset_el.get("Offset")) if old_offset_el is not None else 0.0
         except (TypeError, ValueError):
             old_value = 0.0
+
+        if value != 0:
+            # UX improvement layered on top of the authoritative check in
+            # validate_stackup() (also catches the case where Reference is added to a
+            # layer after a nonzero offset already exists) - catch it here too, before
+            # Save-time, since this is the point where the user is actually setting it
+            referenced_layer_names = [layer_el.get("Name") or "<unnamed>"
+                                       for layer_el in self._layers_container(root) if layer_el.get("Reference")]
+            if referenced_layer_names:
+                QMessageBox.warning(
+                    self, "Cannot set Substrate Offset",
+                    "Substrate Offset cannot be combined with Reference-based Layer "
+                    "positioning (it would be ambiguous whether the offset applies "
+                    "before or after Reference resolution). Layers using Reference:\n\n"
+                    + "\n".join(referenced_layer_names))
+                self.offset_edit.setText(old_offset_el.get("Offset") if old_offset_el is not None else "0")
+                return
+
         delta = value - old_value
 
         stackup_writer.set_substrate_offset(root, value)
@@ -1171,6 +1470,176 @@ class StackupEditorWindow(QDialog):
 
         self._on_changed(structural=True)
 
+    # ---------- convert to Reference position format ----------
+
+    def _on_convert_to_reference_clicked(self):
+        if self.tree is None:
+            return
+        root = self.tree.getroot()
+
+        offset_el = stackup_writer.get_substrate_offset_element(root)
+        try:
+            offset = float(offset_el.get("Offset")) if offset_el is not None else 0.0
+        except (TypeError, ValueError):
+            offset = 0.0
+
+        message = (
+            "Convert this stackup to Reference-relative positioning?\n\n"
+            "Every Dielectric and Layer not already using Reference will be repositioned "
+            "relative to the nearest thing below it (a Dielectric's Bottom edge, or another "
+            "Layer's Top edge) instead of an absolute z-position. Resulting absolute "
+            "positions stay exactly the same.")
+        if offset:
+            message += (
+                f"\n\nSubstrate Offset is currently {offset:g} - Reference-based Layer "
+                "positioning requires it to be 0, so as a first step it will be folded into "
+                "every Layer's own Zmin/Zmax and then removed.")
+
+        reply = QMessageBox.question(self, "Convert to Reference position format", message,
+                                      QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            self._convert_to_reference_format()
+        except (Exception, SystemExit) as e:
+            QMessageBox.warning(self, "Conversion failed",
+                                 f"Could not convert - current stackup could not be fully "
+                                 f"resolved:\n{e}")
+            return
+
+        self._reload_all_editors()
+        self._on_changed(structural=True)
+
+    def _convert_to_reference_format(self):
+        """Rewrites every Dielectric/Layer that isn't already Reference-based to use
+           Reference instead of an absolute z-position, bumps schemaVersion to "3.0", and
+           stamps a comment noting the minimum gds2palace reader version needed to read the
+           result back (see stamp_reference_format_comment()). First folds a nonzero
+           <Substrate Offset> into the Layers' own absolute Zmin/Zmax and removes it, since
+           Reference-based Layers and a nonzero Offset are mutually exclusive (see
+           validate_stackup()).
+        """
+        root = self.tree.getroot()
+
+        offset_el = stackup_writer.get_substrate_offset_element(root)
+        try:
+            offset = float(offset_el.get("Offset")) if offset_el is not None else 0.0
+        except (TypeError, ValueError):
+            offset = 0.0
+        if offset:
+            for layer_el in self._layers_container(root):
+                if layer_el.get("Reference"):
+                    continue  # already Reference-based, never was in the +Offset frame
+                try:
+                    zmin = float(layer_el.get("Zmin"))
+                    zmax = float(layer_el.get("Zmax"))
+                except (TypeError, ValueError):
+                    continue
+                layer_el.set("Zmin", f"{zmin + offset:.4f}")
+                layer_el.set("Zmax", f"{zmax + offset:.4f}")
+            stackup_writer.set_substrate_offset(root, 0)
+
+        # Resolve concrete absolute positions for everything exactly as the reader would,
+        # now that Layers are offset-free - this is the ground truth the new Reference
+        # attributes get derived from, computed once up front rather than incrementally,
+        # so conversion order doesn't matter and there's no risk of compounding rounding.
+        materials_list, dielectrics_list, metals_list = stackup_reader.parse_substrate(root)
+
+        dielectric_elements = {d.get("Name"): d for d in self._dielectrics_container(root)}
+        for dielectric in dielectrics_list.dielectrics:
+            element = dielectric_elements.get(dielectric.name)
+            if element is None or element.get("Reference"):
+                continue  # already Reference-based - leave untouched
+            candidate = self._nearest_reference_candidate(
+                dielectric.zmin, dielectric.name, dielectrics_list.dielectrics, [],
+                fallback_to_lowest_dielectric=False)
+            if candidate is None:
+                continue  # nothing below it - stays the natural implicit anchor at z=0
+            candidate_name, candidate_edge, candidate_z = candidate
+
+            offset_zmin = dielectric.zmin - candidate_z
+            if abs(offset_zmin) > 1e-6:
+                element.set("Zmin", f"{offset_zmin:.4f}")
+            elif "Zmin" in element.attrib:
+                del element.attrib["Zmin"]
+            if "Zmax" in element.attrib:
+                # Reference mode sizes from Thickness by default; a leftover absolute Zmax
+                # would instead override that as an explicit offset - always wrong here
+                del element.attrib["Zmax"]
+            if "Thickness" not in element.attrib:
+                element.set("Thickness", f"{dielectric.thickness:.4f}")
+            element.set("Reference", candidate_name)
+            element.set("ReferenceEdge", candidate_edge)
+
+        layer_elements = {l.get("Name"): l for l in self._layers_container(root)}
+        for metal in metals_list.metals:
+            element = layer_elements.get(metal.name)
+            if element is None or element.get("Reference"):
+                continue  # already Reference-based - leave untouched
+            candidate = self._nearest_reference_candidate(
+                metal.zmin, metal.name, dielectrics_list.dielectrics, metals_list.metals,
+                fallback_to_lowest_dielectric=True)
+            if candidate is None:
+                continue  # no dielectric in the file at all - nothing sensible to reference
+            candidate_name, candidate_edge, candidate_z = candidate
+
+            element.set("Zmin", f"{metal.zmin - candidate_z:.4f}")
+            element.set("Zmax", f"{metal.zmax - candidate_z:.4f}")
+            element.set("Reference", candidate_name)
+            element.set("ReferenceEdge", candidate_edge)
+
+        root.set("schemaVersion", "3.0")
+        stackup_writer.stamp_reference_format_comment(root, stackup_reader.__version__)
+
+    @staticmethod
+    def _nearest_reference_candidate(zmin, exclude_name, dielectrics, metals, fallback_to_lowest_dielectric):
+        """Find the best Reference target for an element positioned at `zmin`: among every
+           other Dielectric's Top and Bottom edge, and every Layer's Top edge, the one with
+           the largest z that is still at or below `zmin` - i.e. the nearest thing below,
+           whether touching (gap 0) or not (e.g. a capacitor plate floating a small distance
+           above the metal below it). Both Dielectric edges are real candidates for different
+           reasons: another Dielectric's Top is where one stacks directly on the one below;
+           a Dielectric's own Bottom is where the lowest Layer *inside* it naturally sits.
+           `metals` should be [] when converting a Dielectric (Reference on a Dielectric can
+           only target another Dielectric, never a Layer). Dielectrics are checked before
+           metals, so an exact tie (both at the same z) prefers the Dielectric - more
+           fundamental/stable a target than an individual Layer.
+        Args:
+            zmin (float): the element's own resolved absolute Zmin
+            exclude_name (string): don't consider a candidate with this name (self)
+            dielectrics (list of dielectric_layer): candidate Dielectric Top/Bottom edges
+            metals (list of metal_layer): candidate Layer Top edges
+            fallback_to_lowest_dielectric (bool): if no candidate qualifies (this element
+                is the lowest thing in the whole stack), fall back to the lowest Dielectric's
+                Bottom edge with whatever (possibly negative) offset that implies - used for
+                Layers (e.g. a backside ground plane below the substrate); Dielectrics have
+                no such fallback, since there both being asked here is what defines "lowest"
+        Returns:
+            (name, edge, z) of the chosen candidate, or None if there isn't one
+        """
+        epsilon = 1e-5
+        best = None  # (z, name, edge)
+        for dielectric in dielectrics:
+            if dielectric.name == exclude_name:
+                continue
+            for edge, z in (("Top", dielectric.zmax), ("Bottom", dielectric.zmin)):
+                if z <= zmin + epsilon and (best is None or z > best[0]):
+                    best = (z, dielectric.name, edge)
+        for metal in metals:
+            if metal.name == exclude_name:
+                continue
+            z = metal.zmax
+            if z <= zmin + epsilon and (best is None or z > best[0]):
+                best = (z, metal.name, "Top")
+
+        if best is not None:
+            return best[1], best[2], best[0]
+        if fallback_to_lowest_dielectric and dielectrics:
+            lowest = min(dielectrics, key=lambda d: d.zmin)
+            return lowest.name, "Bottom", lowest.zmin
+        return None
+
     # ---------- file description ----------
 
     def _on_description_edited(self):
@@ -1191,6 +1660,13 @@ class StackupEditorWindow(QDialog):
         # material names may have changed (add/remove/rename) - refresh the
         # Material-reference dropdowns shown in the Dielectrics/Layers tabs
         self.dielectrics_editor.reload()
+        self.layers_editor.reload()
+        self._on_changed(structural=structural)
+
+    def _on_dielectrics_changed(self, structural=False):
+        # a Dielectric's Thickness/Zmin/Zmax/Name may have changed (add/remove/reorder
+        # too) - the Layers tab's ResultZmin/ResultZmax and its Reference dropdown
+        # choices both depend on the current Dielectrics tab state, so refresh it too
         self.layers_editor.reload()
         self._on_changed(structural=structural)
 
@@ -1231,7 +1707,6 @@ class StackupEditorWindow(QDialog):
         self._set_undo_available(self._undo_snapshot is not None)
 
     def _set_undo_available(self, enabled):
-        self.undo_button.setEnabled(enabled)
         self.undo_action.setEnabled(enabled)
 
     def undo(self):

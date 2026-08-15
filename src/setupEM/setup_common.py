@@ -41,9 +41,9 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QLineEdit, QComboBox,
     QPushButton, QFileDialog, QMessageBox, QGroupBox,
-    QCheckBox, QPlainTextEdit, QDialog, QSizePolicy
+    QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame
     )
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QSyntaxHighlighter, QPainter, QPen
+from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen
 from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QTimer
 
 # we expect gds2palace in the same directory as this code, or installed as module
@@ -334,10 +334,19 @@ class FileInputTab(QWidget):
         self.XML_description_container = QWidget()
         self.XML_description_layout = QHBoxLayout()
         self.XML_description_layout.setContentsMargins(0, 0, 0, 0)
-        self.XML_description_label = QLabel("")
-        self.XML_description_label.setWordWrap(True)
-        self.XML_description_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.XML_description_label.setStyleSheet("color: #666666; font-style: italic;")
+        # QPlainTextEdit instead of a plain QLabel: a QLabel has no cap on how tall
+        # word-wrap can grow it, so a long description silently stretched the whole
+        # window taller. This wraps/scrolls within a fixed ~10-line height instead,
+        # styled to still read as a plain label (no frame, no editable background).
+        self.XML_description_label = QPlainTextEdit("")
+        self.XML_description_label.setReadOnly(True)
+        self.XML_description_label.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.XML_description_label.setFrameStyle(QFrame.NoFrame)
+        self.XML_description_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.XML_description_label.setStyleSheet(
+            "color: #666666; font-style: italic; background: transparent;")
+        _description_line_height = QFontMetrics(self.XML_description_label.font()).lineSpacing()
+        self.XML_description_label.setFixedHeight(_description_line_height * 10 + 6)
         self.XML_description_layout.addWidget(self.XML_description_label)
         self.XML_description_spacer = QWidget()
         self.XML_description_spacer.setFixedWidth(self.browse_XML_btn.width())
@@ -414,7 +423,7 @@ class FileInputTab(QWidget):
         # collapse any line breaks from the file itself - wrapping here is purely
         # width-driven (setWordWrap), not a reflow of the author's original lines
         description = " ".join(stackup_reader.read_file_description(filename).split())
-        self.XML_description_label.setText(description)
+        self.XML_description_label.setPlainText(description)
         self.XML_description_container.setVisible(bool(description))
 
     def load_values(self):
