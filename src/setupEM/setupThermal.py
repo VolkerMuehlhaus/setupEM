@@ -33,8 +33,15 @@ from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QSyntaxHighli
 from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths
 
 
-# we expect gds2palace in the same directory as this code, or installed as module
-# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'gds2palace')))
+# Local dev: if the gds2palace_ihp_sg13g2 fork is checked out as a sibling repo next to
+# this one (.../setupEM and .../gds2palace_ihp_sg13g2 sharing a parent directory), prefer
+# its workflow/gds2palace over any pip-installed gds2palace, so local fork changes are
+# picked up without a separate editable install. No-op (falls through to the installed
+# module) if that sibling checkout isn't present.
+_dev_gds2palace_dir = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', '..', '..', 'gds2palace_ihp_sg13g2', 'workflow'))
+if os.path.isdir(os.path.join(_dev_gds2palace_dir, 'gds2palace')):
+    sys.path.insert(0, _dev_gds2palace_dir)
 from gds2palace import *
 
 # shared building blocks used by both setupEM.py and setupThermal.py
