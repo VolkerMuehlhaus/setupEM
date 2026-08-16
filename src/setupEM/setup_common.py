@@ -57,15 +57,18 @@ from gds2palace import *
 # by capability (not __version__ string matching, which is easy to drift out of
 # sync) so the app degrades exactly as far as it needs to and no further, rather
 # than crashing the moment a missing symbol is touched.
+#
+# The stackup writer (edit/save/validate) itself lives in setupEM now, not
+# gds2palace - it has no installed-version dependency, so there is nothing left
+# to detect for it here. Only parse_substrate()/read_file_description() (genuine
+# gds2palace-reader capabilities) still need a version guard.
 # ------------------------------------------------------------------
-GDS2PALACE_HAS_STACKUP_WRITER = hasattr(gds2palace, "stackup_writer")
 GDS2PALACE_HAS_PARSE_SUBSTRATE = hasattr(stackup_reader, "parse_substrate")
 GDS2PALACE_HAS_FILE_DESCRIPTION = hasattr(stackup_reader, "read_file_description")
 
-# Tools > Edit Stackup XML... needs both the writer module and parse_substrate()
-# (used for its live preview refresh); the Input Files tab's description display
-# only needs the reader-side lookup.
-GDS2PALACE_SUPPORTS_STACKUP_EDITOR = GDS2PALACE_HAS_STACKUP_WRITER and GDS2PALACE_HAS_PARSE_SUBSTRATE
+# Tools > Edit Stackup XML... needs parse_substrate() (used for its live preview
+# refresh); the Input Files tab's description display only needs the reader-side lookup.
+GDS2PALACE_SUPPORTS_STACKUP_EDITOR = GDS2PALACE_HAS_PARSE_SUBSTRATE
 GDS2PALACE_SUPPORTS_FILE_DESCRIPTION = GDS2PALACE_HAS_FILE_DESCRIPTION
 GDS2PALACE_OUTDATED = not (GDS2PALACE_SUPPORTS_STACKUP_EDITOR and GDS2PALACE_SUPPORTS_FILE_DESCRIPTION)
 
@@ -790,7 +793,15 @@ class VectorWidget(QWidget):
                         # place text for distance to dielectric boundary
 
                         painter.setPen(penBlack)
-                        dz = dielectric.zmax - metal.zmax
+                        # a metal is registered "inside" a dielectric by its zmin alone
+                        # (see util_stackup_reader.register_metals_inside()) - its zmax
+                        # can legitimately extend past that dielectric's own zmax into
+                        # the one(s) above (e.g. a thick metal sitting in a very thin
+                        # dielectric slab), which would otherwise show as a negative,
+                        # confusingly-worded "distance to the boundary above". Floor at
+                        # 0 - the metal is still drawn at its correct position/height,
+                        # this only affects this one label.
+                        dz = max(0.0, dielectric.zmax - metal.zmax)
                         if dz > 10:
                             heightstring = f'{dz:.1f}µm'
                         else:
@@ -815,7 +826,16 @@ class VectorWidget(QWidget):
             idx = np.argsort(stored_z)
             y_sorted = stored_y[idx]
             z_sorted = stored_z[idx]
-            z_to_y = interp1d(z_sorted, y_sorted, kind='cubic', fill_value='extrapolate')
+            # linear, not cubic: the z->y mapping is a layout position (screen height
+            # per dielectric is set by how many metals are stacked inside it, not by
+            # its physical thickness), so slope can change drastically between
+            # consecutive stored points - e.g. a thick, metal-free substrate maps to
+            # almost no screen height while a thin, via-packed dielectric maps to a
+            # lot. A cubic spline through data like that readily overshoots (Runge's
+            # phenomenon), and with fill_value='extrapolate' that overshoot is
+            # unbounded - enough to overflow the int coordinates drawRect() needs
+            # below. Linear interpolation/extrapolation is bounded by construction.
+            z_to_y = interp1d(z_sorted, y_sorted, kind='linear', fill_value='extrapolate')
 
             # next we draw the vias, based on the screen position of metals that we have stored
             # via position alternates between 3 positions along x axis

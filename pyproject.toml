@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "setupEM"
-version = "0.3.5"
+version = "0.3.9"
 description = "Python tool for configuration of gds2palace workflow with GUI."
 readme = "README.md"
 authors = [
     { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
 ]
 dependencies = [
-    "gds2palace>=0.3.3",
+    "gds2palace>=0.3.4",
     "PySide6",
     "scipy",
     "requests",
