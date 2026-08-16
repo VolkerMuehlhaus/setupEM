@@ -84,6 +84,14 @@ class LayerEntry:
 
 
 @dataclass
+class DerivedLayerEntry:
+  name: str
+  target_gds_layer: str
+  operation: str  # "AND", "OR", "XOR", or "NOT"
+  operand_gds_layers: list
+
+
+@dataclass
 class ImportResult:
   tree: ET.ElementTree
   warnings: list = field(default_factory=list)
@@ -144,16 +152,17 @@ def _find_majority_suffix(names, min_count):
   return best_suffix if best_count > min_count else ""
 
 
-def _strip_common_material_suffix(materials, slabs, layers, warnings):
+def _strip_common_material_suffix(materials, slabs, layers, warnings, derived_layers=None):
   """If a suffix is shared by more than _SUFFIX_STRIP_MIN_COUNT of the file's material,
-     Layer, and Dielectric names combined, strips it from every name (in any of those
-     three) that has it - not requiring universal agreement, so a handful of names
-     outside the convention (see _SUFFIX_STRIP_MIN_COUNT) don't block cleanup of the
-     rest. Layer/Dielectric names are stripped unconditionally once found (validate_
-     stackup()'s existing name-uniqueness enforcement is relied on further downstream -
-     see _dedup_names() - to resolve any collision this creates); Material renames are
-     more conservative, since materials have no such dedup safety net, so the whole
-     operation is abandoned if it would empty out or collide a Material name.
+     Layer, Dielectric, and DerivedLayer names combined, strips it from every name (in
+     any of those) that has it - not requiring universal agreement, so a handful of
+     names outside the convention (see _SUFFIX_STRIP_MIN_COUNT) don't block cleanup of
+     the rest. Layer/Dielectric/DerivedLayer names are stripped unconditionally once
+     found (validate_stackup()'s existing name-uniqueness enforcement is relied on
+     further downstream - see _dedup_names() - to resolve any collision this creates);
+     Material renames are more conservative, since materials have no such dedup safety
+     net, so the whole operation is abandoned if it would empty out or collide a
+     Material name.
 
      _GROUND_PLANE_NAME and "AIR" are always excluded, whether they came from the source
      file or were defaulted by this importer: both are boundary/placeholder materials,
@@ -164,6 +173,7 @@ def _strip_common_material_suffix(materials, slabs, layers, warnings):
   candidate_names = set(materials) - {_GROUND_PLANE_NAME, "AIR"}
   candidate_names |= {l.name for l in layers}
   candidate_names |= {s.material_name for s in slabs}
+  candidate_names |= {d.name for d in derived_layers or []}
 
   suffix = _find_majority_suffix(candidate_names, _SUFFIX_STRIP_MIN_COUNT)
   if not suffix:
@@ -194,6 +204,9 @@ def _strip_common_material_suffix(materials, slabs, layers, warnings):
     layer.name = strip(layer.name)
     if layer.material_name in material_renames:
       layer.material_name = material_renames[layer.material_name]
+
+  for derived in derived_layers or []:
+    derived.name = strip(derived.name)
 
   warnings.append(
       f"Stripped common name suffix '{suffix}' (shared by more than "
@@ -243,7 +256,7 @@ def _add_material_element(root, spec):
   stackup_writer.add_material(root, **attrs)
 
 
-def _build_tree(slabs, layers, materials, warnings):
+def _build_tree(slabs, layers, materials, warnings, derived_layers=None):
   """The core shared by both formats: everything downstream of "a bottom-to-top list of
      dielectric slabs, all with real positive thickness (including an already-sized top
      AIR slab), plus a list of metal/via Layer entries with absolute Zmin/Zmax already
@@ -253,6 +266,8 @@ def _build_tree(slabs, layers, materials, warnings):
       layers (list of LayerEntry): zmin/zmax in the same frame as slabs, mutated in place
       materials (dict): name -> MaterialSpec
       warnings (list of str): appended to in place
+      derived_layers (list of DerivedLayerEntry or None): only *.ltd's DERIVEDMASK
+        sections produce these; *.subst has no equivalent concept
   Returns:
       xml.etree.ElementTree.ElementTree
   """
@@ -329,6 +344,12 @@ def _build_tree(slabs, layers, materials, warnings):
     layer_type = "sheet" if is_sheet else ("via" if l.kind == "via" else "conductor")
     stackup_writer.add_layer(root, Name=name, Type=layer_type, Material=l.material_name,
                               Zmin=f"{zmin:.4f}", Zmax=f"{zmax:.4f}", Layer=l.gds_layer)
+
+  derived_names = _dedup_names([d.name for d in derived_layers]) if derived_layers else []
+  for name, derived in zip(derived_names, derived_layers or []):
+    el = stackup_writer.add_derived_layer(root, Name=name, Layer=derived.target_gds_layer,
+                                           Operation=derived.operation)
+    stackup_writer.set_operands(el, derived.operand_gds_layers)
 
   errors = stackup_writer.validate_stackup(root)
   if errors:
@@ -531,11 +552,18 @@ def import_subst(subst_path, matdb_path, air_thickness_um):
 
 # -------------------- *.ltd --------------------
 
-_KV_RE = re.compile(r'(\w+)=("[^"]*"|\S+)')
+_KV_RE = re.compile(r'(\w+)\s*=\s*("[^"]*"|\S+)')
+_MASK_BRACE_RE = re.compile(r'MASK\s*=\s*\{([^}]*)\}')
 
 
 def _ltd_kv(line):
-  return {key: value.strip('"') for key, value in _KV_RE.findall(line)}
+  """Parses "KEY=value" / "KEY = value" / "KEY="quoted value"" tokens from a *.ltd line
+     into a dict keyed by UPPERCASED attribute name. Real exports vary both in whether
+     '=' has surrounding whitespace and in attribute name case (seen "Name="/"NAME=" for
+     the very same attribute in two real files from the same PDK, exported by different
+     ADS versions) - lookups here must be case-insensitive to be reliable.
+  """
+  return {key.upper(): value.strip('"') for key, value in _KV_RE.findall(line)}
 
 
 def _split_ltd_sections(text):
@@ -561,6 +589,19 @@ def _split_ltd_sections(text):
   return sections
 
 
+def _resolve_mask_token(token, masks, masks_by_layer):
+  """A MASK={...} entry's members (in BEGIN_STACK or a DERIVEDMASK definition) can be
+     given as mask Names or as bare GDS layer numbers - both seen in real exports of the
+     same PDK from different ADS versions. Tries a Name match first, falls back to a
+     layer-number match.
+  Returns:
+      dict or None: the resolved mask's own dict from `masks`, or None if neither matches
+  """
+  if token in masks:
+    return masks[token]
+  return masks_by_layer.get(token)
+
+
 def _parse_ltd(ltd_path, air_thickness_um, warnings):
   with open(ltd_path, encoding="utf-8") as f:
     text = f.read()
@@ -573,6 +614,13 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
       warnings.append(f"*.ltd declares {line} - this importer assumes OHM.CM, semiconductor conductivity may be wrong")
 
   materials = {}
+  # RESISTANCE= (Ohm/Sq) can't be classified from the MATERIAL line alone: a real GPDK
+  # export uses it both for genuine zero-thickness sheet resistors AND for ordinary
+  # conductors that still get real 3D thickness via an INTRUDE/EXPAND operation (e.g. a
+  # "Poly" resistor layer vs. a "Metal1" that just happens to express its conductivity as
+  # a sheet-resistance-equivalent instead of CONDUCTIVITY). Deferred to a second pass
+  # below, once every material's actual Layer thickness is known.
+  pending_rs = {}
   for line in sections.get("MATERIAL", []):
     tokens = line.split()
     if len(tokens) < 2:
@@ -585,7 +633,8 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
     resistivity = kv.get("RESISTIVITY")
     loss_tangent = kv.get("LOSSTANGENT")
     if resistance is not None:
-      materials[name] = MaterialSpec(name=name, kind="sheet_resistor", rs=float(resistance))
+      pending_rs[name] = float(resistance)
+      materials[name] = MaterialSpec(name=name, kind="conductor", conductivity=0.0)
     elif conductivity is not None:
       materials[name] = MaterialSpec(name=name, kind="conductor", conductivity=float(conductivity))
     elif permittivity is not None and resistivity is not None:
@@ -609,29 +658,87 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
     kv = _ltd_kv(line)
     if "DRILL" in tokens:
       operations[name] = ("via", None)
-    elif "INTRUDE" in kv:
-      operations[name] = ("metal", float(kv["INTRUDE"]) * 1e6)  # meters -> micron
+    elif "INTRUDE" in kv or "EXPAND" in kv:
+      # both give a thickness in meters; DOWN (vs. the default UP) means this metal
+      # grows downward from its interface into the slab below - same concept *.subst
+      # expresses via a negative thick value, here via an explicit direction token
+      magnitude_um = float(kv.get("INTRUDE") or kv.get("EXPAND")) * 1e6
+      thickness_um = -magnitude_um if "DOWN" in tokens else magnitude_um
+      operations[name] = ("metal", thickness_um)
     elif "SHEET" in tokens:
       operations[name] = ("sheet", None)
+    elif "WALL" in tokens:
+      operations[name] = ("wall", None)
     else:
       warnings.append(f"Operation '{name}': could not classify from '{line}'")
 
   masks = {}
+  masks_by_layer = {}
   for line in sections.get("MASK", []):
     tokens = line.split()
     if len(tokens) < 2:
       continue
     gds_layer = tokens[1]
     kv = _ltd_kv(line)
-    name = kv.get("Name")
+    name = kv.get("NAME")
     if name is None:
       continue
     masks[name] = {
+        "name": name,
         "gds_layer": gds_layer,
         "material": kv.get("MATERIAL"),
         "operation": kv.get("OPERATION"),
         "color": kv.get("COLOR", ""),
+        "derivedmask": kv.get("DERIVEDMASK"),
     }
+    masks_by_layer[gds_layer] = masks[name]
+
+  derived_masks = {}
+  for line in sections.get("DERIVEDMASK", []):
+    tokens = line.split()
+    if len(tokens) < 2:
+      continue
+    name = tokens[1]
+    kv = _ltd_kv(line)
+    operator = kv.get("OPERATOR")
+    mask_match = _MASK_BRACE_RE.search(line)
+    operands = mask_match.group(1).split() if mask_match else []
+    derived_masks[name] = (operator, operands)
+
+  # build <DerivedLayer> entries: one per BEGIN_MASK entry that references a
+  # BEGIN_DERIVEDMASK definition via DERIVEDMASK=... - the mask's own gds_layer is the
+  # DerivedLayer's target Layer number; its DERIVEDMASK's OPERATOR/MASK={...} give the
+  # Operation and Operands (each operand resolved the same Name-or-layer-number way as
+  # any other MASK={...} reference). The mask itself also gets a normal <Layer> entry
+  # further below (it's still placed in BEGIN_STACK like any other via/metal) - nothing
+  # special needed for that here.
+  derived_layers = []
+  for mask_name, mask in masks.items():
+    dm_name = mask["derivedmask"]
+    if not dm_name:
+      continue
+    dm = derived_masks.get(dm_name)
+    if dm is None:
+      warnings.append(f"Mask '{mask_name}' references DERIVEDMASK '{dm_name}' which is not "
+                       f"defined in BEGIN_DERIVEDMASK, skipped")
+      continue
+    operator, operand_tokens = dm
+    if operator not in ("AND", "OR", "XOR", "NOT"):
+      warnings.append(f"DerivedMask '{dm_name}': unsupported OPERATOR '{operator}', skipped")
+      continue
+    operand_layers = []
+    unresolved = False
+    for token in operand_tokens:
+      operand_mask = _resolve_mask_token(token, masks, masks_by_layer)
+      if operand_mask is None:
+        warnings.append(f"DerivedMask '{dm_name}': operand '{token}' matches no mask Name "
+                         f"or GDS layer number, skipped")
+        unresolved = True
+        break
+      operand_layers.append(operand_mask["gds_layer"])
+    if not unresolved:
+      derived_layers.append(DerivedLayerEntry(name=mask_name, target_gds_layer=mask["gds_layer"],
+                                               operation=operator, operand_gds_layers=operand_layers))
 
   stack_lines = sections.get("STACK", [])
   slabs = []
@@ -646,6 +753,7 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
   spans = {}  # mask name -> [material_name, kind, gds_layer, zmin, zmax]
   z = 0.0
   groundplane_detected = False
+  bottom_state = None
 
   for line in reversed(stack_lines):
     tokens = line.split()
@@ -655,12 +763,12 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
     kv = _ltd_kv(line)
 
     if keyword == "BOTTOM":
-      state = tokens[1].upper() if len(tokens) > 1 else ""
-      if state == "COVERED":
-        # BOTTOM is always the first line seen here (it's the last line in the file,
-        # and this loop walks in reverse) - z is still untouched at 0.0, so starting
-        # it at the ground plane's thickness instead shifts every subsequent slab/
-        # metal/via z by the same amount the plane itself will occupy below them
+      # BOTTOM is always the first line seen here (it's the last line in the file, and
+      # this loop walks in reverse) - z is still untouched at 0.0, so starting it at the
+      # ground plane's thickness instead shifts every subsequent slab/metal/via z by the
+      # same amount the plane itself will occupy below them
+      bottom_state = tokens[1].upper() if len(tokens) > 1 else ""
+      if bottom_state == "COVERED":
         groundplane_detected = True
         z = _GROUND_PLANE_THICKNESS_UM
       continue
@@ -688,13 +796,14 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
       z += thickness_um
       slabs.append(DielectricSlab(material_name, thickness_um))
 
-      mask_match = re.search(r'MASK=\{([^}]*)\}', line)
+      mask_match = _MASK_BRACE_RE.search(line)
       if mask_match:
-        for via_mask_name in mask_match.group(1).split():
-          mask = masks.get(via_mask_name)
+        for token in mask_match.group(1).split():
+          mask = _resolve_mask_token(token, masks, masks_by_layer)
           if mask is None:
-            warnings.append(f"Mask '{via_mask_name}' referenced in stack but not defined in BEGIN_MASK, skipped")
+            warnings.append(f"Mask '{token}' referenced in stack but not defined in BEGIN_MASK, skipped")
             continue
+          via_mask_name = mask["name"]
           op = operations.get(mask["operation"])
           if op is None or op[0] != "via":
             warnings.append(f"Mask '{via_mask_name}' is attached to a dielectric LAYER line but its "
@@ -713,22 +822,40 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
       continue
 
     if keyword == "INTERFACE":
-      mask_match = re.search(r'MASK=\{([^}]*)\}', line)
+      # SHIELD=... is an alternative way (seen in a real export, paired with "BOTTOM
+      # OPEN" instead of "BOTTOM COVERED") to mark a backside ground plane, positioned
+      # at a specific INTERFACE rather than as the stack's own bottom boundary. Only
+      # treated as equivalent to a covered bottom when it's genuinely at (or extremely
+      # near) the true bottom of the stack (z still ~0 at this point in the bottom-up
+      # walk) - a mid-stack shield has no verified real-world example to model
+      # correctly against, so it's surfaced as a warning instead of guessed at.
+      shield = kv.get("SHIELD")
+      if shield:
+        if z < _EPSILON_UM:
+          groundplane_detected = True
+        else:
+          warnings.append(
+              f"Shield/ground plane (SHIELD={shield}) detected mid-stack (not at the "
+              f"bottom) - has no GDSII layer number and was not modeled; add manually if needed.")
+        continue
+
+      mask_match = _MASK_BRACE_RE.search(line)
       if not mask_match:
         continue
-      for metal_mask_name in mask_match.group(1).split():
-        mask = masks.get(metal_mask_name)
+      for token in mask_match.group(1).split():
+        mask = _resolve_mask_token(token, masks, masks_by_layer)
         if mask is None:
-          warnings.append(f"Mask '{metal_mask_name}' referenced in stack but not defined in BEGIN_MASK, skipped")
+          warnings.append(f"Mask '{token}' referenced in stack but not defined in BEGIN_MASK, skipped")
           continue
+        metal_mask_name = mask["name"]
         op = operations.get(mask["operation"])
         if op is None or op[0] == "via":
           warnings.append(f"Mask '{metal_mask_name}' is attached to an INTERFACE line but its "
                            f"operation is DRILL - expected a metal, skipped")
           continue
-        if op[0] == "sheet":
-          warnings.append(f"Mask '{metal_mask_name}' uses a SHEET operation with no thickness "
-                           f"defined - skipped, add manually if needed")
+        if op[0] in ("sheet", "wall"):
+          warnings.append(f"Mask '{metal_mask_name}' uses a {op[0].upper()} operation with no "
+                           f"thickness defined - skipped, add manually if needed")
           continue
         mat_name = mask["material"]
         if mat_name not in materials:
@@ -738,9 +865,6 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
           materials[mat_name].color = mask["color"]
         thickness_um = op[1]
         existing = spans.get(metal_mask_name)
-        # INTRUDE is documented/observed as always positive in *.ltd (unlike *.subst's
-        # thick, which can be negative to mean "grows down") - min/max anyway, cheaply
-        # future-proofing this the same way _parse_subst's metal loop must for real.
         metal_zmin, metal_zmax = min(z, z + thickness_um), max(z, z + thickness_um)
         if existing is None:
           spans[metal_mask_name] = [mat_name, "metal", mask["gds_layer"], metal_zmin, metal_zmax]
@@ -752,8 +876,27 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
   if not slabs:
     raise ValueError("No usable dielectric slabs found in *.ltd file")
 
+  if bottom_state == "OPEN" and not groundplane_detected:
+    warnings.append("Bottom boundary (BOTTOM OPEN) detected - open/unbounded and not modeled; "
+                     "add a backside ground or substrate manually if needed.")
+
   layers = [LayerEntry(name=name, material_name=mat_name, kind=kind, gds_layer=gds_layer, zmin=zmin, zmax=zmax)
             for name, (mat_name, kind, gds_layer, zmin, zmax) in spans.items()]
+
+  # resolve deferred RESISTANCE=-only materials now that every Layer's real thickness is
+  # known: sheet-resistor only if every use of that material is genuinely zero-thickness,
+  # otherwise treated as a normal conductor with an equivalent bulk conductivity computed
+  # from Rs and the first non-zero thickness found (conductivity = 1/(Rs * thickness_m)) -
+  # see the note where pending_rs is populated above.
+  for name, rs in pending_rs.items():
+    uses = [l for l in layers if l.material_name == name]
+    nonzero = next((l for l in uses if (l.zmax - l.zmin) > _EPSILON_UM), None)
+    if nonzero is not None:
+      thickness_m = (nonzero.zmax - nonzero.zmin) * 1e-6
+      materials[name].conductivity = 1.0 / (rs * thickness_m)
+    else:
+      materials[name].kind = "sheet_resistor"
+      materials[name].rs = rs
 
   # slabs were built while walking the file in reverse (bottom-to-top), matching
   # _build_tree's expected bottom-to-top input order - the ground plane, if any,
@@ -761,7 +904,7 @@ def _parse_ltd(ltd_path, air_thickness_um, warnings):
   if groundplane_detected:
     slabs.insert(0, _ground_plane_slab(materials, warnings))
 
-  return slabs, layers, materials
+  return slabs, layers, materials, derived_layers
 
 
 def import_ltd(ltd_path, air_thickness_um):
@@ -774,7 +917,7 @@ def import_ltd(ltd_path, air_thickness_um):
       ImportResult
   """
   warnings = []
-  slabs, layers, materials = _parse_ltd(ltd_path, air_thickness_um, warnings)
-  _strip_common_material_suffix(materials, slabs, layers, warnings)
-  tree = _build_tree(slabs, layers, materials, warnings)
+  slabs, layers, materials, derived_layers = _parse_ltd(ltd_path, air_thickness_um, warnings)
+  _strip_common_material_suffix(materials, slabs, layers, warnings, derived_layers)
+  tree = _build_tree(slabs, layers, materials, warnings, derived_layers)
   return ImportResult(tree=tree, warnings=warnings)
