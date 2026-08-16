@@ -40,12 +40,22 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog, QMenuBar,
+    QScrollArea, QColorDialog, QMenuBar, QInputDialog,
 )
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
 from PySide6.QtCore import Qt, QTimer, Signal
 
-from gds2palace import stackup_reader, stackup_writer
+from gds2palace import stackup_reader
+
+# __package__ is None/"" when this module was loaded outside the setupEM package
+# (e.g. setupEM.py run directly), so relative import fails - same dual-mode pattern
+# used throughout setupEM.py/setup_common.py for their own sibling imports.
+if __package__ in (None, ""):
+  import stackup_writer
+  import momentum_import
+else:
+  from . import stackup_writer
+  from . import momentum_import
 
 # __package__ is None/"" when this file is run directly rather than imported
 # as part of the setupEM package, so relative import fails.
@@ -743,6 +753,18 @@ class StackupEditorWindow(QDialog):
 
         self.file_menu.addSeparator()
 
+        self.import_menu = self.file_menu.addMenu("&Import")
+
+        self.import_subst_action = QAction("ADS Momentum (*.subst + materials.matdb)...", self)
+        self.import_subst_action.triggered.connect(self._import_momentum_subst)
+        self.import_menu.addAction(self.import_subst_action)
+
+        self.import_ltd_action = QAction("ADS Momentum (*.ltd)...", self)
+        self.import_ltd_action.triggered.connect(self._import_momentum_ltd)
+        self.import_menu.addAction(self.import_ltd_action)
+
+        self.file_menu.addSeparator()
+
         self.save_action = QAction("&Save", self)
         self.save_action.setShortcut(QKeySequence.Save)
         self.save_action.triggered.connect(lambda: self.save())
@@ -766,6 +788,10 @@ class StackupEditorWindow(QDialog):
         self.convert_to_reference_action = QAction("Convert to Reference position format", self)
         self.convert_to_reference_action.triggered.connect(self._on_convert_to_reference_clicked)
         self.tools_menu.addAction(self.convert_to_reference_action)
+
+        self.convert_to_legacy_action = QAction("Convert to legacy format", self)
+        self.convert_to_legacy_action.triggered.connect(self._on_convert_to_legacy_clicked)
+        self.tools_menu.addAction(self.convert_to_legacy_action)
 
         self.view_menu = self.menu_bar.addMenu("&View")
 
@@ -1233,6 +1259,92 @@ class StackupEditorWindow(QDialog):
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
 
+    # ---------- import from ADS Momentum ----------
+
+    def _prompt_air_thickness(self):
+        """Asks for the thickness of the open-boundary AIR region above the stack -
+           both ADS Momentum source formats leave this undefined (Momentum treats it
+           as an unbounded half-space), but the target schema needs a finite value to
+           bound the simulation domain.
+        Returns:
+            float or None: the entered thickness, or None if the user cancelled
+        """
+        value, ok = QInputDialog.getDouble(
+            self, "Top Air Thickness",
+            "Thickness of the open-boundary AIR region above the stack (um):",
+            300.0, 0.0, 1000000.0, decimals=2)
+        return value if ok else None
+
+    def _show_import_warnings(self, warnings):
+        if not warnings:
+            QMessageBox.information(self, "Import complete", "Stackup imported successfully.")
+            return
+        QMessageBox.information(
+            self, "Import warnings",
+            "Imported with warnings:\n\n" + "\n".join(f"- {w}" for w in warnings))
+
+    def _apply_import_result(self, result, source_label):
+        # current_filename deliberately left None, same as new_file() - an imported
+        # stackup is unsaved content the user should explicitly Save As, never
+        # something that could silently overwrite an existing file
+        self.tree = result.tree
+        self.current_filename = None
+        self._set_filename_label(f"(imported from {source_label}, unsaved)")
+        self._asked_about_implicit_dielectric_references = False
+        self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
+        self._reload_all_editors()
+        self._reset_undo_baseline()
+        self._revalidate_and_refresh()
+        self._show_import_warnings(result.warnings)
+
+    def _import_momentum_subst(self):
+        previous_dir = os.path.dirname(self.current_filename) if self.current_filename else ""
+        subst_path, _ = QFileDialog.getOpenFileName(
+            self, "Import ADS Momentum Substrate", previous_dir, "*.subst;;*.*")
+        if not subst_path:
+            return
+
+        # per the *.subst format, a companion materials.matdb is always expected in
+        # the same folder - looked up automatically rather than asked for separately
+        matdb_path = os.path.join(os.path.dirname(subst_path), "materials.matdb")
+        if not os.path.isfile(matdb_path):
+            QMessageBox.critical(
+                self, "Error",
+                f"Could not find materials.matdb next to {os.path.basename(subst_path)}.\n\n"
+                "A *.subst file always requires a materials.matdb in the same folder.")
+            return
+
+        air_thickness = self._prompt_air_thickness()
+        if air_thickness is None:
+            return
+
+        try:
+            result = momentum_import.import_subst(subst_path, matdb_path, air_thickness)
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"Could not import {subst_path}:\n{e}")
+            return
+
+        self._apply_import_result(result, os.path.basename(subst_path))
+
+    def _import_momentum_ltd(self):
+        previous_dir = os.path.dirname(self.current_filename) if self.current_filename else ""
+        ltd_path, _ = QFileDialog.getOpenFileName(
+            self, "Import ADS Momentum Technology", previous_dir, "*.ltd;;*.*")
+        if not ltd_path:
+            return
+
+        air_thickness = self._prompt_air_thickness()
+        if air_thickness is None:
+            return
+
+        try:
+            result = momentum_import.import_ltd(ltd_path, air_thickness)
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"Could not import {ltd_path}:\n{e}")
+            return
+
+        self._apply_import_result(result, os.path.basename(ltd_path))
+
     def _reload_all_editors(self):
         root = self.tree.getroot()
         self.materials_editor.set_root(root)
@@ -1639,6 +1751,176 @@ class StackupEditorWindow(QDialog):
             lowest = min(dielectrics, key=lambda d: d.zmin)
             return lowest.name, "Bottom", lowest.zmin
         return None
+
+    # ---------- convert to legacy format ----------
+
+    def _on_convert_to_legacy_clicked(self):
+        if self.tree is None:
+            return
+
+        message = (
+            "Convert this stackup to the old schemaVersion \"2.0\" legacy format?\n\n"
+            "- Every Reference-positioned Layer is rewritten to absolute Zmin/Zmax. Every "
+            "Reference-positioned Dielectric is rewritten to plain Thickness (implicit "
+            "top-to-bottom stacking) wherever that alone still reproduces its current "
+            "position, falling back to absolute Zmin/Zmax only where it doesn't.\n"
+            "- Derived layers are removed, along with any Layer entry that exists only to "
+            "give a derived layer its Z-position (its Layer number was never real GDSII "
+            "geometry).\n"
+            "- Thermal data is removed: the Tables section, and Density/ThermalConductivity/"
+            "ThermalConductivityTable on every Material.\n\n"
+            "Resulting absolute positions stay exactly the same.")
+
+        reply = QMessageBox.question(self, "Convert to legacy format", message,
+                                      QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            self._convert_to_legacy_format()
+        except (Exception, SystemExit) as e:
+            QMessageBox.warning(self, "Conversion failed",
+                                 f"Could not convert - current stackup could not be fully "
+                                 f"resolved:\n{e}")
+            return
+
+        # this conversion's whole point is implicit Thickness-based Dielectric stacking -
+        # immediately re-offering to make it Reference-explicit again (a schemaVersion "3.0"
+        # feature this conversion just removed) at the next Save would be self-contradictory,
+        # so treat "asked" as already settled for the rest of this editing session
+        self._asked_about_implicit_dielectric_references = True
+
+        self._reload_all_editors()
+        self._on_changed(structural=True)
+
+    def _convert_to_legacy_format(self):
+        """Rewrites every Reference-positioned Layer/Dielectric to absolute positioning
+           (preferring plain Thickness-based implicit stacking for a Dielectric wherever
+           that alone reproduces its current resolved position), removes DerivedLayers
+           (and any Layer entry that exists only to give a derived layer its Z-position),
+           removes thermal data (Tables, and Density/ThermalConductivity/
+           ThermalConductivityTable on every Material), and sets schemaVersion to "2.0" -
+           the format read before Reference/DerivedLayers/Tables existed. The inverse of
+           _convert_to_reference_format() above.
+        """
+        root = self.tree.getroot()
+
+        # ground truth: fully resolved positions exactly as the reader sees them today,
+        # captured once up front so every lookup below is against the *original* file,
+        # never against a partially-converted in-progress state
+        materials_list, dielectrics_list, metals_list = stackup_reader.parse_substrate(root)
+        dielectric_by_name = {dielectric.name: dielectric for dielectric in dielectrics_list.dielectrics}
+
+        # ---- Layers: Reference -> absolute Zmin/Zmax (no "implicit" alternative exists
+        # for Layers - only Dielectrics can fall back to Thickness-based stacking) ----
+        metal_by_name = {metal.name: metal for metal in metals_list.metals}
+        for layer_el in self._layers_container(root):
+            if not layer_el.get("Reference"):
+                continue
+            metal = metal_by_name.get(layer_el.get("Name"))
+            if metal is None:
+                continue
+            layer_el.set("Zmin", f"{metal.zmin:.4f}")
+            layer_el.set("Zmax", f"{metal.zmax:.4f}")
+            for attr in ("Reference", "ReferenceEdge"):
+                if attr in layer_el.attrib:
+                    del layer_el.attrib[attr]
+
+        # ---- Dielectrics: prefer implicit Thickness+order, fall back to absolute
+        # Zmin/Zmax only where needed ----
+        self._convert_dielectrics_to_legacy(root, dielectric_by_name)
+
+        # ---- remove derived layers, and any Layer entry that exists only for one ----
+        derived_layers_el = stackup_writer.get_derived_layers_element(root)
+        if derived_layers_el is not None:
+            derived_target_numbers = set()
+            for derived_el in derived_layers_el.findall("DerivedLayer"):
+                layernum = derived_el.get("Layer")
+                if layernum is not None:
+                    try:
+                        derived_target_numbers.add(int(layernum))
+                    except ValueError:
+                        pass
+            root.find("ELayers").remove(derived_layers_el)
+
+            for layer_el in self._layers_container(root):
+                layernum = layer_el.get("Layer")
+                if layernum is None:
+                    continue
+                try:
+                    if int(layernum) in derived_target_numbers:
+                        stackup_writer.remove_layer(root, layer_el)
+                except ValueError:
+                    pass
+
+        # ---- remove thermal data: Tables section, and thermal attributes on Materials ----
+        tables_el = root.find("Tables")
+        if tables_el is not None:
+            root.remove(tables_el)
+
+        for material_el in self._materials_container(root):
+            for attr in ("Density", "ThermalConductivity", "ThermalConductivityTable"):
+                if attr in material_el.attrib:
+                    del material_el.attrib[attr]
+
+        # this comment's claim (minimum reader version needed for Reference-relative
+        # positioning) no longer applies once every Reference has been removed above
+        for child in list(root):
+            if child.tag is ET.Comment and (child.text or "").strip().startswith(
+                    stackup_writer.REFERENCE_FORMAT_COMMENT_PREFIX):
+                root.remove(child)
+
+        root.set("schemaVersion", "2.0")
+
+    def _convert_dielectrics_to_legacy(self, root, dielectric_by_name):
+        """Decides, per Dielectric, whether plain Thickness (implicit top-to-bottom
+           stacking) alone still reproduces its ground-truth resolved position, falling
+           back to absolute Zmin/Zmax for the ones where it doesn't - then applies that
+           decision to the real elements.
+
+           Single greedy pass, bottom-to-top - the same order/direction as the reader's own
+           dielectric_layers_list._assign_implicit_references(). A Dielectric is implicit-
+           compatible exactly when its ground-truth zmin equals the top edge of the nearest
+           dielectric below it that is *itself* implicit-compatible (or 0, if there is none) -
+           an absolute-fallback Dielectric is transparent to this chain, exactly like the real
+           implicit-stacking algorithm treats it, so walking bottom-to-top and carrying
+           forward only the last implicit dielectric's zmax reproduces its decisions exactly,
+           with no need to iterate/guess against a series of what-if hypotheses.
+        """
+        dielectric_elements = self._dielectrics_container(root)
+        epsilon = 1e-4
+
+        last_implicit_zmax = 0.0  # anchor: z=0 once nothing implicit sits below yet
+        implicit_names = set()
+        for element in reversed(dielectric_elements):
+            ground_truth = dielectric_by_name.get(element.get("Name"))
+            if ground_truth is None:
+                continue
+            if abs(ground_truth.zmin - last_implicit_zmax) < epsilon:
+                implicit_names.add(element.get("Name"))
+                last_implicit_zmax = ground_truth.zmax
+            # else: falls back to absolute below: transparent to the chain, so
+            # last_implicit_zmax carries forward unchanged to the next (higher) Dielectric
+
+        for element in dielectric_elements:
+            name = element.get("Name")
+            ground_truth = dielectric_by_name.get(name)
+            if ground_truth is None:
+                continue
+            for attr in ("Reference", "ReferenceEdge"):
+                if attr in element.attrib:
+                    del element.attrib[attr]
+            if name in implicit_names:
+                element.set("Thickness", f"{ground_truth.thickness:.4f}")
+                for attr in ("Zmin", "Zmax"):
+                    if attr in element.attrib:
+                        del element.attrib[attr]
+            else:
+                element.set("Zmin", f"{ground_truth.zmin:.4f}")
+                element.set("Zmax", f"{ground_truth.zmax:.4f}")
+                if "Thickness" in element.attrib:
+                    del element.attrib["Thickness"]
+            # Boundary, if present, is orthogonal to position mode and stays untouched
 
     # ---------- file description ----------
 
