@@ -557,6 +557,61 @@ class CodeEditor(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
 
 
+# ---------- STACKUP PREVIEW COLOR/LABEL DEFAULTS (EM / permittivity-based) ------------------
+#
+# Shared here (rather than living only in setupEM.py, where they originated) so that any
+# MainWindow-like object passed to VectorWidget's dielectric_color_fn/dielectric_label_fn/
+# metal_label_fn - including stackupEditor.py's standalone-launch stand-in - gets the same
+# real, permittivity/sheet-resistance-based preview instead of a flat placeholder. setupThermal.py
+# does NOT use these: its thermal-conductivity-based preview is genuinely different information,
+# not just a simplification of this one, so it keeps its own implementation.
+
+def epsilon_to_color(erel, transparency):
+    # Compute raw float components
+    red   = 250 - 30 * (erel - 1)
+    green = 255 - 20 * (erel - 1) + (20 / erel) + 10 * erel
+    blue  = 100 + 15 * erel + (250 / erel)
+
+    # Extra adjustment
+    if 3.8 < erel < 4.5:
+        red   += 50 * (erel - 3.8)
+        green -= 100 * (erel - 3.8)
+
+    # Clamp to range 0–255
+    red   = min(max(red,   0), 255)
+    green = min(max(green, 0), 255)
+    blue  = min(max(blue,  0), 255)
+
+    # Convert to integer RGB
+    r = int(round(red))
+    g = int(round(green))
+    b = int(round(blue))
+
+    return QColor(r, g, b, transparency)
+
+
+def default_stackup_dielectric_label(dielectric, material):
+    material_string = f'εr={material.eps:.1f}'
+    if material.sigma > 1e-3:
+        material_string = material_string + f' σ={material.sigma:.1f}'
+    material_string = material_string + f'\n{dielectric.thickness:.2f}µm'
+    return material_string
+
+
+def default_stackup_metal_label(metal, material, is_sheet):
+    if is_sheet:
+        return f'Rs={material.Rs*1e3:.1f}mΩ'
+    else:
+        if (material.sigma > 0) and (metal.thickness > 0):
+            Rs = 1 / (material.sigma*metal.thickness*1e-6)
+            if Rs < 1:
+                return f'Rs={Rs*1e3:.1f} mΩ'
+            else:
+                return f'Rs={Rs:.2f} Ω'
+        else:
+            return '? ' + material.type + ' ?'
+
+
 # ---------- POP UP WINDOW TO SHOW STACKUP ------------------
 
 class VectorWidget(QWidget):
@@ -617,7 +672,13 @@ class VectorWidget(QWidget):
         # get total dielectric parts, where each metal in a dielectric adds one part
         dielectric_shapes = []
         total_parts = 0
-        dielectrics_bottom_up = self.dielectrics_list.dielectrics[::-1]
+        # sorted by resolved zmin, not just reversed file/array order: a Reference-based
+        # dielectric's actual position comes from resolving its Reference by name (see
+        # dielectric_layers_list.resolve_references()), entirely independent of where it
+        # sits in the file - so reordering it there (e.g. Move Up/Down in the Dielectric
+        # Stack tab) must not change where it's drawn here, even though it does change
+        # self.dielectrics_list.dielectrics' own array order
+        dielectrics_bottom_up = sorted(self.dielectrics_list.dielectrics, key=lambda d: d.zmin)
         for dielectric in dielectrics_bottom_up:  # bottom up
             painter.setPen(penBlack)
 
@@ -1527,14 +1588,14 @@ class MainWindowBase(QMainWindow):
                 "currently installed.\n\nUpdate with:\n  pip install gds2palace --upgrade")
             return
 
-        # local import: stackup_editor.py imports from this module, so importing
+        # local import: stackupEditor.py imports from this module, so importing
         # it at module load time here would be circular.
         # __package__ is None/"" when this module was itself loaded outside the
         # setupEM package (e.g. setupEM.py run directly), so relative import fails.
         if __package__ in (None, ""):
-            from stackup_editor import StackupEditorWindow
+            from stackupEditor import StackupEditorWindow
         else:
-            from .stackup_editor import StackupEditorWindow
+            from .stackupEditor import StackupEditorWindow
 
         if getattr(self, "stackup_editor_window", None) is not None:
             self.stackup_editor_window.raise_()

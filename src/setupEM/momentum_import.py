@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 # __package__ is None/"" when this module was loaded outside the setupEM package
 # (e.g. setupEM.py run directly), so relative import fails - same dual-mode pattern
-# used throughout setupEM.py/setup_common.py/stackup_editor.py for sibling imports.
+# used throughout setupEM.py/setup_common.py/stackupEditor.py for sibling imports.
 if __package__ in (None, ""):
   import stackup_writer
 else:

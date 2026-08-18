@@ -23,6 +23,7 @@ requires-python = ">=3.9"
 [project.scripts]
 setupEM = "setupEM.setupEM:main"
 setupThermal = "setupEM.setupThermal:main"
+stackupEditor = "setupEM.stackupEditor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

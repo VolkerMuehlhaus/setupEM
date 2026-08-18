@@ -17,33 +17,42 @@
 ########################################################################
 
 """
-stackup_editor.py
+stackupEditor.py
 
 GUI editor for stackup XML files (see gds2palace/XML_stackup_format.md):
-Materials, the Dielectric stack, drawn Layers, and DerivedLayers (boolean
-layer operations), with a live cross-section preview reusing
-setup_common.VectorWidget. Opened from Tools > Edit Stackup XML... in
+Variables, Materials, the Dielectric stack, drawn Layers, and DerivedLayers
+(boolean layer operations), with a live cross-section preview reusing
+setup_common.VectorWidget. Normally opened from Tools > Edit Stackup XML... in
 setupEM / setupThermal (wired up in setup_common.MainWindowBase.create_menu_bar(),
-so it is available in both apps for free).
+so it is available in both apps for free) - but also runnable standalone, either
+directly (`python stackupEditor.py [file.xml]`) or via the `stackupEditor` console
+script installed with this package (see main() below and pyproject.toml).
 
 Tables (thermal conductivity lookups) is not editable here. Loading goes
 through gds2palace.stackup_writer.load_stackup_tree(), which preserves XML
-comments, and only Material/Dielectric/Layer/Substrate/DerivedLayer elements
-are ever touched, so Tables - and any comments in it - round-trips untouched
-on save.
+comments, and only Variable/Material/Dielectric/Layer/Substrate/DerivedLayer
+elements are ever touched, so Tables - and any comments in it - round-trips
+untouched on save.
 """
 
+import argparse
 import copy
 import os
+import re
+import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
+    QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog, QMenuBar, QInputDialog,
+    QScrollArea, QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
 )
-from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor, QFontMetrics, QKeySequence, QAction, QFontDatabase,
+    QSyntaxHighlighter, QTextCharFormat, QFont,
+)
+from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel, QSettings
 
 from gds2palace import stackup_reader
 
@@ -60,16 +69,42 @@ else:
 # __package__ is None/"" when this file is run directly rather than imported
 # as part of the setupEM package, so relative import fails.
 if __package__ in (None, ""):
-    from setup_common import VectorWidget
+    from setup_common import (
+        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+    )
 else:
-    from .setup_common import VectorWidget
+    from .setup_common import (
+        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+    )
+
+# QSettings scope for the "Open Recent" file list - shared across setupEM/setupThermal/
+# standalone launches, since they all edit the same kind of stackup XML file and should
+# see each other's recently opened/saved files.
+RECENT_FILES_ORG = "muehlhaus.com"
+RECENT_FILES_APP = "StackupEditor"
+RECENT_FILES_KEY = "recentFiles"
+MAX_RECENT_FILES = 10
 
 
 # ------------------------------------------------------------------
 # Column specs: (attribute, header label, kind)
 # kind in {"text", "computed", "materialtype", "layertype", "materialref",
-#          "operationtype", "operands", "color"}
+#          "operationtype", "operands", "color", "variabletype"}
 # ------------------------------------------------------------------
+
+# sentinel shown in the Type combo for "no Type set" (inferred from Value, the XML's own
+# default when Type is omitted - see XML_stackup_format.md's <Variables> section); mapped back
+# to "" (removes the attribute) when selected - never written to the XML. Same pattern as
+# REFERENCE_NONE_LABEL below, just defined here since VARIABLE_TYPE_CHOICES needs it earlier.
+VARIABLE_TYPE_AUTO_LABEL = "(auto)"
+VARIABLE_TYPE_CHOICES = [VARIABLE_TYPE_AUTO_LABEL, "number", "string"]
+
+VARIABLE_COLUMNS = [
+    ("Name", "Name", "text"),
+    ("Value", "Value", "text"),
+    ("Type", "Type", "variabletype"),
+    ("ResolvedValue", "Resolved Value", "computed"),
+]
 
 MATERIAL_COLUMNS = [
     ("Name", "Name", "text"),
@@ -118,6 +153,63 @@ REFERENCE_EDGE_CHOICES = ["Top", "Bottom"]
 REFERENCE_NONE_LABEL = "(none)"
 
 
+def _build_variables_list(variable_elements):
+    """Resolve the current (possibly mid-edit) Variables tab state into a
+       stackup_reader.variables_list, for the other tabs' live-preview compute functions to
+       resolve "="-expressions against. Raises on invalid/circular data - callers wrap their
+       own reader calls in try/except (Exception, SystemExit) already, so this is meant to
+       propagate and blank their computed columns the same way an invalid Reference chain
+       already does.
+    """
+    variables = stackup_reader.variables_list()
+    for element in variable_elements:
+        variables.append(stackup_reader.variable(element))
+    variables.resolve_all()
+    return variables
+
+
+_INT_EXPRESSION_ATTRS = {"Layer", "Boundary"}
+
+
+def _resolve_all_expressions(root, variables):
+    """Rewrites every "="-expression attribute anywhere in the tree to its resolved
+       literal value, in place - used by _convert_to_legacy_format() so a
+       schemaVersion="2.0" file (predating <Variables>/"=" expressions) never contains
+       one. "Layer" (on <Layer>/<DerivedLayer>/<Operand>) and "Boundary" (on
+       <Dielectric>) are GDSII layer numbers and go through resolve_int_attr()'s
+       integer-value check instead of the generic resolve_attr(). Raises/exits the
+       same way resolve_attr()/resolve_int_attr() themselves do on an undefined
+       variable or invalid expression.
+    """
+    for element in root.iter():
+        for key, value in list(element.attrib.items()):
+            if not (isinstance(value, str) and value.startswith("=")):
+                continue
+            if key in _INT_EXPRESSION_ATTRS:
+                resolved = stackup_reader.resolve_int_attr(element, key, variables)
+            else:
+                resolved = stackup_reader.resolve_attr(element, key, None, variables)
+            element.set(key, resolved)
+
+
+def _compute_variable_values(elements):
+    """Read-only ResolvedValue column for the Variables tab: each row's evaluated value,
+       annotated with the resolved type in brackets (e.g. "0.96 (number)", "SG13G2
+       (string)") since a "="-expression's result type isn't always obvious from Value
+       alone. Blank while the current (possibly mid-edit) data can't resolve yet - same
+       defensive pattern as _compute_dielectric_zpositions/_compute_layer_zpositions.
+    """
+    try:
+        variables = _build_variables_list(elements)
+    except (Exception, SystemExit):
+        return {}
+    computed = {}
+    for element, var in zip(elements, variables.variables):
+        resolved_type = "number" if isinstance(var.value, float) else "string"
+        computed[id(element)] = {"ResolvedValue": f"{var.value} ({resolved_type})"}
+    return computed
+
+
 def _compute_layer_thickness(elements):
     """Read-only Thickness column for the Layers tab: Zmax - Zmin, recomputed
        whenever either changes. Blank while Zmin/Zmax aren't both valid numbers yet
@@ -134,7 +226,7 @@ def _compute_layer_thickness(elements):
     return computed
 
 
-def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
+def _compute_layer_zpositions(elements, dielectrics_elements, variables, offset=0.0):
     """Read-only ResultZmin/ResultZmax columns for the Layers tab: the absolute
        resolved z-position for every row, whether it's plain absolute Zmin/Zmax or
        Reference-based (offset from a Dielectric/Layer edge) - this is the main
@@ -148,6 +240,9 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
        reader reports via exit(1) rather than a normal exception - see
        _refresh_preview() for the same pattern).
     Args:
+        variables (stackup_reader.variables_list): current Variables tab state, resolved -
+            see _build_variables_list() - for resolving any "="-expression among these
+            Dielectrics'/Layers' attributes.
         offset (float): the file's <Substrate Offset>, if any. Only applied when no
             Layer uses Reference, exactly like parse_substrate() does - Reference and
             a nonzero Offset are mutually exclusive (see validate_stackup()), so a
@@ -156,12 +251,12 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
     try:
         dielectrics_list = stackup_reader.dielectric_layers_list()
         for element in dielectrics_elements:
-            dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+            dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
         dielectrics_list.calculate_zpositions()
 
         metals_list = stackup_reader.metal_layers_list()
         for element in elements:
-            metals_list.append(stackup_reader.metal_layer(element))
+            metals_list.append(stackup_reader.metal_layer(element, variables))
         metals_list.resolve_references(dielectrics_list)
         if offset and not metals_list.has_references():
             metals_list.add_offset(offset)
@@ -175,13 +270,6 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
             "ResultZmax": f"{metal.zmax:.4f}" if metal.zmax is not None else "",
         }
     return computed
-
-
-def _layer_gray_fn(_element, attr):
-    # Thickness/ResultZmin/ResultZmax are always derived/read-only here (unlike the
-    # Dielectric stack's resulting Zmin/Zmax, there's no mode where they're the
-    # "source of truth")
-    return attr in ("Thickness", "ResultZmin", "ResultZmax")
 
 
 # ------------------------------------------------------------------
@@ -265,25 +353,24 @@ def _dielectric_gray_fn(element, attr):
     mode = _dielectric_position_mode(element)
     if attr == "Thickness":
         return mode == "absolute"  # unused/ignored once Zmin+Zmax fix the position
-    if attr in ("Zmin", "Zmax"):
-        return mode == "thickness"  # unused in implicit mode; still meaningful (optional) overrides in reference mode
-    if attr in ("ResultZmin", "ResultZmax"):
-        return mode == "absolute"  # redundant with the already-editable Zmin/Zmax there
     return False
 
 
-def _compute_dielectric_zpositions(elements):
+def _compute_dielectric_zpositions(elements, variables):
     """Runs the same resolution the reader uses (dielectric_layers_list.calculate_zpositions(),
        covering absolute/Reference/implicit-stacked dielectrics alike) over the current (possibly
        mid-edit) Dielectric elements, so the "resulting" columns show real effective z-positions.
        Returns {} - blanking those columns - if the current data isn't complete/valid enough to
        compute yet, including a dangling/ambiguous/circular Reference, which the reader reports
        via exit(1) rather than a normal exception - see _refresh_preview() for the same pattern.
+    Args:
+        variables (stackup_reader.variables_list): current Variables tab state, resolved - see
+            _build_variables_list() - for resolving any "="-expression among these attributes.
     """
     try:
         dielectrics_list = stackup_reader.dielectric_layers_list()
         for element in elements:
-            dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+            dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
         dielectrics_list.calculate_zpositions()
     except (Exception, SystemExit):
         return {}
@@ -320,6 +407,68 @@ class _CommitOnFocusOutTextEdit(QPlainTextEdit):
         self.editingFinished.emit()
 
 
+class _XmlSyntaxHighlighter(QSyntaxHighlighter):
+    """Basic XML syntax highlighter for the read-only XML Preview tab: tag names,
+       attribute names, quoted attribute values, and comments (including multi-line
+       ones, e.g. a multi-line File Description stamped as a header comment) each get
+       their own color. Re-run by Qt automatically whenever setPlainText() replaces
+       the document's whole text, which is the only way this text ever changes -
+       there is no interactive editing to keep up with.
+    """
+
+    _COMMENT_BLOCK_STATE = 1
+
+    def __init__(self, document):
+        super().__init__(document)
+
+        def make_format(color, bold=False, italic=False):
+            text_format = QTextCharFormat()
+            text_format.setForeground(QColor(color))
+            if bold:
+                text_format.setFontWeight(QFont.Bold)
+            text_format.setFontItalic(italic)
+            return text_format
+
+        self._tag_format = make_format("#0000AA", bold=True)
+        self._attr_name_format = make_format("#880000")
+        self._attr_value_format = make_format("#008000")
+        self._decl_format = make_format("#555555", italic=True)
+        self._comment_format = make_format("#808080", italic=True)
+
+        self._tag_pattern = re.compile(r"</?\s*([A-Za-z_][\w.:-]*)")
+        self._attr_name_pattern = re.compile(r"\b([A-Za-z_][\w.:-]*)(?=\s*=\s*\")")
+        self._attr_value_pattern = re.compile(r'"[^"]*"')
+        self._decl_pattern = re.compile(r"<\?.*?\?>")
+
+    def highlightBlock(self, text):
+        # applied first - any accidental match inside a comment's own text (e.g. a
+        # File Description that happens to mention "<Layer>") is overwritten by the
+        # comment formatting pass at the end, which always wins
+        for match in self._decl_pattern.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self._decl_format)
+        for match in self._tag_pattern.finditer(text):
+            self.setFormat(match.start(1), match.end(1) - match.start(1), self._tag_format)
+        for match in self._attr_name_pattern.finditer(text):
+            self.setFormat(match.start(1), match.end(1) - match.start(1), self._attr_name_format)
+        for match in self._attr_value_pattern.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self._attr_value_format)
+
+        # multi-line <!-- comment --> spans: start at column 0 while continuing a
+        # comment from the previous block (previousBlockState() is unaffected by
+        # anything done in this call, so it still reflects that block's own result)
+        self.setCurrentBlockState(0)
+        start = 0 if self.previousBlockState() == self._COMMENT_BLOCK_STATE else text.find("<!--")
+        while start >= 0:
+            end = text.find("-->", start)
+            if end == -1:
+                self.setFormat(start, len(text) - start, self._comment_format)
+                self.setCurrentBlockState(self._COMMENT_BLOCK_STATE)
+                break
+            length = end - start + len("-->")
+            self.setFormat(start, length, self._comment_format)
+            start = text.find("<!--", start + length)
+
+
 def _unique_name(existing_names, base):
     if base not in existing_names:
         return base
@@ -327,6 +476,33 @@ def _unique_name(existing_names, base):
     while f"{base}{n}" in existing_names:
         n += 1
     return f"{base}{n}"
+
+
+class _VariableCompletionDelegate(QStyledItemDelegate):
+    """QStyledItemDelegate that attaches a QCompleter to a "text" cell's editor, offering
+       "=name" completions for every currently-declared Variable - lets a user start typing
+       "=" and see/select a matching variable name from a popup, in any cell that might hold
+       a "="-prefixed expression (Materials/Dielectrics/Layers/DerivedLayers numeric columns,
+       and Variables' own Value column for variable-referencing-variable formulas).
+
+       The completer's word list is rebuilt fresh every time an editor is created (i.e. every
+       time a cell is actually opened for editing), not cached - so it can never go stale as
+       variables are added/renamed/removed, with no separate refresh call needed.
+    """
+
+    def __init__(self, variable_names_fn, parent=None):
+        super().__init__(parent)
+        self.variable_names_fn = variable_names_fn
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            names = self.variable_names_fn() or []
+            completer = QCompleter(["=" + name for name in names], editor)
+            completer.setCaseSensitivity(Qt.CaseSensitive)
+            completer.setFilterMode(Qt.MatchStartsWith)
+            editor.setCompleter(completer)
+        return editor
 
 
 # ------------------------------------------------------------------
@@ -340,13 +516,16 @@ class ElementTableEditor(QWidget):
     """
 
     _GRAY = QColor(235, 235, 235)
+    _COMPUTED_TEXT = QColor(0, 128, 0)
+    _INVALID_TEXT = QColor("darkred")
 
     def __init__(self, columns, container_fn, add_fn, remove_fn, default_attrs_fn, on_changed,
                  move_fn=None, material_choices_fn=None, type_choices=None,
                  strip_fn=None, not_applicable_fn=None, blank_if_default_fn=None,
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
-                 pre_set_attr_fn=None, reference_choices_fn=None, header_tooltips=None,
-                 operand_lookup_fn=None):
+                 pre_set_attr_fn=None, reference_choices_fn=None,
+                 header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None,
+                 invalid_fn=None):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -392,6 +571,16 @@ class ElementTableEditor(QWidget):
              its Layers-tab Name where possible, falling back to the bare number for
              whichever operands don't resolve (e.g. a pure intermediate derived layer
              with no <Layer> entry of its own).
+           variable_names_fn() -> list[str], optional: current declared Variable names, used
+             to attach a QCompleter to every "text" column's editor (see
+             _VariableCompletionDelegate) - lets a user type "=" and pick a matching variable
+             from a popup instead of typing the full name. Omit for a tab where this doesn't
+             make sense (there currently isn't one, but the param stays optional for safety).
+           invalid_fn(element, attr) -> bool: for "text" columns, marks a cell's text
+             (not background, unlike gray_fn) dark red - used for the one specific
+             field whose edit was what just made the whole file invalid (see
+             StackupEditorWindow._is_invalid_field()), so the user's eye lands on the
+             actual cause instead of just the generic status line/Save error list.
         """
         super().__init__()
         self.columns = columns
@@ -411,6 +600,7 @@ class ElementTableEditor(QWidget):
         self.reload_on_attr_change = reload_on_attr_change
         self.compute_fn = compute_fn
         self.gray_fn = gray_fn
+        self.invalid_fn = invalid_fn
         self.pre_set_attr_fn = pre_set_attr_fn
 
         self.root = None
@@ -435,6 +625,15 @@ class ElementTableEditor(QWidget):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
         self.table.itemChanged.connect(self._on_item_changed)
+
+        if variable_names_fn:
+            # kept as an attribute (not just a local) so the delegate - which the table only
+            # holds a Qt-level reference to - isn't garbage-collected on the Python side
+            self._completion_delegate = _VariableCompletionDelegate(variable_names_fn, self.table)
+            for col, (_attr, _header, kind) in enumerate(columns):
+                if kind == "text":
+                    self.table.setItemDelegateForColumn(col, self._completion_delegate)
+
         layout.addWidget(self.table)
 
         button_row = QHBoxLayout()
@@ -494,19 +693,27 @@ class ElementTableEditor(QWidget):
                     item.setBackground(self._GRAY)
                 elif self.gray_fn and self.gray_fn(element, attr):
                     item.setBackground(self._GRAY)
+                if self.invalid_fn and self.invalid_fn(element, attr):
+                    item.setForeground(self._INVALID_TEXT)
                 self.table.setItem(row, col, item)
             elif kind == "computed":
+                # computed cells are always derived/read-only - marked with green text
+                # instead of gray_fn's background dimming, which is for editable-but-
+                # currently-inapplicable "text" cells, a different situation
                 computed_value = self._computed.get(id(element), {}).get(attr, "")
                 item = QTableWidgetItem(computed_value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                if self.gray_fn and self.gray_fn(element, attr):
-                    item.setBackground(self._GRAY)
+                item.setForeground(self._COMPUTED_TEXT)
                 self.table.setItem(row, col, item)
             elif kind == "color":
                 self._make_color_cell(row, col, element, attr, value)
             elif kind in ("materialtype", "layertype", "operationtype", "referenceedge"):
                 choices = REFERENCE_EDGE_CHOICES if kind == "referenceedge" else self.type_choices
                 self._make_combo_cell(row, col, element, attr, value, choices, editable=False)
+            elif kind == "variabletype":
+                self._make_combo_cell(row, col, element, attr, value or VARIABLE_TYPE_AUTO_LABEL,
+                                       self.type_choices, editable=False,
+                                       value_out_fn=lambda text: "" if text == VARIABLE_TYPE_AUTO_LABEL else text)
             elif kind == "materialref":
                 choices = self.material_choices_fn() if self.material_choices_fn else []
                 self._make_combo_cell(row, col, element, attr, value, choices, editable=True)
@@ -573,17 +780,22 @@ class ElementTableEditor(QWidget):
                 del element.attrib[attr]
         else:
             element.set(attr, value)
+        # only a "text" column is a free-typed value that can plausibly be "the"
+        # cause of a validation error by itself (see invalid_fn/_populate_row) -
+        # combo/color cells are constrained to picked choices, not blamed here
+        kind = next((k for a, _h, k in self.columns if a == attr), None)
+        edited_field = (element, attr) if kind == "text" else None
         if attr in self.reload_on_attr_change:
             # deferred: this may be firing from inside the very cell widget (e.g. a
             # combo box) that reload() is about to tear down and recreate, so let the
             # current signal/event finish unwinding first
-            QTimer.singleShot(0, self._reload_and_notify)
+            QTimer.singleShot(0, lambda ef=edited_field: self._reload_and_notify(ef))
         else:
-            self.on_changed()
+            self.on_changed(edited_field=edited_field)
 
-    def _reload_and_notify(self):
+    def _reload_and_notify(self, edited_field=None):
         self.reload()
-        self.on_changed()
+        self.on_changed(edited_field=edited_field)
 
     def _set_operands(self, element, text):
         if self._loading:
@@ -697,6 +909,8 @@ class StackupEditorWindow(QDialog):
        being embedded here, so both windows can be sized/moved independently.
     """
 
+    UNDO_LEVELS = 3
+
     def __init__(self, MainWindow, initial_filename=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -710,13 +924,22 @@ class StackupEditorWindow(QDialog):
         self.tree = None
         self.current_filename = None
 
-        # single-level undo: _last_snapshot is always an independent deep copy of
-        # the tree as it was right before the most recent change; _undo_snapshot
-        # is what Undo restores to (the snapshot before THAT change). See
-        # _record_undo_point()/undo() - deliberately just one step, not a stack,
-        # per explicit request to keep this simple.
+        # bounded multi-level undo: _last_snapshot is always an independent deep
+        # copy of the tree as it was right before the most recent change;
+        # _undo_stack holds up to UNDO_LEVELS such snapshots, oldest first, each
+        # one what Undo restores to. See _record_undo_point()/undo(). No redo -
+        # only stepping further back is supported.
         self._last_snapshot = None
-        self._undo_snapshot = None
+        self._undo_stack = []
+
+        # tracks whether the file was valid as of the last revalidation, and which
+        # (element, attr) field - if any - is currently blamed for making it invalid
+        # (only ever set to the field whose own edit flipped valid->invalid; cleared
+        # again as soon as the file is valid, however that happened). See
+        # _revalidate_and_refresh()/_is_invalid_field(), reset in _reset_undo_baseline()
+        # for the same "new starting point, not an edit" reason undo state resets there.
+        self._was_valid = True
+        self._invalid_field = None
 
         # asked once per loaded/new file (reset in new_file()/_load_file()): whether to
         # write auto-assigned implicit-Dielectric-stacking References into the XML at
@@ -750,6 +973,9 @@ class StackupEditorWindow(QDialog):
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_action.triggered.connect(self.open_file_dialog)
         self.file_menu.addAction(self.open_action)
+
+        self.recent_menu = self.file_menu.addMenu("Open &Recent")
+        self._populate_recent_menu()
 
         self.file_menu.addSeparator()
 
@@ -811,7 +1037,31 @@ class StackupEditorWindow(QDialog):
         file_row.addStretch()
         outer_layout.addLayout(file_row)
 
-        # ---------- materials / dielectrics / layers tabs ----------
+        # ---------- variables / materials / dielectrics / layers tabs ----------
+        self.variables_editor = ElementTableEditor(
+            VARIABLE_COLUMNS,
+            container_fn=self._variables_container,
+            add_fn=lambda root, **attrs: stackup_writer.add_variable(root, **attrs),
+            remove_fn=stackup_writer.remove_variable,
+            default_attrs_fn=self._default_variable_attrs,
+            on_changed=self._on_variables_changed,
+            type_choices=VARIABLE_TYPE_CHOICES,
+            compute_fn=_compute_variable_values,
+            # ResolvedValue depends on both - must live-refresh
+            reload_on_attr_change={"Value", "Type"},
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
+        )
+
+        variables_tab = QWidget()
+        variables_layout = QVBoxLayout()
+        variables_hint = QLabel(
+            "To use variables on the other tabs, start typing \"=\" ")
+        variables_hint.setWordWrap(True)
+        variables_layout.addWidget(variables_hint)
+        variables_layout.addWidget(self.variables_editor)
+        variables_tab.setLayout(variables_layout)
+
         self.materials_editor = ElementTableEditor(
             MATERIAL_COLUMNS,
             container_fn=self._materials_container,
@@ -824,6 +1074,13 @@ class StackupEditorWindow(QDialog):
             not_applicable_fn=_material_not_applicable,
             blank_if_default_fn=_material_blank_if_default,
             reload_on_attr_change={"Type"},
+            header_tooltips={
+                attr: "Numeric value, or \"=expression\" referencing a Variable"
+                for attr in ("Permittivity", "DielectricLossTangent", "Conductivity", "Rs",
+                             "Density", "ThermalConductivity")
+            },
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         self.dielectrics_editor = ElementTableEditor(
@@ -837,15 +1094,18 @@ class StackupEditorWindow(QDialog):
             material_choices_fn=self._material_names,
             reference_choices_fn=self._dielectric_names,
             gray_fn=_dielectric_gray_fn,
-            compute_fn=_compute_dielectric_zpositions,
+            compute_fn=self._compute_dielectric_zpositions_bound,
             # these four drive the resulting-Zmin/Zmax computation and the
             # position-mode gray-out state, so they must live-refresh
             reload_on_attr_change={"Thickness", "Zmin", "Zmax", "Reference", "ReferenceEdge"},
             pre_set_attr_fn=self._handle_dielectric_thickness_change,
             header_tooltips={
-                "Zmin": "Absolute position, or offset from Reference if set",
-                "Zmax": "Absolute position, or offset from Reference if set",
+                "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Thickness": "Numeric value, or \"=expression\" referencing a Variable",
             },
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         self.layers_editor = ElementTableEditor(
@@ -859,13 +1119,14 @@ class StackupEditorWindow(QDialog):
             reference_choices_fn=self._reference_target_names,
             type_choices=list(stackup_writer.VALID_LAYER_TYPES),
             compute_fn=self._compute_layer_zpositions_and_thickness,
-            gray_fn=_layer_gray_fn,
             # Thickness/ResultZmin/ResultZmax are derived from these - must live-refresh
             reload_on_attr_change={"Zmin", "Zmax", "Reference", "ReferenceEdge"},
             header_tooltips={
-                "Zmin": "Absolute position, or offset from Reference if set",
-                "Zmax": "Absolute position, or offset from Reference if set",
+                "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
             },
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         layers_tab = QWidget()
@@ -890,6 +1151,8 @@ class StackupEditorWindow(QDialog):
             on_changed=self._on_changed,
             type_choices=list(stackup_writer.VALID_DERIVED_OPERATIONS),
             operand_lookup_fn=self._layer_name_by_number,
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         derived_layers_tab = QWidget()
@@ -914,12 +1177,28 @@ class StackupEditorWindow(QDialog):
         description_layout.addWidget(self.description_edit)
         description_tab.setLayout(description_layout)
 
+        xml_preview_tab = QWidget()
+        xml_preview_layout = QVBoxLayout()
+        self.xml_preview_edit = QPlainTextEdit()
+        self.xml_preview_edit.setReadOnly(True)
+        self.xml_preview_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.xml_preview_edit.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self._xml_preview_highlighter = _XmlSyntaxHighlighter(self.xml_preview_edit.document())
+        xml_preview_layout.addWidget(self.xml_preview_edit)
+        xml_preview_tab.setLayout(xml_preview_layout)
+        self.xml_preview_tab = xml_preview_tab
+
         self.tabs = QTabWidget()
+        self.tabs.addTab(variables_tab, "Variables")
         self.tabs.addTab(self.materials_editor, "Materials")
         self.tabs.addTab(self.dielectrics_editor, "Dielectric Stack")
         self.tabs.addTab(layers_tab, "Layers")
         self.tabs.addTab(derived_layers_tab, "Derived Layers")
         self.tabs.addTab(description_tab, "File Description")
+        self.tabs.addTab(xml_preview_tab, "XML Preview")
+        self.tabs.setCurrentWidget(self.materials_editor)   # Variables is first in tab order,
+                                                             # but Materials is what opens by default
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         outer_layout.addWidget(self.tabs)
 
@@ -970,6 +1249,13 @@ class StackupEditorWindow(QDialog):
         super().closeEvent(event)
 
     # ---------- default attrs for new rows ----------
+
+    def _default_variable_attrs(self):
+        names = self._variable_names()
+        return {
+            "Name": _unique_name(names, "NewVariable"),
+            "Value": "0",
+        }
 
     def _default_material_attrs(self):
         names = self._material_names()
@@ -1152,6 +1438,11 @@ class StackupEditorWindow(QDialog):
             candidate += 1
         return str(candidate)
 
+    def _variable_names(self):
+        if self.tree is None:
+            return []
+        return [v.get("Name") for v in self._variables_container(self.tree.getroot()) if v.get("Name")]
+
     def _material_names(self):
         if self.tree is None:
             return []
@@ -1184,20 +1475,44 @@ class StackupEditorWindow(QDialog):
         # in dielectrics_editor's construction)
         return self._layer_names() + self._dielectric_names()
 
+    def _compute_dielectric_zpositions_bound(self, elements):
+        # _compute_dielectric_zpositions() needs the current Variables tab state to resolve
+        # any "="-expression, but ElementTableEditor's compute_fn contract only ever calls
+        # compute_fn(elements) - this bound wrapper fetches that extra context from self,
+        # same reason _compute_layer_zpositions_and_thickness below wraps its own module
+        # function instead of wiring it in directly.
+        root = self.tree.getroot() if self.tree is not None else None
+        variable_elements = self._variables_container(root) if root is not None else []
+        try:
+            variables = _build_variables_list(variable_elements)
+        except (Exception, SystemExit):
+            return {}
+        return _compute_dielectric_zpositions(elements, variables)
+
     def _compute_layer_zpositions_and_thickness(self, elements):
         root = self.tree.getroot() if self.tree is not None else None
         dielectrics_elements = self._dielectrics_container(root) if root is not None else []
+        variable_elements = self._variables_container(root) if root is not None else []
         offset_el = stackup_writer.get_substrate_offset_element(root) if root is not None else None
         try:
             offset = float(offset_el.get("Offset")) if offset_el is not None else 0.0
         except (TypeError, ValueError):
             offset = 0.0
         computed = _compute_layer_thickness(elements)
-        for key, values in _compute_layer_zpositions(elements, dielectrics_elements, offset).items():
+        try:
+            variables = _build_variables_list(variable_elements)
+        except (Exception, SystemExit):
+            return computed
+        for key, values in _compute_layer_zpositions(elements, dielectrics_elements, variables, offset).items():
             computed.setdefault(key, {}).update(values)
         return computed
 
     # ---------- container accessors (Element -> list[Element]) ----------
+
+    @staticmethod
+    def _variables_container(root):
+        variables_el = stackup_writer.get_variables_element(root)
+        return variables_el.findall("Variable") if variables_el is not None else []
 
     @staticmethod
     def _materials_container(root):
@@ -1221,6 +1536,60 @@ class StackupEditorWindow(QDialog):
 
     # ---------- file actions ----------
 
+    # ---------- recent files ----------
+
+    @staticmethod
+    def _recent_files():
+        files = QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).value(RECENT_FILES_KEY, [])
+        # QSettings collapses a saved one-item list back to a bare string on read -
+        # a well-known quirk of the native (registry/plist) backends
+        if isinstance(files, str):
+            files = [files] if files else []
+        return list(files)
+
+    def _add_recent_file(self, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files() if os.path.normcase(f) != os.path.normcase(filename)]
+        files.insert(0, filename)
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, files[:MAX_RECENT_FILES])
+        self._populate_recent_menu()
+
+    def _remove_recent_file(self, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files() if os.path.normcase(f) != os.path.normcase(filename)]
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, files)
+        self._populate_recent_menu()
+
+    def _clear_recent_files(self):
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, [])
+        self._populate_recent_menu()
+
+    def _populate_recent_menu(self):
+        self.recent_menu.clear()
+        files = self._recent_files()
+        if not files:
+            empty_action = QAction("(none)", self)
+            empty_action.setEnabled(False)
+            self.recent_menu.addAction(empty_action)
+            return
+        for filename in files:
+            action = QAction(filename, self)
+            action.triggered.connect(lambda checked=False, f=filename: self._open_recent_file(f))
+            self.recent_menu.addAction(action)
+        self.recent_menu.addSeparator()
+        clear_action = QAction("Clear Recent Files", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+
+    def _open_recent_file(self, filename):
+        if not os.path.isfile(filename):
+            QMessageBox.warning(
+                self, "File not found",
+                f"Could not find {filename}.\n\nIt will be removed from the recent files list.")
+            self._remove_recent_file(filename)
+            return
+        self._load_file(filename)
+
     def _set_filename_label(self, text):
         # full text always available on hover; visible label is elided (never
         # wrapped) so a long path can't force the window/toolbar to grow
@@ -1238,6 +1607,7 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
 
     def open_file_dialog(self):
         previous_dir = os.path.dirname(self.current_filename) if self.current_filename else ""
@@ -1258,6 +1628,8 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
+        self._add_recent_file(filename)
 
     # ---------- import from ADS Momentum ----------
 
@@ -1295,6 +1667,7 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
         self._show_import_warnings(result.warnings)
 
     def _import_momentum_subst(self):
@@ -1347,6 +1720,7 @@ class StackupEditorWindow(QDialog):
 
     def _reload_all_editors(self):
         root = self.tree.getroot()
+        self.variables_editor.set_root(root)
         self.materials_editor.set_root(root)
         self.dielectrics_editor.set_root(root)
         self.layers_editor.set_root(root)
@@ -1419,10 +1793,13 @@ class StackupEditorWindow(QDialog):
            util_stackup_reader.dielectric_layers_list._assign_implicit_references(). Empty
            (not an error) if the current data can't be resolved yet.
         """
+        root = self.tree.getroot() if self.tree is not None else None
+        variable_elements = self._variables_container(root) if root is not None else []
         try:
+            variables = _build_variables_list(variable_elements)
             dielectrics_list = stackup_reader.dielectric_layers_list()
             for element in dielectrics_elements:
-                dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+                dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
             dielectrics_list.calculate_zpositions()
         except (Exception, SystemExit):
             return {}
@@ -1490,6 +1867,7 @@ class StackupEditorWindow(QDialog):
         # reflects what's now actually on disk, so save() only asks about a format
         # upgrade again if the version changes further from here, not on every save
         self._loaded_schema_version = root.get("schemaVersion")
+        self._add_recent_file(filename)
 
         saved_values = getattr(self.MainWindow, "saved_values", {}) or {}
         substrate_file = saved_values.get("SubstrateFile")
@@ -1622,6 +2000,7 @@ class StackupEditorWindow(QDialog):
 
         self._reload_all_editors()
         self._on_changed(structural=True)
+        self._refresh_xml_preview_if_active()
 
     def _convert_to_reference_format(self):
         """Rewrites every Dielectric/Layer that isn't already Reference-based to use
@@ -1760,6 +2139,8 @@ class StackupEditorWindow(QDialog):
 
         message = (
             "Convert this stackup to the old schemaVersion \"2.0\" legacy format?\n\n"
+            "- Every \"=\" expression is resolved to its literal value, and the Variables "
+            "section is removed - schemaVersion \"2.0\" predates Variables/expressions.\n"
             "- Every Reference-positioned Layer is rewritten to absolute Zmin/Zmax. Every "
             "Reference-positioned Dielectric is rewritten to plain Thickness (implicit "
             "top-to-bottom stacking) wherever that alone still reproduces its current "
@@ -1779,6 +2160,13 @@ class StackupEditorWindow(QDialog):
         try:
             self._convert_to_legacy_format()
         except (Exception, SystemExit) as e:
+            # _resolve_all_expressions() inside _convert_to_legacy_format() mutates the
+            # tree progressively as it walks, unlike the rest of that function (whose only
+            # other fallible step, parse_substrate(), runs before any mutation) - restore
+            # the pre-conversion state so a failed attempt never leaves self.tree holding a
+            # partial mix of resolved/unresolved attributes the UI isn't showing
+            self.tree = ET.ElementTree(self._last_snapshot)
+            self._last_snapshot = copy.deepcopy(self.tree.getroot())
             QMessageBox.warning(self, "Conversion failed",
                                  f"Could not convert - current stackup could not be fully "
                                  f"resolved:\n{e}")
@@ -1792,18 +2180,36 @@ class StackupEditorWindow(QDialog):
 
         self._reload_all_editors()
         self._on_changed(structural=True)
+        self._refresh_xml_preview_if_active()
 
     def _convert_to_legacy_format(self):
-        """Rewrites every Reference-positioned Layer/Dielectric to absolute positioning
-           (preferring plain Thickness-based implicit stacking for a Dielectric wherever
-           that alone reproduces its current resolved position), removes DerivedLayers
-           (and any Layer entry that exists only to give a derived layer its Z-position),
-           removes thermal data (Tables, and Density/ThermalConductivity/
-           ThermalConductivityTable on every Material), and sets schemaVersion to "2.0" -
-           the format read before Reference/DerivedLayers/Tables existed. The inverse of
-           _convert_to_reference_format() above.
+        """Resolves every "="-expression to its literal value and removes the Variables
+           section, rewrites every Reference-positioned Layer/Dielectric to absolute
+           positioning (preferring plain Thickness-based implicit stacking for a
+           Dielectric wherever that alone reproduces its current resolved position),
+           removes DerivedLayers (and any Layer entry that exists only to give a derived
+           layer its Z-position), removes thermal data (Tables, and Density/
+           ThermalConductivity/ThermalConductivityTable on every Material), and sets
+           schemaVersion to "2.0" - the format read before Reference/DerivedLayers/
+           Tables/Variables existed. The inverse of _convert_to_reference_format() above.
         """
         root = self.tree.getroot()
+
+        # resolve every "="-expression to a literal first, and drop <Variables> - "2.0"
+        # predates it entirely. Doing this before anything else below means every
+        # existing raw-attribute read further down (e.g. layer_el.get("Reference") at
+        # a Layer that has no Reference, whose Zmin/Zmax the Reference-only rewrite loop
+        # below skips) already sees a plain literal, with no need to touch that loop's
+        # own logic.
+        variables = _build_variables_list(self._variables_container(root))
+        _resolve_all_expressions(root, variables)
+        variables_el = stackup_writer.get_variables_element(root)
+        if variables_el is not None:
+            root.remove(variables_el)
+        for child in list(root):
+            if child.tag is ET.Comment and (child.text or "").strip().startswith(
+                    stackup_writer.VARIABLES_FORMAT_COMMENT_PREFIX):
+                root.remove(child)
 
         # ground truth: fully resolved positions exactly as the reader sees them today,
         # captured once up front so every lookup below is against the *original* file,
@@ -1938,68 +2344,111 @@ class StackupEditorWindow(QDialog):
 
     # ---------- change propagation ----------
 
-    def _on_materials_changed(self, structural=False):
+    def _on_variables_changed(self, structural=False, edited_field=None):
+        # a variable's Name/Value may have changed (add/remove/rename too) - unlike a Material/
+        # Dielectric/Layer rename (which only the tabs "downstream" of it need to know about),
+        # a Variable can be referenced from a "="-expression in literally any tab, so this needs
+        # the broadest refresh of any change handler here
+        self.materials_editor.reload()
+        self.dielectrics_editor.reload()
+        self.layers_editor.reload()
+        self.derived_layers_editor.reload()
+        self._on_changed(structural=structural, edited_field=edited_field)
+
+    def _on_materials_changed(self, structural=False, edited_field=None):
         # material names may have changed (add/remove/rename) - refresh the
         # Material-reference dropdowns shown in the Dielectrics/Layers tabs
         self.dielectrics_editor.reload()
         self.layers_editor.reload()
-        self._on_changed(structural=structural)
+        self._on_changed(structural=structural, edited_field=edited_field)
 
-    def _on_dielectrics_changed(self, structural=False):
+    def _on_dielectrics_changed(self, structural=False, edited_field=None):
         # a Dielectric's Thickness/Zmin/Zmax/Name may have changed (add/remove/reorder
         # too) - the Layers tab's ResultZmin/ResultZmax and its Reference dropdown
         # choices both depend on the current Dielectrics tab state, so refresh it too
         self.layers_editor.reload()
-        self._on_changed(structural=structural)
+        self._on_changed(structural=structural, edited_field=edited_field)
 
-    def _on_changed(self, structural=False):
+    def _on_changed(self, structural=False, edited_field=None):
         # every edit path (cell edit, add/remove/move, offset edit) funnels through
         # here exactly once per logical user action, right after the mutation has
         # already been applied - which makes this the one place that needs to know
         # about undo, rather than instrumenting every mutating call site individually
         self._record_undo_point()
-        self._revalidate_and_refresh()
+        self._revalidate_and_refresh(edited_field=edited_field)
 
-    def _revalidate_and_refresh(self):
+    def _is_invalid_field(self, element, attr):
+        return self._invalid_field is not None and self._invalid_field == (element, attr)
+
+    def _revalidate_and_refresh(self, edited_field=None):
         if self.tree is None:
             return
         root = self.tree.getroot()
         errors = stackup_writer.validate_stackup(root)
+
+        was_valid = self._was_valid
+        self._was_valid = not errors
+        new_invalid_field = self._invalid_field
+        if errors and was_valid and edited_field is not None:
+            # this specific field's edit is what just made an until-now-valid file
+            # invalid - mark only that one field, not the (possibly unrelated) cell
+            # an error message happens to be worded around
+            new_invalid_field = edited_field
+        elif not errors:
+            new_invalid_field = None
+        if new_invalid_field != self._invalid_field:
+            self._invalid_field = new_invalid_field
+            # invalid_fn-driven red-text state just changed for some cell somewhere -
+            # reload every tab so whichever one owns that cell repaints it (same
+            # "just reload what might need it" approach _on_variables_changed already
+            # uses, cheap enough for these file sizes not to need finer targeting).
+            # Deferred, same reason ElementTableEditor._set_attr() defers its own
+            # reload_on_attr_change reload: this may be firing from inside the very
+            # cell widget (e.g. a combo box) a synchronous reload() would tear down
+            # and recreate out from under the signal that's still emitting it.
+            QTimer.singleShot(0, self._reload_all_editors)
+
         self._refresh_preview(root, errors)
         self._refresh_validation_status(errors)
 
-    # ---------- undo (single level) ----------
+    # ---------- undo (bounded multi-level) ----------
 
     def _reset_undo_baseline(self):
         # called after loading/creating a tree: that's a new starting point, not
         # an "edit" - there is nothing to undo back to across a file boundary
         self._last_snapshot = copy.deepcopy(self.tree.getroot()) if self.tree is not None else None
-        self._undo_snapshot = None
+        self._undo_stack = []
         self._set_undo_available(False)
+        # same "new starting point" reasoning: whatever was blamed for the previous
+        # file's invalidity is meaningless for this one
+        self._was_valid = True
+        self._invalid_field = None
 
     def _record_undo_point(self):
         if self.tree is None:
             return
         # self._last_snapshot is always an independent deep copy made before the
-        # change that was just applied - promote it to the undo target, then take
-        # a fresh independent copy of the now-current (post-change) state ready to
+        # change that was just applied - push it as the oldest-to-newest undo
+        # target, dropping the oldest entry once the buffer is full, then take a
+        # fresh independent copy of the now-current (post-change) state ready to
         # serve as the "before" snapshot for whatever gets edited next
-        self._undo_snapshot = self._last_snapshot
+        self._undo_stack.append(self._last_snapshot)
+        if len(self._undo_stack) > self.UNDO_LEVELS:
+            self._undo_stack.pop(0)
         self._last_snapshot = copy.deepcopy(self.tree.getroot())
-        self._set_undo_available(self._undo_snapshot is not None)
+        self._set_undo_available(bool(self._undo_stack))
 
     def _set_undo_available(self, enabled):
         self.undo_action.setEnabled(enabled)
 
     def undo(self):
-        if self._undo_snapshot is None or self.tree is None:
+        if not self._undo_stack or self.tree is None:
             return
-        self.tree = ET.ElementTree(self._undo_snapshot)
-        self._undo_snapshot = None
-        # the restored state becomes the new baseline; only one level of undo,
-        # so there is no redo and no further undo until another edit is made
+        self.tree = ET.ElementTree(self._undo_stack.pop())
+        # the restored state becomes the new baseline for whatever gets edited (or
+        # undone again) next; no redo - only stepping further back is supported
         self._last_snapshot = copy.deepcopy(self.tree.getroot())
-        self._set_undo_available(False)
+        self._set_undo_available(bool(self._undo_stack))
         self._reload_all_editors()
         self._revalidate_and_refresh()
 
@@ -2032,3 +2481,109 @@ class StackupEditorWindow(QDialog):
         else:
             self.status_label.setText(f"{len(errors)} problem(s) - see Save for details.")
             self.status_label.setStyleSheet("color: darkred;")
+
+    def _on_tab_changed(self, index):
+        if self.tabs.widget(index) is self.xml_preview_tab:
+            self._refresh_xml_preview()
+
+    def _refresh_xml_preview_if_active(self):
+        # the tab only auto-refreshes on switching into it (_on_tab_changed) - if it's
+        # already the active tab when the whole file changes underneath it (New/Open/
+        # Import/Convert), no tab switch happens to trigger that, so those call sites
+        # refresh explicitly instead, same as they already do for every other tab
+        if self.tabs.currentWidget() is self.xml_preview_tab:
+            self._refresh_xml_preview()
+
+    def _refresh_xml_preview(self):
+        """Shows exactly what Save would write right now, without side effects: works
+           on a deep copy (never touches self.tree), and - unlike an actual Save -
+           never pops the one-time "make implicit dielectric stacking explicit?"
+           confirmation (see _maybe_offer_explicit_dielectric_references()), since a
+           passive preview can't ask the user anything.
+        """
+        if self.tree is None:
+            self.xml_preview_edit.setPlainText("(no file loaded)")
+            return
+
+        root = self.tree.getroot()
+        errors = stackup_writer.validate_stackup(root)
+        if errors:
+            self.xml_preview_edit.setPlainText(
+                "Cannot preview - fix these problems before saving:\n\n" +
+                "\n".join(f"- {e}" for e in errors))
+            return
+
+        preview_tree = ET.ElementTree(copy.deepcopy(root))
+        app_name = getattr(self.MainWindow, "APP_NAME", "setupEM")
+        stackup_writer.stamp_header_comments(
+            preview_tree.getroot(), app_name, self.description_edit.toPlainText())
+
+        fd, temp_path = tempfile.mkstemp(suffix=".xml")
+        os.close(fd)
+        try:
+            stackup_writer.save_stackup_tree(preview_tree, temp_path)
+            with open(temp_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            text = f"(preview unavailable: {e})"
+        finally:
+            os.unlink(temp_path)
+        self.xml_preview_edit.setPlainText(text)
+
+
+# ------------------------------------------------------------------
+# Standalone launch (python stackupEditor.py [file.xml], or the stackupEditor
+# console script - see pyproject.toml)
+# ------------------------------------------------------------------
+
+class _StandaloneMainWindow:
+    """Minimal stand-in for the real setupEM/setupThermal MainWindow, used only when this
+       module is run on its own rather than opened from within the full app (Tools > Edit
+       Stackup XML...). Provides the handful of attributes/methods StackupEditorWindow needs
+       from its MainWindow argument. The preview coloring/labeling hooks reuse the same
+       permittivity/sheet-resistance-based defaults setupEM.py's real MainWindow uses (see
+       setup_common.epsilon_to_color()/default_stackup_dielectric_label()/
+       default_stackup_metal_label()) - shared there specifically so this stand-in doesn't
+       need its own, weaker copy (or an import from setupEM.py, which itself reaches this
+       module via setup_common.py, risking a circular import).
+    """
+    APP_NAME = "Stackup Editor"
+    saved_values = {}
+
+    def stackup_dielectric_color(self, material):
+        return epsilon_to_color(material.eps, 95)
+
+    def stackup_dielectric_label(self, dielectric, material):
+        return default_stackup_dielectric_label(dielectric, material)
+
+    def stackup_metal_label(self, metal, material, is_sheet):
+        return default_stackup_metal_label(metal, material, is_sheet)
+
+    def stackup_via_label_suffix(self, metal, material):
+        return ""
+
+
+def main():
+    """Run the Stackup Editor as a standalone application. Not how setupEM/setupThermal
+       normally open it (Tools > Edit Stackup XML..., with the real app's MainWindow) - this
+       is for editing/inspecting a stackup file on its own, with no gds2palace model/
+       simulation setup involved. Preview coloring/labeling still matches the real app (see
+       _StandaloneMainWindow).
+    """
+    app = QApplication(sys.argv)
+    if sys.platform.startswith("win"):
+        # matches setupEM.py's/setupThermal.py's main() - without this, Qt's default style
+        # on Windows looks visibly different (fonts/widget chrome) from the full app
+        app.setStyle(QStyleFactory.create("Windows"))
+
+    parser = argparse.ArgumentParser(description="Standalone stackup XML editor")
+    parser.add_argument("xmlfile", nargs="?", default=None, help="stackup XML file to open")
+    args = parser.parse_args()
+
+    window = StackupEditorWindow(_StandaloneMainWindow(), initial_filename=args.xmlfile)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
