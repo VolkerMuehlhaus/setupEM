@@ -1,6 +1,14 @@
-# What's New - August 15, 2026
+# What's New - August 18, 2026
 
 Changes since the version from about 3 months ago, focused on features that matter to end users. For general usage, see the main [README](../README.md).
+
+## Variables tab in the Stackup Editor
+
+The Stackup Editor now has a **Variables** tab for defining named values (plain numbers/text, or `=expression` referencing other variables) that can be reused across the whole stackup file. Type `=` into any numeric-capable cell on the other tabs to get an autocomplete list of declared variables.
+
+<img src="./png/variables1.png" alt="variables" width="750">
+
+This matches the `<Variables>`/`"=expr"` XML format gds2palace's stackup reader supports as of `schemaVersion="3.1"` - see the [XML stackup format doc](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/XML_stackup_format/XML_stackup_format.md) for the underlying format. Existing files and scripts that don't use Variables are unaffected.
 
 ## setupThermal: a new companion app for thermal simulation
 
