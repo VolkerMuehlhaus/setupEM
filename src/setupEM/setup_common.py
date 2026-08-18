@@ -672,7 +672,13 @@ class VectorWidget(QWidget):
         # get total dielectric parts, where each metal in a dielectric adds one part
         dielectric_shapes = []
         total_parts = 0
-        dielectrics_bottom_up = self.dielectrics_list.dielectrics[::-1]
+        # sorted by resolved zmin, not just reversed file/array order: a Reference-based
+        # dielectric's actual position comes from resolving its Reference by name (see
+        # dielectric_layers_list.resolve_references()), entirely independent of where it
+        # sits in the file - so reordering it there (e.g. Move Up/Down in the Dielectric
+        # Stack tab) must not change where it's drawn here, even though it does change
+        # self.dielectrics_list.dielectrics' own array order
+        dielectrics_bottom_up = sorted(self.dielectrics_list.dielectrics, key=lambda d: d.zmin)
         for dielectric in dielectrics_bottom_up:  # bottom up
             painter.setPen(penBlack)
 

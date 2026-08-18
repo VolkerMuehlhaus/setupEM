@@ -38,7 +38,9 @@ untouched on save.
 import argparse
 import copy
 import os
+import re
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
@@ -46,8 +48,11 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
     QScrollArea, QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
 )
-from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
-from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel
+from PySide6.QtGui import (
+    QColor, QFontMetrics, QKeySequence, QAction, QFontDatabase,
+    QSyntaxHighlighter, QTextCharFormat, QFont,
+)
+from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel, QSettings
 
 from gds2palace import stackup_reader
 
@@ -71,6 +76,14 @@ else:
     from .setup_common import (
         VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
+
+# QSettings scope for the "Open Recent" file list - shared across setupEM/setupThermal/
+# standalone launches, since they all edit the same kind of stackup XML file and should
+# see each other's recently opened/saved files.
+RECENT_FILES_ORG = "muehlhaus.com"
+RECENT_FILES_APP = "StackupEditor"
+RECENT_FILES_KEY = "recentFiles"
+MAX_RECENT_FILES = 10
 
 
 # ------------------------------------------------------------------
@@ -153,6 +166,30 @@ def _build_variables_list(variable_elements):
         variables.append(stackup_reader.variable(element))
     variables.resolve_all()
     return variables
+
+
+_INT_EXPRESSION_ATTRS = {"Layer", "Boundary"}
+
+
+def _resolve_all_expressions(root, variables):
+    """Rewrites every "="-expression attribute anywhere in the tree to its resolved
+       literal value, in place - used by _convert_to_legacy_format() so a
+       schemaVersion="2.0" file (predating <Variables>/"=" expressions) never contains
+       one. "Layer" (on <Layer>/<DerivedLayer>/<Operand>) and "Boundary" (on
+       <Dielectric>) are GDSII layer numbers and go through resolve_int_attr()'s
+       integer-value check instead of the generic resolve_attr(). Raises/exits the
+       same way resolve_attr()/resolve_int_attr() themselves do on an undefined
+       variable or invalid expression.
+    """
+    for element in root.iter():
+        for key, value in list(element.attrib.items()):
+            if not (isinstance(value, str) and value.startswith("=")):
+                continue
+            if key in _INT_EXPRESSION_ATTRS:
+                resolved = stackup_reader.resolve_int_attr(element, key, variables)
+            else:
+                resolved = stackup_reader.resolve_attr(element, key, None, variables)
+            element.set(key, resolved)
 
 
 def _compute_variable_values(elements):
@@ -370,6 +407,68 @@ class _CommitOnFocusOutTextEdit(QPlainTextEdit):
         self.editingFinished.emit()
 
 
+class _XmlSyntaxHighlighter(QSyntaxHighlighter):
+    """Basic XML syntax highlighter for the read-only XML Preview tab: tag names,
+       attribute names, quoted attribute values, and comments (including multi-line
+       ones, e.g. a multi-line File Description stamped as a header comment) each get
+       their own color. Re-run by Qt automatically whenever setPlainText() replaces
+       the document's whole text, which is the only way this text ever changes -
+       there is no interactive editing to keep up with.
+    """
+
+    _COMMENT_BLOCK_STATE = 1
+
+    def __init__(self, document):
+        super().__init__(document)
+
+        def make_format(color, bold=False, italic=False):
+            text_format = QTextCharFormat()
+            text_format.setForeground(QColor(color))
+            if bold:
+                text_format.setFontWeight(QFont.Bold)
+            text_format.setFontItalic(italic)
+            return text_format
+
+        self._tag_format = make_format("#0000AA", bold=True)
+        self._attr_name_format = make_format("#880000")
+        self._attr_value_format = make_format("#008000")
+        self._decl_format = make_format("#555555", italic=True)
+        self._comment_format = make_format("#808080", italic=True)
+
+        self._tag_pattern = re.compile(r"</?\s*([A-Za-z_][\w.:-]*)")
+        self._attr_name_pattern = re.compile(r"\b([A-Za-z_][\w.:-]*)(?=\s*=\s*\")")
+        self._attr_value_pattern = re.compile(r'"[^"]*"')
+        self._decl_pattern = re.compile(r"<\?.*?\?>")
+
+    def highlightBlock(self, text):
+        # applied first - any accidental match inside a comment's own text (e.g. a
+        # File Description that happens to mention "<Layer>") is overwritten by the
+        # comment formatting pass at the end, which always wins
+        for match in self._decl_pattern.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self._decl_format)
+        for match in self._tag_pattern.finditer(text):
+            self.setFormat(match.start(1), match.end(1) - match.start(1), self._tag_format)
+        for match in self._attr_name_pattern.finditer(text):
+            self.setFormat(match.start(1), match.end(1) - match.start(1), self._attr_name_format)
+        for match in self._attr_value_pattern.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self._attr_value_format)
+
+        # multi-line <!-- comment --> spans: start at column 0 while continuing a
+        # comment from the previous block (previousBlockState() is unaffected by
+        # anything done in this call, so it still reflects that block's own result)
+        self.setCurrentBlockState(0)
+        start = 0 if self.previousBlockState() == self._COMMENT_BLOCK_STATE else text.find("<!--")
+        while start >= 0:
+            end = text.find("-->", start)
+            if end == -1:
+                self.setFormat(start, len(text) - start, self._comment_format)
+                self.setCurrentBlockState(self._COMMENT_BLOCK_STATE)
+                break
+            length = end - start + len("-->")
+            self.setFormat(start, length, self._comment_format)
+            start = text.find("<!--", start + length)
+
+
 def _unique_name(existing_names, base):
     if base not in existing_names:
         return base
@@ -418,13 +517,15 @@ class ElementTableEditor(QWidget):
 
     _GRAY = QColor(235, 235, 235)
     _COMPUTED_TEXT = QColor(0, 128, 0)
+    _INVALID_TEXT = QColor("darkred")
 
     def __init__(self, columns, container_fn, add_fn, remove_fn, default_attrs_fn, on_changed,
                  move_fn=None, material_choices_fn=None, type_choices=None,
                  strip_fn=None, not_applicable_fn=None, blank_if_default_fn=None,
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
                  pre_set_attr_fn=None, reference_choices_fn=None,
-                 header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None):
+                 header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None,
+                 invalid_fn=None):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -475,6 +576,11 @@ class ElementTableEditor(QWidget):
              _VariableCompletionDelegate) - lets a user type "=" and pick a matching variable
              from a popup instead of typing the full name. Omit for a tab where this doesn't
              make sense (there currently isn't one, but the param stays optional for safety).
+           invalid_fn(element, attr) -> bool: for "text" columns, marks a cell's text
+             (not background, unlike gray_fn) dark red - used for the one specific
+             field whose edit was what just made the whole file invalid (see
+             StackupEditorWindow._is_invalid_field()), so the user's eye lands on the
+             actual cause instead of just the generic status line/Save error list.
         """
         super().__init__()
         self.columns = columns
@@ -494,6 +600,7 @@ class ElementTableEditor(QWidget):
         self.reload_on_attr_change = reload_on_attr_change
         self.compute_fn = compute_fn
         self.gray_fn = gray_fn
+        self.invalid_fn = invalid_fn
         self.pre_set_attr_fn = pre_set_attr_fn
 
         self.root = None
@@ -586,6 +693,8 @@ class ElementTableEditor(QWidget):
                     item.setBackground(self._GRAY)
                 elif self.gray_fn and self.gray_fn(element, attr):
                     item.setBackground(self._GRAY)
+                if self.invalid_fn and self.invalid_fn(element, attr):
+                    item.setForeground(self._INVALID_TEXT)
                 self.table.setItem(row, col, item)
             elif kind == "computed":
                 # computed cells are always derived/read-only - marked with green text
@@ -671,17 +780,22 @@ class ElementTableEditor(QWidget):
                 del element.attrib[attr]
         else:
             element.set(attr, value)
+        # only a "text" column is a free-typed value that can plausibly be "the"
+        # cause of a validation error by itself (see invalid_fn/_populate_row) -
+        # combo/color cells are constrained to picked choices, not blamed here
+        kind = next((k for a, _h, k in self.columns if a == attr), None)
+        edited_field = (element, attr) if kind == "text" else None
         if attr in self.reload_on_attr_change:
             # deferred: this may be firing from inside the very cell widget (e.g. a
             # combo box) that reload() is about to tear down and recreate, so let the
             # current signal/event finish unwinding first
-            QTimer.singleShot(0, self._reload_and_notify)
+            QTimer.singleShot(0, lambda ef=edited_field: self._reload_and_notify(ef))
         else:
-            self.on_changed()
+            self.on_changed(edited_field=edited_field)
 
-    def _reload_and_notify(self):
+    def _reload_and_notify(self, edited_field=None):
         self.reload()
-        self.on_changed()
+        self.on_changed(edited_field=edited_field)
 
     def _set_operands(self, element, text):
         if self._loading:
@@ -795,6 +909,8 @@ class StackupEditorWindow(QDialog):
        being embedded here, so both windows can be sized/moved independently.
     """
 
+    UNDO_LEVELS = 3
+
     def __init__(self, MainWindow, initial_filename=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -808,13 +924,22 @@ class StackupEditorWindow(QDialog):
         self.tree = None
         self.current_filename = None
 
-        # single-level undo: _last_snapshot is always an independent deep copy of
-        # the tree as it was right before the most recent change; _undo_snapshot
-        # is what Undo restores to (the snapshot before THAT change). See
-        # _record_undo_point()/undo() - deliberately just one step, not a stack,
-        # per explicit request to keep this simple.
+        # bounded multi-level undo: _last_snapshot is always an independent deep
+        # copy of the tree as it was right before the most recent change;
+        # _undo_stack holds up to UNDO_LEVELS such snapshots, oldest first, each
+        # one what Undo restores to. See _record_undo_point()/undo(). No redo -
+        # only stepping further back is supported.
         self._last_snapshot = None
-        self._undo_snapshot = None
+        self._undo_stack = []
+
+        # tracks whether the file was valid as of the last revalidation, and which
+        # (element, attr) field - if any - is currently blamed for making it invalid
+        # (only ever set to the field whose own edit flipped valid->invalid; cleared
+        # again as soon as the file is valid, however that happened). See
+        # _revalidate_and_refresh()/_is_invalid_field(), reset in _reset_undo_baseline()
+        # for the same "new starting point, not an edit" reason undo state resets there.
+        self._was_valid = True
+        self._invalid_field = None
 
         # asked once per loaded/new file (reset in new_file()/_load_file()): whether to
         # write auto-assigned implicit-Dielectric-stacking References into the XML at
@@ -848,6 +973,9 @@ class StackupEditorWindow(QDialog):
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_action.triggered.connect(self.open_file_dialog)
         self.file_menu.addAction(self.open_action)
+
+        self.recent_menu = self.file_menu.addMenu("Open &Recent")
+        self._populate_recent_menu()
 
         self.file_menu.addSeparator()
 
@@ -922,6 +1050,7 @@ class StackupEditorWindow(QDialog):
             # ResolvedValue depends on both - must live-refresh
             reload_on_attr_change={"Value", "Type"},
             variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         variables_tab = QWidget()
@@ -951,6 +1080,7 @@ class StackupEditorWindow(QDialog):
                              "Density", "ThermalConductivity")
             },
             variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         self.dielectrics_editor = ElementTableEditor(
@@ -975,6 +1105,7 @@ class StackupEditorWindow(QDialog):
                 "Thickness": "Numeric value, or \"=expression\" referencing a Variable",
             },
             variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         self.layers_editor = ElementTableEditor(
@@ -995,6 +1126,7 @@ class StackupEditorWindow(QDialog):
                 "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
             },
             variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         layers_tab = QWidget()
@@ -1020,6 +1152,7 @@ class StackupEditorWindow(QDialog):
             type_choices=list(stackup_writer.VALID_DERIVED_OPERATIONS),
             operand_lookup_fn=self._layer_name_by_number,
             variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
         )
 
         derived_layers_tab = QWidget()
@@ -1044,6 +1177,17 @@ class StackupEditorWindow(QDialog):
         description_layout.addWidget(self.description_edit)
         description_tab.setLayout(description_layout)
 
+        xml_preview_tab = QWidget()
+        xml_preview_layout = QVBoxLayout()
+        self.xml_preview_edit = QPlainTextEdit()
+        self.xml_preview_edit.setReadOnly(True)
+        self.xml_preview_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.xml_preview_edit.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self._xml_preview_highlighter = _XmlSyntaxHighlighter(self.xml_preview_edit.document())
+        xml_preview_layout.addWidget(self.xml_preview_edit)
+        xml_preview_tab.setLayout(xml_preview_layout)
+        self.xml_preview_tab = xml_preview_tab
+
         self.tabs = QTabWidget()
         self.tabs.addTab(variables_tab, "Variables")
         self.tabs.addTab(self.materials_editor, "Materials")
@@ -1051,8 +1195,10 @@ class StackupEditorWindow(QDialog):
         self.tabs.addTab(layers_tab, "Layers")
         self.tabs.addTab(derived_layers_tab, "Derived Layers")
         self.tabs.addTab(description_tab, "File Description")
+        self.tabs.addTab(xml_preview_tab, "XML Preview")
         self.tabs.setCurrentWidget(self.materials_editor)   # Variables is first in tab order,
                                                              # but Materials is what opens by default
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         outer_layout.addWidget(self.tabs)
 
@@ -1390,6 +1536,60 @@ class StackupEditorWindow(QDialog):
 
     # ---------- file actions ----------
 
+    # ---------- recent files ----------
+
+    @staticmethod
+    def _recent_files():
+        files = QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).value(RECENT_FILES_KEY, [])
+        # QSettings collapses a saved one-item list back to a bare string on read -
+        # a well-known quirk of the native (registry/plist) backends
+        if isinstance(files, str):
+            files = [files] if files else []
+        return list(files)
+
+    def _add_recent_file(self, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files() if os.path.normcase(f) != os.path.normcase(filename)]
+        files.insert(0, filename)
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, files[:MAX_RECENT_FILES])
+        self._populate_recent_menu()
+
+    def _remove_recent_file(self, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files() if os.path.normcase(f) != os.path.normcase(filename)]
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, files)
+        self._populate_recent_menu()
+
+    def _clear_recent_files(self):
+        QSettings(RECENT_FILES_ORG, RECENT_FILES_APP).setValue(RECENT_FILES_KEY, [])
+        self._populate_recent_menu()
+
+    def _populate_recent_menu(self):
+        self.recent_menu.clear()
+        files = self._recent_files()
+        if not files:
+            empty_action = QAction("(none)", self)
+            empty_action.setEnabled(False)
+            self.recent_menu.addAction(empty_action)
+            return
+        for filename in files:
+            action = QAction(filename, self)
+            action.triggered.connect(lambda checked=False, f=filename: self._open_recent_file(f))
+            self.recent_menu.addAction(action)
+        self.recent_menu.addSeparator()
+        clear_action = QAction("Clear Recent Files", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+
+    def _open_recent_file(self, filename):
+        if not os.path.isfile(filename):
+            QMessageBox.warning(
+                self, "File not found",
+                f"Could not find {filename}.\n\nIt will be removed from the recent files list.")
+            self._remove_recent_file(filename)
+            return
+        self._load_file(filename)
+
     def _set_filename_label(self, text):
         # full text always available on hover; visible label is elided (never
         # wrapped) so a long path can't force the window/toolbar to grow
@@ -1407,6 +1607,7 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
 
     def open_file_dialog(self):
         previous_dir = os.path.dirname(self.current_filename) if self.current_filename else ""
@@ -1427,6 +1628,8 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
+        self._add_recent_file(filename)
 
     # ---------- import from ADS Momentum ----------
 
@@ -1464,6 +1667,7 @@ class StackupEditorWindow(QDialog):
         self._reload_all_editors()
         self._reset_undo_baseline()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
         self._show_import_warnings(result.warnings)
 
     def _import_momentum_subst(self):
@@ -1663,6 +1867,7 @@ class StackupEditorWindow(QDialog):
         # reflects what's now actually on disk, so save() only asks about a format
         # upgrade again if the version changes further from here, not on every save
         self._loaded_schema_version = root.get("schemaVersion")
+        self._add_recent_file(filename)
 
         saved_values = getattr(self.MainWindow, "saved_values", {}) or {}
         substrate_file = saved_values.get("SubstrateFile")
@@ -1795,6 +2000,7 @@ class StackupEditorWindow(QDialog):
 
         self._reload_all_editors()
         self._on_changed(structural=True)
+        self._refresh_xml_preview_if_active()
 
     def _convert_to_reference_format(self):
         """Rewrites every Dielectric/Layer that isn't already Reference-based to use
@@ -1933,6 +2139,8 @@ class StackupEditorWindow(QDialog):
 
         message = (
             "Convert this stackup to the old schemaVersion \"2.0\" legacy format?\n\n"
+            "- Every \"=\" expression is resolved to its literal value, and the Variables "
+            "section is removed - schemaVersion \"2.0\" predates Variables/expressions.\n"
             "- Every Reference-positioned Layer is rewritten to absolute Zmin/Zmax. Every "
             "Reference-positioned Dielectric is rewritten to plain Thickness (implicit "
             "top-to-bottom stacking) wherever that alone still reproduces its current "
@@ -1952,6 +2160,13 @@ class StackupEditorWindow(QDialog):
         try:
             self._convert_to_legacy_format()
         except (Exception, SystemExit) as e:
+            # _resolve_all_expressions() inside _convert_to_legacy_format() mutates the
+            # tree progressively as it walks, unlike the rest of that function (whose only
+            # other fallible step, parse_substrate(), runs before any mutation) - restore
+            # the pre-conversion state so a failed attempt never leaves self.tree holding a
+            # partial mix of resolved/unresolved attributes the UI isn't showing
+            self.tree = ET.ElementTree(self._last_snapshot)
+            self._last_snapshot = copy.deepcopy(self.tree.getroot())
             QMessageBox.warning(self, "Conversion failed",
                                  f"Could not convert - current stackup could not be fully "
                                  f"resolved:\n{e}")
@@ -1965,18 +2180,36 @@ class StackupEditorWindow(QDialog):
 
         self._reload_all_editors()
         self._on_changed(structural=True)
+        self._refresh_xml_preview_if_active()
 
     def _convert_to_legacy_format(self):
-        """Rewrites every Reference-positioned Layer/Dielectric to absolute positioning
-           (preferring plain Thickness-based implicit stacking for a Dielectric wherever
-           that alone reproduces its current resolved position), removes DerivedLayers
-           (and any Layer entry that exists only to give a derived layer its Z-position),
-           removes thermal data (Tables, and Density/ThermalConductivity/
-           ThermalConductivityTable on every Material), and sets schemaVersion to "2.0" -
-           the format read before Reference/DerivedLayers/Tables existed. The inverse of
-           _convert_to_reference_format() above.
+        """Resolves every "="-expression to its literal value and removes the Variables
+           section, rewrites every Reference-positioned Layer/Dielectric to absolute
+           positioning (preferring plain Thickness-based implicit stacking for a
+           Dielectric wherever that alone reproduces its current resolved position),
+           removes DerivedLayers (and any Layer entry that exists only to give a derived
+           layer its Z-position), removes thermal data (Tables, and Density/
+           ThermalConductivity/ThermalConductivityTable on every Material), and sets
+           schemaVersion to "2.0" - the format read before Reference/DerivedLayers/
+           Tables/Variables existed. The inverse of _convert_to_reference_format() above.
         """
         root = self.tree.getroot()
+
+        # resolve every "="-expression to a literal first, and drop <Variables> - "2.0"
+        # predates it entirely. Doing this before anything else below means every
+        # existing raw-attribute read further down (e.g. layer_el.get("Reference") at
+        # a Layer that has no Reference, whose Zmin/Zmax the Reference-only rewrite loop
+        # below skips) already sees a plain literal, with no need to touch that loop's
+        # own logic.
+        variables = _build_variables_list(self._variables_container(root))
+        _resolve_all_expressions(root, variables)
+        variables_el = stackup_writer.get_variables_element(root)
+        if variables_el is not None:
+            root.remove(variables_el)
+        for child in list(root):
+            if child.tag is ET.Comment and (child.text or "").strip().startswith(
+                    stackup_writer.VARIABLES_FORMAT_COMMENT_PREFIX):
+                root.remove(child)
 
         # ground truth: fully resolved positions exactly as the reader sees them today,
         # captured once up front so every lookup below is against the *original* file,
@@ -2111,7 +2344,7 @@ class StackupEditorWindow(QDialog):
 
     # ---------- change propagation ----------
 
-    def _on_variables_changed(self, structural=False):
+    def _on_variables_changed(self, structural=False, edited_field=None):
         # a variable's Name/Value may have changed (add/remove/rename too) - unlike a Material/
         # Dielectric/Layer rename (which only the tabs "downstream" of it need to know about),
         # a Variable can be referenced from a "="-expression in literally any tab, so this needs
@@ -2120,70 +2353,102 @@ class StackupEditorWindow(QDialog):
         self.dielectrics_editor.reload()
         self.layers_editor.reload()
         self.derived_layers_editor.reload()
-        self._on_changed(structural=structural)
+        self._on_changed(structural=structural, edited_field=edited_field)
 
-    def _on_materials_changed(self, structural=False):
+    def _on_materials_changed(self, structural=False, edited_field=None):
         # material names may have changed (add/remove/rename) - refresh the
         # Material-reference dropdowns shown in the Dielectrics/Layers tabs
         self.dielectrics_editor.reload()
         self.layers_editor.reload()
-        self._on_changed(structural=structural)
+        self._on_changed(structural=structural, edited_field=edited_field)
 
-    def _on_dielectrics_changed(self, structural=False):
+    def _on_dielectrics_changed(self, structural=False, edited_field=None):
         # a Dielectric's Thickness/Zmin/Zmax/Name may have changed (add/remove/reorder
         # too) - the Layers tab's ResultZmin/ResultZmax and its Reference dropdown
         # choices both depend on the current Dielectrics tab state, so refresh it too
         self.layers_editor.reload()
-        self._on_changed(structural=structural)
+        self._on_changed(structural=structural, edited_field=edited_field)
 
-    def _on_changed(self, structural=False):
+    def _on_changed(self, structural=False, edited_field=None):
         # every edit path (cell edit, add/remove/move, offset edit) funnels through
         # here exactly once per logical user action, right after the mutation has
         # already been applied - which makes this the one place that needs to know
         # about undo, rather than instrumenting every mutating call site individually
         self._record_undo_point()
-        self._revalidate_and_refresh()
+        self._revalidate_and_refresh(edited_field=edited_field)
 
-    def _revalidate_and_refresh(self):
+    def _is_invalid_field(self, element, attr):
+        return self._invalid_field is not None and self._invalid_field == (element, attr)
+
+    def _revalidate_and_refresh(self, edited_field=None):
         if self.tree is None:
             return
         root = self.tree.getroot()
         errors = stackup_writer.validate_stackup(root)
+
+        was_valid = self._was_valid
+        self._was_valid = not errors
+        new_invalid_field = self._invalid_field
+        if errors and was_valid and edited_field is not None:
+            # this specific field's edit is what just made an until-now-valid file
+            # invalid - mark only that one field, not the (possibly unrelated) cell
+            # an error message happens to be worded around
+            new_invalid_field = edited_field
+        elif not errors:
+            new_invalid_field = None
+        if new_invalid_field != self._invalid_field:
+            self._invalid_field = new_invalid_field
+            # invalid_fn-driven red-text state just changed for some cell somewhere -
+            # reload every tab so whichever one owns that cell repaints it (same
+            # "just reload what might need it" approach _on_variables_changed already
+            # uses, cheap enough for these file sizes not to need finer targeting).
+            # Deferred, same reason ElementTableEditor._set_attr() defers its own
+            # reload_on_attr_change reload: this may be firing from inside the very
+            # cell widget (e.g. a combo box) a synchronous reload() would tear down
+            # and recreate out from under the signal that's still emitting it.
+            QTimer.singleShot(0, self._reload_all_editors)
+
         self._refresh_preview(root, errors)
         self._refresh_validation_status(errors)
 
-    # ---------- undo (single level) ----------
+    # ---------- undo (bounded multi-level) ----------
 
     def _reset_undo_baseline(self):
         # called after loading/creating a tree: that's a new starting point, not
         # an "edit" - there is nothing to undo back to across a file boundary
         self._last_snapshot = copy.deepcopy(self.tree.getroot()) if self.tree is not None else None
-        self._undo_snapshot = None
+        self._undo_stack = []
         self._set_undo_available(False)
+        # same "new starting point" reasoning: whatever was blamed for the previous
+        # file's invalidity is meaningless for this one
+        self._was_valid = True
+        self._invalid_field = None
 
     def _record_undo_point(self):
         if self.tree is None:
             return
         # self._last_snapshot is always an independent deep copy made before the
-        # change that was just applied - promote it to the undo target, then take
-        # a fresh independent copy of the now-current (post-change) state ready to
+        # change that was just applied - push it as the oldest-to-newest undo
+        # target, dropping the oldest entry once the buffer is full, then take a
+        # fresh independent copy of the now-current (post-change) state ready to
         # serve as the "before" snapshot for whatever gets edited next
-        self._undo_snapshot = self._last_snapshot
+        self._undo_stack.append(self._last_snapshot)
+        if len(self._undo_stack) > self.UNDO_LEVELS:
+            self._undo_stack.pop(0)
         self._last_snapshot = copy.deepcopy(self.tree.getroot())
-        self._set_undo_available(self._undo_snapshot is not None)
+        self._set_undo_available(bool(self._undo_stack))
 
     def _set_undo_available(self, enabled):
         self.undo_action.setEnabled(enabled)
 
     def undo(self):
-        if self._undo_snapshot is None or self.tree is None:
+        if not self._undo_stack or self.tree is None:
             return
-        self.tree = ET.ElementTree(self._undo_snapshot)
-        self._undo_snapshot = None
-        # the restored state becomes the new baseline; only one level of undo,
-        # so there is no redo and no further undo until another edit is made
+        self.tree = ET.ElementTree(self._undo_stack.pop())
+        # the restored state becomes the new baseline for whatever gets edited (or
+        # undone again) next; no redo - only stepping further back is supported
         self._last_snapshot = copy.deepcopy(self.tree.getroot())
-        self._set_undo_available(False)
+        self._set_undo_available(bool(self._undo_stack))
         self._reload_all_editors()
         self._revalidate_and_refresh()
 
@@ -2216,6 +2481,54 @@ class StackupEditorWindow(QDialog):
         else:
             self.status_label.setText(f"{len(errors)} problem(s) - see Save for details.")
             self.status_label.setStyleSheet("color: darkred;")
+
+    def _on_tab_changed(self, index):
+        if self.tabs.widget(index) is self.xml_preview_tab:
+            self._refresh_xml_preview()
+
+    def _refresh_xml_preview_if_active(self):
+        # the tab only auto-refreshes on switching into it (_on_tab_changed) - if it's
+        # already the active tab when the whole file changes underneath it (New/Open/
+        # Import/Convert), no tab switch happens to trigger that, so those call sites
+        # refresh explicitly instead, same as they already do for every other tab
+        if self.tabs.currentWidget() is self.xml_preview_tab:
+            self._refresh_xml_preview()
+
+    def _refresh_xml_preview(self):
+        """Shows exactly what Save would write right now, without side effects: works
+           on a deep copy (never touches self.tree), and - unlike an actual Save -
+           never pops the one-time "make implicit dielectric stacking explicit?"
+           confirmation (see _maybe_offer_explicit_dielectric_references()), since a
+           passive preview can't ask the user anything.
+        """
+        if self.tree is None:
+            self.xml_preview_edit.setPlainText("(no file loaded)")
+            return
+
+        root = self.tree.getroot()
+        errors = stackup_writer.validate_stackup(root)
+        if errors:
+            self.xml_preview_edit.setPlainText(
+                "Cannot preview - fix these problems before saving:\n\n" +
+                "\n".join(f"- {e}" for e in errors))
+            return
+
+        preview_tree = ET.ElementTree(copy.deepcopy(root))
+        app_name = getattr(self.MainWindow, "APP_NAME", "setupEM")
+        stackup_writer.stamp_header_comments(
+            preview_tree.getroot(), app_name, self.description_edit.toPlainText())
+
+        fd, temp_path = tempfile.mkstemp(suffix=".xml")
+        os.close(fd)
+        try:
+            stackup_writer.save_stackup_tree(preview_tree, temp_path)
+            with open(temp_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            text = f"(preview unavailable: {e})"
+        finally:
+            os.unlink(temp_path)
+        self.xml_preview_edit.setPlainText(text)
 
 
 # ------------------------------------------------------------------

@@ -115,38 +115,78 @@ def _sanitize_comment_text(text):
   return text.rstrip("-")
 
 
-def _is_header_comment(comment_element):
-  """True if this Comment node looks like one this module previously wrote as part
-     of the header block (generator stamp / separator / file description), so a
-     re-stamp can cleanly remove the old block before writing a fresh one.
+def _new_format_description(children):
+  """If children[0:] starts with the current header format - generator stamp,
+     separator, one unprefixed comment per description line (just the user's own
+     text, nothing prepended), closing separator - returns (lines, block_length):
+     the description as a list of lines, and how many leading children make up the
+     whole block (so a re-stamp knows exactly how much to remove). Returns (None, 0)
+     if it doesn't match (no description block, or a legacy single-comment one -
+     see _legacy_description_block_length()).
   """
-  text = (comment_element.text or "").strip()
-  return (text.startswith(GENERATOR_COMMENT_PREFIX)
-          or text.startswith(DESCRIPTION_COMMENT_PREFIX)
-          or text == _HEADER_SEPARATOR_TEXT)
+  if not (len(children) >= 2
+          and children[0].tag is ET.Comment
+          and (children[0].text or "").strip().startswith(GENERATOR_COMMENT_PREFIX)
+          and children[1].tag is ET.Comment
+          and (children[1].text or "").strip() == _HEADER_SEPARATOR_TEXT):
+    return None, 0
+  for i in range(2, len(children)):
+    if children[i].tag is not ET.Comment:
+      return None, 0
+    if (children[i].text or "").strip() == _HEADER_SEPARATOR_TEXT:
+      return [(children[k].text or "").strip() for k in range(2, i)], i + 1
+  return None, 0
+
+
+def _legacy_description_block_length(children):
+  """Before each description line got its own comment, this module wrote the whole
+     (possibly multi-line) description as a single comment's text, prefixed with
+     DESCRIPTION_COMMENT_PREFIX, right after the generator stamp and separator - with
+     no closing separator following it. Returns 3 (generator + separator + that one
+     comment) if children[0:] matches this old shape, else 0 - lets a re-stamp of an
+     old file replace it with the current format instead of leaving it as an orphaned
+     stale comment alongside the new block.
+  """
+  if (len(children) >= 3
+      and children[0].tag is ET.Comment
+      and (children[0].text or "").strip().startswith(GENERATOR_COMMENT_PREFIX)
+      and children[1].tag is ET.Comment
+      and (children[1].text or "").strip() == _HEADER_SEPARATOR_TEXT
+      and children[2].tag is ET.Comment
+      and (children[2].text or "").strip().startswith(DESCRIPTION_COMMENT_PREFIX)):
+    return 3
+  return 0
 
 
 def stamp_header_comments(root, app_name, description=""):
   """Insert or update the header comment block at the very top of the stackup root:
      a fixed "created with" stamp, and - only if description is non-empty - a
-     separator line followed by the user-supplied file description. Idempotent:
-     replaces a previously-stamped header block instead of stacking a new one on
-     every save; any other pre-existing comments/elements are left untouched.
+     separator line, one comment per description line (just the user's text, with
+     no prefix added), and a closing separator. Idempotent: replaces a previously-
+     stamped header block (old single-comment format included) instead of stacking a
+     new one on every save; any other pre-existing comments/elements are left
+     untouched.
   Args:
       root (xml.etree.ElementTree.Element): the <Stackup> root element
       app_name (string): name of the host application (e.g. "setupEM", "setupThermal")
       description (string): optional free-text description of the file
   """
   children = list(root)
-  while children and children[0].tag is ET.Comment and _is_header_comment(children[0]):
-    root.remove(children[0])
-    children = list(root)
+  _, block_length = _new_format_description(children)
+  if block_length == 0:
+    block_length = _legacy_description_block_length(children)
+  if block_length == 0 and children and children[0].tag is ET.Comment and (
+      children[0].text or "").strip().startswith(GENERATOR_COMMENT_PREFIX):
+    block_length = 1  # bare generator stamp, no description previously present
+  for _ in range(block_length):
+    root.remove(root[0])
 
   nodes = [ET.Comment(f" {_sanitize_comment_text(GENERATOR_COMMENT_PREFIX + ' ' + app_name)} ")]
-  description = _sanitize_comment_text((description or "").strip())
-  if description:
+  description_lines = [_sanitize_comment_text(line) for line in (description or "").strip().splitlines()]
+  if description_lines:
     nodes.append(ET.Comment(f" {_HEADER_SEPARATOR_TEXT} "))
-    nodes.append(ET.Comment(f" {DESCRIPTION_COMMENT_PREFIX} {description} "))
+    nodes.extend(ET.Comment(f" {line} ") for line in description_lines)
+    nodes.append(ET.Comment(f" {_HEADER_SEPARATOR_TEXT} "))
 
   for i, node in enumerate(nodes):
     root.insert(i, node)
@@ -154,10 +194,15 @@ def stamp_header_comments(root, app_name, description=""):
 
 def get_file_description(root):
   """Return the free-text file description previously stamped by the editor (see
-     stamp_header_comments), or "" if none is present.
+     stamp_header_comments), or "" if none is present. Understands both the current
+     one-comment-per-line format and the legacy single-comment format, for a file
+     saved before this format changed.
   Args:
       root (xml.etree.ElementTree.Element): the <Stackup> root element
   """
+  lines, _ = _new_format_description(list(root))
+  if lines is not None:
+    return "\n".join(lines)
   for child in root:
     if child.tag is ET.Comment:
       text = (child.text or "").strip()
