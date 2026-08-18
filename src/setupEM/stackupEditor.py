@@ -17,33 +17,37 @@
 ########################################################################
 
 """
-stackup_editor.py
+stackupEditor.py
 
 GUI editor for stackup XML files (see gds2palace/XML_stackup_format.md):
-Materials, the Dielectric stack, drawn Layers, and DerivedLayers (boolean
-layer operations), with a live cross-section preview reusing
-setup_common.VectorWidget. Opened from Tools > Edit Stackup XML... in
+Variables, Materials, the Dielectric stack, drawn Layers, and DerivedLayers
+(boolean layer operations), with a live cross-section preview reusing
+setup_common.VectorWidget. Normally opened from Tools > Edit Stackup XML... in
 setupEM / setupThermal (wired up in setup_common.MainWindowBase.create_menu_bar(),
-so it is available in both apps for free).
+so it is available in both apps for free) - but also runnable standalone, either
+directly (`python stackupEditor.py [file.xml]`) or via the `stackupEditor` console
+script installed with this package (see main() below and pyproject.toml).
 
 Tables (thermal conductivity lookups) is not editable here. Loading goes
 through gds2palace.stackup_writer.load_stackup_tree(), which preserves XML
-comments, and only Material/Dielectric/Layer/Substrate/DerivedLayer elements
-are ever touched, so Tables - and any comments in it - round-trips untouched
-on save.
+comments, and only Variable/Material/Dielectric/Layer/Substrate/DerivedLayer
+elements are ever touched, so Tables - and any comments in it - round-trips
+untouched on save.
 """
 
+import argparse
 import copy
 import os
+import sys
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
+    QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog, QMenuBar, QInputDialog,
+    QScrollArea, QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
 )
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence, QAction
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel
 
 from gds2palace import stackup_reader
 
@@ -60,16 +64,34 @@ else:
 # __package__ is None/"" when this file is run directly rather than imported
 # as part of the setupEM package, so relative import fails.
 if __package__ in (None, ""):
-    from setup_common import VectorWidget
+    from setup_common import (
+        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+    )
 else:
-    from .setup_common import VectorWidget
+    from .setup_common import (
+        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+    )
 
 
 # ------------------------------------------------------------------
 # Column specs: (attribute, header label, kind)
 # kind in {"text", "computed", "materialtype", "layertype", "materialref",
-#          "operationtype", "operands", "color"}
+#          "operationtype", "operands", "color", "variabletype"}
 # ------------------------------------------------------------------
+
+# sentinel shown in the Type combo for "no Type set" (inferred from Value, the XML's own
+# default when Type is omitted - see XML_stackup_format.md's <Variables> section); mapped back
+# to "" (removes the attribute) when selected - never written to the XML. Same pattern as
+# REFERENCE_NONE_LABEL below, just defined here since VARIABLE_TYPE_CHOICES needs it earlier.
+VARIABLE_TYPE_AUTO_LABEL = "(auto)"
+VARIABLE_TYPE_CHOICES = [VARIABLE_TYPE_AUTO_LABEL, "number", "string"]
+
+VARIABLE_COLUMNS = [
+    ("Name", "Name", "text"),
+    ("Value", "Value", "text"),
+    ("Type", "Type", "variabletype"),
+    ("ResolvedValue", "Resolved Value", "computed"),
+]
 
 MATERIAL_COLUMNS = [
     ("Name", "Name", "text"),
@@ -118,6 +140,39 @@ REFERENCE_EDGE_CHOICES = ["Top", "Bottom"]
 REFERENCE_NONE_LABEL = "(none)"
 
 
+def _build_variables_list(variable_elements):
+    """Resolve the current (possibly mid-edit) Variables tab state into a
+       stackup_reader.variables_list, for the other tabs' live-preview compute functions to
+       resolve "="-expressions against. Raises on invalid/circular data - callers wrap their
+       own reader calls in try/except (Exception, SystemExit) already, so this is meant to
+       propagate and blank their computed columns the same way an invalid Reference chain
+       already does.
+    """
+    variables = stackup_reader.variables_list()
+    for element in variable_elements:
+        variables.append(stackup_reader.variable(element))
+    variables.resolve_all()
+    return variables
+
+
+def _compute_variable_values(elements):
+    """Read-only ResolvedValue column for the Variables tab: each row's evaluated value,
+       annotated with the resolved type in brackets (e.g. "0.96 (number)", "SG13G2
+       (string)") since a "="-expression's result type isn't always obvious from Value
+       alone. Blank while the current (possibly mid-edit) data can't resolve yet - same
+       defensive pattern as _compute_dielectric_zpositions/_compute_layer_zpositions.
+    """
+    try:
+        variables = _build_variables_list(elements)
+    except (Exception, SystemExit):
+        return {}
+    computed = {}
+    for element, var in zip(elements, variables.variables):
+        resolved_type = "number" if isinstance(var.value, float) else "string"
+        computed[id(element)] = {"ResolvedValue": f"{var.value} ({resolved_type})"}
+    return computed
+
+
 def _compute_layer_thickness(elements):
     """Read-only Thickness column for the Layers tab: Zmax - Zmin, recomputed
        whenever either changes. Blank while Zmin/Zmax aren't both valid numbers yet
@@ -134,7 +189,7 @@ def _compute_layer_thickness(elements):
     return computed
 
 
-def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
+def _compute_layer_zpositions(elements, dielectrics_elements, variables, offset=0.0):
     """Read-only ResultZmin/ResultZmax columns for the Layers tab: the absolute
        resolved z-position for every row, whether it's plain absolute Zmin/Zmax or
        Reference-based (offset from a Dielectric/Layer edge) - this is the main
@@ -148,6 +203,9 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
        reader reports via exit(1) rather than a normal exception - see
        _refresh_preview() for the same pattern).
     Args:
+        variables (stackup_reader.variables_list): current Variables tab state, resolved -
+            see _build_variables_list() - for resolving any "="-expression among these
+            Dielectrics'/Layers' attributes.
         offset (float): the file's <Substrate Offset>, if any. Only applied when no
             Layer uses Reference, exactly like parse_substrate() does - Reference and
             a nonzero Offset are mutually exclusive (see validate_stackup()), so a
@@ -156,12 +214,12 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
     try:
         dielectrics_list = stackup_reader.dielectric_layers_list()
         for element in dielectrics_elements:
-            dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+            dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
         dielectrics_list.calculate_zpositions()
 
         metals_list = stackup_reader.metal_layers_list()
         for element in elements:
-            metals_list.append(stackup_reader.metal_layer(element))
+            metals_list.append(stackup_reader.metal_layer(element, variables))
         metals_list.resolve_references(dielectrics_list)
         if offset and not metals_list.has_references():
             metals_list.add_offset(offset)
@@ -175,13 +233,6 @@ def _compute_layer_zpositions(elements, dielectrics_elements, offset=0.0):
             "ResultZmax": f"{metal.zmax:.4f}" if metal.zmax is not None else "",
         }
     return computed
-
-
-def _layer_gray_fn(_element, attr):
-    # Thickness/ResultZmin/ResultZmax are always derived/read-only here (unlike the
-    # Dielectric stack's resulting Zmin/Zmax, there's no mode where they're the
-    # "source of truth")
-    return attr in ("Thickness", "ResultZmin", "ResultZmax")
 
 
 # ------------------------------------------------------------------
@@ -265,25 +316,24 @@ def _dielectric_gray_fn(element, attr):
     mode = _dielectric_position_mode(element)
     if attr == "Thickness":
         return mode == "absolute"  # unused/ignored once Zmin+Zmax fix the position
-    if attr in ("Zmin", "Zmax"):
-        return mode == "thickness"  # unused in implicit mode; still meaningful (optional) overrides in reference mode
-    if attr in ("ResultZmin", "ResultZmax"):
-        return mode == "absolute"  # redundant with the already-editable Zmin/Zmax there
     return False
 
 
-def _compute_dielectric_zpositions(elements):
+def _compute_dielectric_zpositions(elements, variables):
     """Runs the same resolution the reader uses (dielectric_layers_list.calculate_zpositions(),
        covering absolute/Reference/implicit-stacked dielectrics alike) over the current (possibly
        mid-edit) Dielectric elements, so the "resulting" columns show real effective z-positions.
        Returns {} - blanking those columns - if the current data isn't complete/valid enough to
        compute yet, including a dangling/ambiguous/circular Reference, which the reader reports
        via exit(1) rather than a normal exception - see _refresh_preview() for the same pattern.
+    Args:
+        variables (stackup_reader.variables_list): current Variables tab state, resolved - see
+            _build_variables_list() - for resolving any "="-expression among these attributes.
     """
     try:
         dielectrics_list = stackup_reader.dielectric_layers_list()
         for element in elements:
-            dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+            dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
         dielectrics_list.calculate_zpositions()
     except (Exception, SystemExit):
         return {}
@@ -329,6 +379,33 @@ def _unique_name(existing_names, base):
     return f"{base}{n}"
 
 
+class _VariableCompletionDelegate(QStyledItemDelegate):
+    """QStyledItemDelegate that attaches a QCompleter to a "text" cell's editor, offering
+       "=name" completions for every currently-declared Variable - lets a user start typing
+       "=" and see/select a matching variable name from a popup, in any cell that might hold
+       a "="-prefixed expression (Materials/Dielectrics/Layers/DerivedLayers numeric columns,
+       and Variables' own Value column for variable-referencing-variable formulas).
+
+       The completer's word list is rebuilt fresh every time an editor is created (i.e. every
+       time a cell is actually opened for editing), not cached - so it can never go stale as
+       variables are added/renamed/removed, with no separate refresh call needed.
+    """
+
+    def __init__(self, variable_names_fn, parent=None):
+        super().__init__(parent)
+        self.variable_names_fn = variable_names_fn
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            names = self.variable_names_fn() or []
+            completer = QCompleter(["=" + name for name in names], editor)
+            completer.setCaseSensitivity(Qt.CaseSensitive)
+            completer.setFilterMode(Qt.MatchStartsWith)
+            editor.setCompleter(completer)
+        return editor
+
+
 # ------------------------------------------------------------------
 # Generic table editor for one XML element type (Material / Dielectric / Layer)
 # ------------------------------------------------------------------
@@ -340,13 +417,14 @@ class ElementTableEditor(QWidget):
     """
 
     _GRAY = QColor(235, 235, 235)
+    _COMPUTED_TEXT = QColor(0, 128, 0)
 
     def __init__(self, columns, container_fn, add_fn, remove_fn, default_attrs_fn, on_changed,
                  move_fn=None, material_choices_fn=None, type_choices=None,
                  strip_fn=None, not_applicable_fn=None, blank_if_default_fn=None,
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
-                 pre_set_attr_fn=None, reference_choices_fn=None, header_tooltips=None,
-                 operand_lookup_fn=None):
+                 pre_set_attr_fn=None, reference_choices_fn=None,
+                 header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -392,6 +470,11 @@ class ElementTableEditor(QWidget):
              its Layers-tab Name where possible, falling back to the bare number for
              whichever operands don't resolve (e.g. a pure intermediate derived layer
              with no <Layer> entry of its own).
+           variable_names_fn() -> list[str], optional: current declared Variable names, used
+             to attach a QCompleter to every "text" column's editor (see
+             _VariableCompletionDelegate) - lets a user type "=" and pick a matching variable
+             from a popup instead of typing the full name. Omit for a tab where this doesn't
+             make sense (there currently isn't one, but the param stays optional for safety).
         """
         super().__init__()
         self.columns = columns
@@ -435,6 +518,15 @@ class ElementTableEditor(QWidget):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
         self.table.itemChanged.connect(self._on_item_changed)
+
+        if variable_names_fn:
+            # kept as an attribute (not just a local) so the delegate - which the table only
+            # holds a Qt-level reference to - isn't garbage-collected on the Python side
+            self._completion_delegate = _VariableCompletionDelegate(variable_names_fn, self.table)
+            for col, (_attr, _header, kind) in enumerate(columns):
+                if kind == "text":
+                    self.table.setItemDelegateForColumn(col, self._completion_delegate)
+
         layout.addWidget(self.table)
 
         button_row = QHBoxLayout()
@@ -496,17 +588,23 @@ class ElementTableEditor(QWidget):
                     item.setBackground(self._GRAY)
                 self.table.setItem(row, col, item)
             elif kind == "computed":
+                # computed cells are always derived/read-only - marked with green text
+                # instead of gray_fn's background dimming, which is for editable-but-
+                # currently-inapplicable "text" cells, a different situation
                 computed_value = self._computed.get(id(element), {}).get(attr, "")
                 item = QTableWidgetItem(computed_value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                if self.gray_fn and self.gray_fn(element, attr):
-                    item.setBackground(self._GRAY)
+                item.setForeground(self._COMPUTED_TEXT)
                 self.table.setItem(row, col, item)
             elif kind == "color":
                 self._make_color_cell(row, col, element, attr, value)
             elif kind in ("materialtype", "layertype", "operationtype", "referenceedge"):
                 choices = REFERENCE_EDGE_CHOICES if kind == "referenceedge" else self.type_choices
                 self._make_combo_cell(row, col, element, attr, value, choices, editable=False)
+            elif kind == "variabletype":
+                self._make_combo_cell(row, col, element, attr, value or VARIABLE_TYPE_AUTO_LABEL,
+                                       self.type_choices, editable=False,
+                                       value_out_fn=lambda text: "" if text == VARIABLE_TYPE_AUTO_LABEL else text)
             elif kind == "materialref":
                 choices = self.material_choices_fn() if self.material_choices_fn else []
                 self._make_combo_cell(row, col, element, attr, value, choices, editable=True)
@@ -811,7 +909,30 @@ class StackupEditorWindow(QDialog):
         file_row.addStretch()
         outer_layout.addLayout(file_row)
 
-        # ---------- materials / dielectrics / layers tabs ----------
+        # ---------- variables / materials / dielectrics / layers tabs ----------
+        self.variables_editor = ElementTableEditor(
+            VARIABLE_COLUMNS,
+            container_fn=self._variables_container,
+            add_fn=lambda root, **attrs: stackup_writer.add_variable(root, **attrs),
+            remove_fn=stackup_writer.remove_variable,
+            default_attrs_fn=self._default_variable_attrs,
+            on_changed=self._on_variables_changed,
+            type_choices=VARIABLE_TYPE_CHOICES,
+            compute_fn=_compute_variable_values,
+            # ResolvedValue depends on both - must live-refresh
+            reload_on_attr_change={"Value", "Type"},
+            variable_names_fn=self._variable_names,
+        )
+
+        variables_tab = QWidget()
+        variables_layout = QVBoxLayout()
+        variables_hint = QLabel(
+            "To use variables on the other tabs, start typing \"=\" ")
+        variables_hint.setWordWrap(True)
+        variables_layout.addWidget(variables_hint)
+        variables_layout.addWidget(self.variables_editor)
+        variables_tab.setLayout(variables_layout)
+
         self.materials_editor = ElementTableEditor(
             MATERIAL_COLUMNS,
             container_fn=self._materials_container,
@@ -824,6 +945,12 @@ class StackupEditorWindow(QDialog):
             not_applicable_fn=_material_not_applicable,
             blank_if_default_fn=_material_blank_if_default,
             reload_on_attr_change={"Type"},
+            header_tooltips={
+                attr: "Numeric value, or \"=expression\" referencing a Variable"
+                for attr in ("Permittivity", "DielectricLossTangent", "Conductivity", "Rs",
+                             "Density", "ThermalConductivity")
+            },
+            variable_names_fn=self._variable_names,
         )
 
         self.dielectrics_editor = ElementTableEditor(
@@ -837,15 +964,17 @@ class StackupEditorWindow(QDialog):
             material_choices_fn=self._material_names,
             reference_choices_fn=self._dielectric_names,
             gray_fn=_dielectric_gray_fn,
-            compute_fn=_compute_dielectric_zpositions,
+            compute_fn=self._compute_dielectric_zpositions_bound,
             # these four drive the resulting-Zmin/Zmax computation and the
             # position-mode gray-out state, so they must live-refresh
             reload_on_attr_change={"Thickness", "Zmin", "Zmax", "Reference", "ReferenceEdge"},
             pre_set_attr_fn=self._handle_dielectric_thickness_change,
             header_tooltips={
-                "Zmin": "Absolute position, or offset from Reference if set",
-                "Zmax": "Absolute position, or offset from Reference if set",
+                "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Thickness": "Numeric value, or \"=expression\" referencing a Variable",
             },
+            variable_names_fn=self._variable_names,
         )
 
         self.layers_editor = ElementTableEditor(
@@ -859,13 +988,13 @@ class StackupEditorWindow(QDialog):
             reference_choices_fn=self._reference_target_names,
             type_choices=list(stackup_writer.VALID_LAYER_TYPES),
             compute_fn=self._compute_layer_zpositions_and_thickness,
-            gray_fn=_layer_gray_fn,
             # Thickness/ResultZmin/ResultZmax are derived from these - must live-refresh
             reload_on_attr_change={"Zmin", "Zmax", "Reference", "ReferenceEdge"},
             header_tooltips={
-                "Zmin": "Absolute position, or offset from Reference if set",
-                "Zmax": "Absolute position, or offset from Reference if set",
+                "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
+                "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
             },
+            variable_names_fn=self._variable_names,
         )
 
         layers_tab = QWidget()
@@ -890,6 +1019,7 @@ class StackupEditorWindow(QDialog):
             on_changed=self._on_changed,
             type_choices=list(stackup_writer.VALID_DERIVED_OPERATIONS),
             operand_lookup_fn=self._layer_name_by_number,
+            variable_names_fn=self._variable_names,
         )
 
         derived_layers_tab = QWidget()
@@ -915,11 +1045,14 @@ class StackupEditorWindow(QDialog):
         description_tab.setLayout(description_layout)
 
         self.tabs = QTabWidget()
+        self.tabs.addTab(variables_tab, "Variables")
         self.tabs.addTab(self.materials_editor, "Materials")
         self.tabs.addTab(self.dielectrics_editor, "Dielectric Stack")
         self.tabs.addTab(layers_tab, "Layers")
         self.tabs.addTab(derived_layers_tab, "Derived Layers")
         self.tabs.addTab(description_tab, "File Description")
+        self.tabs.setCurrentWidget(self.materials_editor)   # Variables is first in tab order,
+                                                             # but Materials is what opens by default
 
         outer_layout.addWidget(self.tabs)
 
@@ -970,6 +1103,13 @@ class StackupEditorWindow(QDialog):
         super().closeEvent(event)
 
     # ---------- default attrs for new rows ----------
+
+    def _default_variable_attrs(self):
+        names = self._variable_names()
+        return {
+            "Name": _unique_name(names, "NewVariable"),
+            "Value": "0",
+        }
 
     def _default_material_attrs(self):
         names = self._material_names()
@@ -1152,6 +1292,11 @@ class StackupEditorWindow(QDialog):
             candidate += 1
         return str(candidate)
 
+    def _variable_names(self):
+        if self.tree is None:
+            return []
+        return [v.get("Name") for v in self._variables_container(self.tree.getroot()) if v.get("Name")]
+
     def _material_names(self):
         if self.tree is None:
             return []
@@ -1184,20 +1329,44 @@ class StackupEditorWindow(QDialog):
         # in dielectrics_editor's construction)
         return self._layer_names() + self._dielectric_names()
 
+    def _compute_dielectric_zpositions_bound(self, elements):
+        # _compute_dielectric_zpositions() needs the current Variables tab state to resolve
+        # any "="-expression, but ElementTableEditor's compute_fn contract only ever calls
+        # compute_fn(elements) - this bound wrapper fetches that extra context from self,
+        # same reason _compute_layer_zpositions_and_thickness below wraps its own module
+        # function instead of wiring it in directly.
+        root = self.tree.getroot() if self.tree is not None else None
+        variable_elements = self._variables_container(root) if root is not None else []
+        try:
+            variables = _build_variables_list(variable_elements)
+        except (Exception, SystemExit):
+            return {}
+        return _compute_dielectric_zpositions(elements, variables)
+
     def _compute_layer_zpositions_and_thickness(self, elements):
         root = self.tree.getroot() if self.tree is not None else None
         dielectrics_elements = self._dielectrics_container(root) if root is not None else []
+        variable_elements = self._variables_container(root) if root is not None else []
         offset_el = stackup_writer.get_substrate_offset_element(root) if root is not None else None
         try:
             offset = float(offset_el.get("Offset")) if offset_el is not None else 0.0
         except (TypeError, ValueError):
             offset = 0.0
         computed = _compute_layer_thickness(elements)
-        for key, values in _compute_layer_zpositions(elements, dielectrics_elements, offset).items():
+        try:
+            variables = _build_variables_list(variable_elements)
+        except (Exception, SystemExit):
+            return computed
+        for key, values in _compute_layer_zpositions(elements, dielectrics_elements, variables, offset).items():
             computed.setdefault(key, {}).update(values)
         return computed
 
     # ---------- container accessors (Element -> list[Element]) ----------
+
+    @staticmethod
+    def _variables_container(root):
+        variables_el = stackup_writer.get_variables_element(root)
+        return variables_el.findall("Variable") if variables_el is not None else []
 
     @staticmethod
     def _materials_container(root):
@@ -1347,6 +1516,7 @@ class StackupEditorWindow(QDialog):
 
     def _reload_all_editors(self):
         root = self.tree.getroot()
+        self.variables_editor.set_root(root)
         self.materials_editor.set_root(root)
         self.dielectrics_editor.set_root(root)
         self.layers_editor.set_root(root)
@@ -1419,10 +1589,13 @@ class StackupEditorWindow(QDialog):
            util_stackup_reader.dielectric_layers_list._assign_implicit_references(). Empty
            (not an error) if the current data can't be resolved yet.
         """
+        root = self.tree.getroot() if self.tree is not None else None
+        variable_elements = self._variables_container(root) if root is not None else []
         try:
+            variables = _build_variables_list(variable_elements)
             dielectrics_list = stackup_reader.dielectric_layers_list()
             for element in dielectrics_elements:
-                dielectrics_list.append(stackup_reader.dielectric_layer(element), None)
+                dielectrics_list.append(stackup_reader.dielectric_layer(element, variables), None)
             dielectrics_list.calculate_zpositions()
         except (Exception, SystemExit):
             return {}
@@ -1938,6 +2111,17 @@ class StackupEditorWindow(QDialog):
 
     # ---------- change propagation ----------
 
+    def _on_variables_changed(self, structural=False):
+        # a variable's Name/Value may have changed (add/remove/rename too) - unlike a Material/
+        # Dielectric/Layer rename (which only the tabs "downstream" of it need to know about),
+        # a Variable can be referenced from a "="-expression in literally any tab, so this needs
+        # the broadest refresh of any change handler here
+        self.materials_editor.reload()
+        self.dielectrics_editor.reload()
+        self.layers_editor.reload()
+        self.derived_layers_editor.reload()
+        self._on_changed(structural=structural)
+
     def _on_materials_changed(self, structural=False):
         # material names may have changed (add/remove/rename) - refresh the
         # Material-reference dropdowns shown in the Dielectrics/Layers tabs
@@ -2032,3 +2216,61 @@ class StackupEditorWindow(QDialog):
         else:
             self.status_label.setText(f"{len(errors)} problem(s) - see Save for details.")
             self.status_label.setStyleSheet("color: darkred;")
+
+
+# ------------------------------------------------------------------
+# Standalone launch (python stackupEditor.py [file.xml], or the stackupEditor
+# console script - see pyproject.toml)
+# ------------------------------------------------------------------
+
+class _StandaloneMainWindow:
+    """Minimal stand-in for the real setupEM/setupThermal MainWindow, used only when this
+       module is run on its own rather than opened from within the full app (Tools > Edit
+       Stackup XML...). Provides the handful of attributes/methods StackupEditorWindow needs
+       from its MainWindow argument. The preview coloring/labeling hooks reuse the same
+       permittivity/sheet-resistance-based defaults setupEM.py's real MainWindow uses (see
+       setup_common.epsilon_to_color()/default_stackup_dielectric_label()/
+       default_stackup_metal_label()) - shared there specifically so this stand-in doesn't
+       need its own, weaker copy (or an import from setupEM.py, which itself reaches this
+       module via setup_common.py, risking a circular import).
+    """
+    APP_NAME = "Stackup Editor"
+    saved_values = {}
+
+    def stackup_dielectric_color(self, material):
+        return epsilon_to_color(material.eps, 95)
+
+    def stackup_dielectric_label(self, dielectric, material):
+        return default_stackup_dielectric_label(dielectric, material)
+
+    def stackup_metal_label(self, metal, material, is_sheet):
+        return default_stackup_metal_label(metal, material, is_sheet)
+
+    def stackup_via_label_suffix(self, metal, material):
+        return ""
+
+
+def main():
+    """Run the Stackup Editor as a standalone application. Not how setupEM/setupThermal
+       normally open it (Tools > Edit Stackup XML..., with the real app's MainWindow) - this
+       is for editing/inspecting a stackup file on its own, with no gds2palace model/
+       simulation setup involved. Preview coloring/labeling still matches the real app (see
+       _StandaloneMainWindow).
+    """
+    app = QApplication(sys.argv)
+    if sys.platform.startswith("win"):
+        # matches setupEM.py's/setupThermal.py's main() - without this, Qt's default style
+        # on Windows looks visibly different (fonts/widget chrome) from the full app
+        app.setStyle(QStyleFactory.create("Windows"))
+
+    parser = argparse.ArgumentParser(description="Standalone stackup XML editor")
+    parser.add_argument("xmlfile", nargs="?", default=None, help="stackup XML file to open")
+    args = parser.parse_args()
+
+    window = StackupEditorWindow(_StandaloneMainWindow(), initial_filename=args.xmlfile)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

@@ -52,12 +52,14 @@ if __package__ in (None, ""):
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
 
 
@@ -1400,32 +1402,6 @@ class ModelEditorTab(QWidget):
         self.create_model_text(forExport=True)  # show "external" code including run from Python model
 
 
-# ---------- STACKUP PREVIEW COLOR/LABEL LOGIC (EM specific) ------------------
-
-def epsilon_to_color(erel, transparency):
-    # Compute raw float components
-    red   = 250 - 30 * (erel - 1)
-    green = 255 - 20 * (erel - 1) + (20 / erel) + 10 * erel
-    blue  = 100 + 15 * erel + (250 / erel)
-
-    # Extra adjustment
-    if 3.8 < erel < 4.5:
-        red   += 50 * (erel - 3.8)
-        green -= 100 * (erel - 3.8)
-
-    # Clamp to range 0–255
-    red   = min(max(red,   0), 255)
-    green = min(max(green, 0), 255)
-    blue  = min(max(blue,  0), 255)
-
-    # Convert to integer RGB
-    r = int(round(red))
-    g = int(round(green))
-    b = int(round(blue))
-
-    return QColor(r, g, b, transparency)
-
-
 # ---------- MAIN WINDOW ----------
 
 
@@ -1594,24 +1570,10 @@ class MainWindow(MainWindowBase):
         return epsilon_to_color(material.eps, 95)
 
     def stackup_dielectric_label(self, dielectric, material):
-        material_string  = f'εr={material.eps:.1f}'
-        if material.sigma > 1e-3:
-            material_string = material_string + f' σ={material.sigma:.1f}'
-        material_string = material_string + f'\n{dielectric.thickness:.2f}µm'
-        return material_string
+        return default_stackup_dielectric_label(dielectric, material)
 
     def stackup_metal_label(self, metal, material, is_sheet):
-        if is_sheet:
-            return f'Rs={material.Rs*1e3:.1f}mΩ'
-        else:
-            if (material.sigma > 0) and (metal.thickness > 0):
-                Rs = 1 / (material.sigma*metal.thickness*1e-6)
-                if Rs < 1:
-                    return f'Rs={Rs*1e3:.1f} mΩ'
-                else:
-                    return f'Rs={Rs:.2f} Ω'
-            else:
-                return '? ' + material.type + ' ?'
+        return default_stackup_metal_label(metal, material, is_sheet)
 
     def stackup_via_label_suffix(self, metal, material):
         return ""
