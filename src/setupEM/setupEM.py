@@ -1325,7 +1325,7 @@ class ModelEditorTab(QWidget):
                          f"direction='{sim_port.direction}'))")
 
         add_text("\n# ================= read stackup and geometries =================")
-        add_text("materials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'])")
+        add_text("materials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'], variable_overrides=settings['variable_overrides'])")
         add_text("layernumbers = metals_list.getlayernumbers()")
         add_text("layernumbers.extend(simulation_ports.portlayers)")
         add_text("\n# read geometries from GDSII")
