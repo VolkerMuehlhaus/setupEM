@@ -1,14 +1,6 @@
-# What's New - August 18, 2026
+# What's New - August 19, 2026
 
 Changes since the version from about 3 months ago, focused on features that matter to end users. For general usage, see the main [README](../README.md).
-
-## setupThermal: a new companion app for thermal simulation
-
-setupEM now installs a second program, **setupThermal**, alongside setupEM. It provides the same kind of guided, tabbed interface as setupEM, but for building thermal simulation models instead of S-parameter models.
-
-- Uses the [Elmer](https://www.elmerfem.org/blog/) FEM solver instead of AWS Palace. Elmer must be installed separately.
-- Reuses the same gds2palace stackup workflow as setupEM, so layout and stackup files work the same way.
-- Start it the same way as setupEM: with your venv activated, simply type `setupThermal`.
 
 ## New Stackup Editor
 
@@ -37,3 +29,21 @@ The Stackup Editor now has a **Variables** tab for defining named values (plain 
 <img src="./png/variables1.png" alt="variables" width="750">
 
 This matches the `<Variables>`/`"=expr"` XML format gds2palace's stackup reader supports as of `schemaVersion="3.1"` - see the [XML stackup format doc](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/XML_stackup_format/XML_stackup_format.md) for the underlying format. Existing files and scripts that don't use Variables are unaffected.
+
+## Override stackup Variables from setupEM / setupThermal
+
+Choosing a substrate XML file that declares `<Variables>` now shows an editable grid of them right below the file description, on the Input Files tab of both setupEM and setupThermal. Change a value there - e.g. `total_thickness` or `air_thickness` - to override it in the generated model script, without hand-editing the XML file or the script itself. The grid only lists plain values, not ones computed from other variables, and stays hidden entirely for files that don't declare any Variables.
+
+## setupThermal: a new companion app for thermal simulation
+
+setupEM now installs a second program, **setupThermal**, alongside setupEM. It provides the same kind of guided, tabbed interface as setupEM, but for building thermal simulation models instead of S-parameter models.
+
+- Uses the [Elmer](https://www.elmerfem.org/blog/) FEM solver instead of AWS Palace. Elmer must be installed separately.
+- Reuses the same gds2palace stackup workflow as setupEM, so layout and stackup files work the same way.
+- Start it the same way as setupEM: with your venv activated, simply type `setupThermal`.
+
+## Thermal Tables tab in the Stackup Editor
+
+The Stackup Editor now has a **Thermal Tables** tab for editing the temperature-dependent thermal conductivity data used by the Elmer thermal flow. It's a master/detail view: the top grid lists every named table (with a live point count), and selecting a table shows its individual Temperature/Value points below. A Material's **Thermal Table** column is now a dropdown listing the tables declared on this tab (it can still hold a `=variable` expression, e.g. to pick between a literature and a measured dataset), instead of a free-text field with no connection to the actual data.
+
+Points don't need to be entered in temperature order - they're sorted automatically when the file is saved, since Elmer reads them as a piecewise-linear lookup curve and needs them in order to interpolate correctly.

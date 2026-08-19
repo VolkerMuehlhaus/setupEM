@@ -33,6 +33,7 @@ in setupEM.py / setupThermal.py, not here.
 """
 
 import sys, os, json, pathlib, ast, webbrowser
+import xml.etree.ElementTree as ET
 import numpy as np
 import requests
 import gdspy
@@ -41,10 +42,11 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QLineEdit, QComboBox,
     QPushButton, QFileDialog, QMessageBox, QGroupBox,
-    QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame
+    QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
     )
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen
-from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QTimer
+from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen, QTextDocument
+from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QTimer, QSettings
 
 # we expect gds2palace in the same directory as this code, or installed as module
 import gds2palace
@@ -65,12 +67,58 @@ from gds2palace import *
 # ------------------------------------------------------------------
 GDS2PALACE_HAS_PARSE_SUBSTRATE = hasattr(stackup_reader, "parse_substrate")
 GDS2PALACE_HAS_FILE_DESCRIPTION = hasattr(stackup_reader, "read_file_description")
+GDS2PALACE_HAS_VARIABLES_LIST = hasattr(stackup_reader, "variables_list") and hasattr(stackup_reader, "variable")
 
 # Tools > Edit Stackup XML... needs parse_substrate() (used for its live preview
 # refresh); the Input Files tab's description display only needs the reader-side lookup.
 GDS2PALACE_SUPPORTS_STACKUP_EDITOR = GDS2PALACE_HAS_PARSE_SUBSTRATE
 GDS2PALACE_SUPPORTS_FILE_DESCRIPTION = GDS2PALACE_HAS_FILE_DESCRIPTION
 GDS2PALACE_OUTDATED = not (GDS2PALACE_SUPPORTS_STACKUP_EDITOR and GDS2PALACE_SUPPORTS_FILE_DESCRIPTION)
+
+
+# QSettings scope for the File menu's "Load Recent Settings"/"Import Recent Model" lists -
+# per-app (organization + self.APP_NAME, i.e. "setupEM" or "setupThermal"), mirroring
+# stackupEditor.py's own "Open Recent" mechanism (same org name, separate app/key there).
+RECENT_FILES_ORG = "muehlhaus.com"
+RECENT_SETTINGS_KEY = "recentSettingsFiles"
+RECENT_MODEL_KEY = "recentModelFiles"
+MAX_RECENT_FILES = 10
+
+
+def _read_substrate_variables(filename):
+    """Parse a stackup XML file's <Variables> block (if any) into a resolved
+       stackup_reader.variables_list, independent of the full read_substrate()/
+       parse_substrate() pipeline (materials/dielectrics/layers) - mirrors
+       stackupEditor.py's own _build_variables_list() helper. Returns None if the
+       file declares no Variables at all, or if parsing/resolving fails (e.g.
+       invalid XML, a circular "="-expression) - callers treat both the same way:
+       hide the override grid rather than raising into the caller.
+    """
+    if not GDS2PALACE_HAS_VARIABLES_LIST:
+        return None
+    try:
+        root = ET.parse(filename).getroot()
+        elements = list(root.iter("Variable"))
+        if not elements:
+            return None
+        variables = stackup_reader.variables_list()
+        for element in elements:
+            variables.append(stackup_reader.variable(element))
+        variables.resolve_all()
+        return variables
+    except (Exception, SystemExit):
+        return None
+
+
+def _format_resolved_variable_value(value):
+    """Format a resolved Variable value (float or str) as plain text - a whole-number
+       float (e.g. 200.0) is shown without a trailing ".0", matching how such values are
+       normally hand-typed in the stackup XML. Mirrors stackupEditor.py's identically
+       named helper.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 # ------------------------------------------------------------------
@@ -339,7 +387,9 @@ class FileInputTab(QWidget):
         self.XML_description_layout.setContentsMargins(0, 0, 0, 0)
         # QPlainTextEdit instead of a plain QLabel: a QLabel has no cap on how tall
         # word-wrap can grow it, so a long description silently stretched the whole
-        # window taller. This wraps/scrolls within a fixed ~10-line height instead,
+        # window taller. This wraps/scrolls within a max ~10-line height instead
+        # (actual height is sized to the content by _resize_XML_description_label(),
+        # so a short description doesn't leave a tall empty gap below the text),
         # styled to still read as a plain label (no frame, no editable background).
         self.XML_description_label = QPlainTextEdit("")
         self.XML_description_label.setReadOnly(True)
@@ -357,6 +407,35 @@ class FileInputTab(QWidget):
         self.XML_description_container.setLayout(self.XML_description_layout)
         self.XML_description_container.setVisible(False)
         self.XML_layout.addWidget(self.XML_description_container)
+
+        # editable grid of the file's <Variable>s (if any) - lets a user override a
+        # stackup Variable's value (e.g. total_thickness, air_thickness) from the GUI,
+        # without hand-editing the XML or the generated model script. Fed into the
+        # generated model's stackup_reader.read_substrate(..., variable_overrides=...)
+        # call. Hidden entirely when the chosen file declares no Variables.
+        self.variable_overrides_container = QWidget()
+        self.variable_overrides_layout = QVBoxLayout()
+        self.variable_overrides_layout.setContentsMargins(0, 0, 0, 0)
+        self.variable_overrides_label = QLabel("Override stackup Variables:")
+        self.variable_overrides_layout.addWidget(self.variable_overrides_label)
+        self.variable_overrides_table = QTableWidget()
+        self.variable_overrides_table.setColumnCount(3)
+        self.variable_overrides_table.setHorizontalHeaderLabels(["Variable", "XML value", "Override value"])
+        self.variable_overrides_table.horizontalHeaderItem(2).setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.variable_overrides_table.verticalHeader().setVisible(False)
+        self.variable_overrides_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.variable_overrides_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        variable_overrides_header = self.variable_overrides_table.horizontalHeader()
+        variable_overrides_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        variable_overrides_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        variable_overrides_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        _variable_row_height = QFontMetrics(self.variable_overrides_table.font()).lineSpacing() + 10
+        self.variable_overrides_table.setFixedHeight(_variable_row_height * 6)  # header + ~5 rows, then scroll
+        self.variable_overrides_layout.addWidget(self.variable_overrides_table)
+        self.variable_overrides_container.setLayout(self.variable_overrides_layout)
+        self.variable_overrides_container.setVisible(False)
+        self.XML_layout.addWidget(self.variable_overrides_container)
 
         self.XML_group.setLayout(self.XML_layout)
 
@@ -417,6 +496,7 @@ class FileInputTab(QWidget):
         self.XML_file_edit.setText(filename)
         self.MainWindow.saved_values["SubstrateFile"] = filename.replace('\\', '/')
         self.update_XML_description(filename)
+        self.update_variable_overrides_grid(filename)
         self.MainWindow.read_XML()  # safe if invalid filename
         # file is read when leaving the files tab
 
@@ -428,6 +508,109 @@ class FileInputTab(QWidget):
         description = " ".join(stackup_reader.read_file_description(filename).split())
         self.XML_description_label.setPlainText(description)
         self.XML_description_container.setVisible(bool(description))
+        self._resize_XML_description_label(description)
+
+    def _resize_XML_description_label(self, description):
+        # size the box to how many lines this description actually wraps to (1 line
+        # up to the ~10-line cap), instead of always reserving the full 10 lines -
+        # a one-line description otherwise leaves a tall empty gap below the text.
+        # Uses QFontMetrics.boundingRect() with word-wrap, not
+        # self.XML_description_label.document().size() - the latter goes through
+        # QPlainTextEdit's own QPlainTextDocumentLayout, which does not reliably honor
+        # an externally-set textWidth outside of the widget's own resize handling, and
+        # under-measured the real wrapped height in testing (collapsed even multi-line
+        # descriptions to one line and clipped the text).
+        line_height = QFontMetrics(self.XML_description_label.font()).lineSpacing()
+        min_height = line_height + 6
+        max_height = line_height * 10 + 6
+        if not description:
+            self.XML_description_label.setFixedHeight(min_height)
+            return
+        width = self.XML_description_label.viewport().width()
+        if width <= 0:
+            width = self.XML_description_label.width()
+        if width <= 0:
+            # not laid out yet (e.g. called before the window is shown) - can't
+            # measure wrapping reliably, so fall back to the old always-max-height
+            # behavior rather than risk collapsing to one line and clipping text.
+            self.XML_description_label.setFixedHeight(max_height)
+            return
+        # the editable area is narrower than the viewport by the document's own left/
+        # right margins (default 4px each).
+        usable_width = width - 2 * self.XML_description_label.document().documentMargin()
+        # measured with a throwaway QTextDocument, not self.XML_description_label's own
+        # document - QPlainTextEdit's document uses QPlainTextDocumentLayout, which does
+        # not reliably report size() for a textWidth set outside the widget's own resize
+        # handling (confirmed in testing: always came back as one line, regardless of
+        # actual content, clipping multi-line descriptions). A plain QTextDocument uses
+        # the standard QTextDocumentLayout instead, which measures correctly on demand.
+        measuring_doc = QTextDocument()
+        measuring_doc.setDefaultFont(self.XML_description_label.font())
+        measuring_doc.setTextWidth(usable_width)
+        measuring_doc.setPlainText(description)
+        new_height = max(min_height, min(measuring_doc.size().height() + 6, max_height))
+        self.XML_description_label.setFixedHeight(int(new_height))
+
+    def update_variable_overrides_grid(self, filename):
+        # re-populates from scratch every time - no attempt to preserve in-progress,
+        # not-yet-saved edits across a file switch, matching how the description label
+        # above it is refreshed unconditionally too.
+        variables = _read_substrate_variables(filename)
+        self.variable_overrides_table.setRowCount(0)
+        if not variables:
+            self.variable_overrides_container.setVisible(False)
+            return
+        # exclude "="-expression Variables (e.g. bulk_thickness = total_thickness-20) -
+        # only plain literal values make sense as an override starting point here, since
+        # a computed value is meant to follow whatever it depends on, not be pinned itself.
+        plain_variables = [var for var in variables.variables if not var.is_expression]
+        if not plain_variables:
+            self.variable_overrides_container.setVisible(False)
+            return
+
+        persisted_overrides = self.MainWindow.saved_values.get("variable_overrides") or {}
+        self.variable_overrides_table.setRowCount(len(plain_variables))
+        for row, var in enumerate(plain_variables):
+            xml_value_text = _format_resolved_variable_value(var.value)
+            override_value = persisted_overrides.get(var.name, var.value)
+            override_text = override_value if isinstance(override_value, str) \
+                else _format_resolved_variable_value(override_value)
+
+            name_item = QTableWidgetItem(var.name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            xml_item = QTableWidgetItem(xml_value_text)
+            xml_item.setFlags(xml_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            override_item = QTableWidgetItem(override_text)
+
+            self.variable_overrides_table.setItem(row, 0, name_item)
+            self.variable_overrides_table.setItem(row, 1, xml_item)
+            self.variable_overrides_table.setItem(row, 2, override_item)
+        self.variable_overrides_container.setVisible(True)
+
+    def get_variable_overrides(self):
+        """Read the Override value column back out as a dict of only the rows whose
+           override text differs from the file's own XML value column - e.g.
+           {'total_thickness': 500.0}. A value that parses as a number becomes float
+           (matching what stackup_reader.variable.apply_override() expects for a
+           numeric variable); anything else is kept as the typed string.
+        """
+        overrides = {}
+        table = self.variable_overrides_table
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 0)
+            xml_item = table.item(row, 1)
+            override_item = table.item(row, 2)
+            if not name_item or not xml_item or not override_item:
+                continue
+            xml_text = xml_item.text()
+            override_text = override_item.text()
+            if override_text == xml_text:
+                continue
+            try:
+                overrides[name_item.text()] = float(override_text)
+            except ValueError:
+                overrides[name_item.text()] = override_text
+        return overrides
 
     def load_values(self):
         saved_values = self.MainWindow.saved_values
@@ -435,6 +618,7 @@ class FileInputTab(QWidget):
         XML = get_saved_value(saved_values, "SubstrateFile", "Please choose a file ===>")
         self.XML_file_edit.setText(XML)
         self.update_XML_description(XML)
+        self.update_variable_overrides_grid(XML)
         self.cellname_box.clear()
         self.cellname_box.addItem(get_saved_value(saved_values, "cellname", ""))
         self.viamerge_edit.setText(str(get_saved_value(saved_values, "merge_polygon_size", "0.5")))
@@ -453,6 +637,7 @@ class FileInputTab(QWidget):
         saved_values["SubstrateFile"] = self.XML_file_edit.text().replace('\\', '/')
         saved_values["preprocess_gds"] = self.preprocess_gds_checkbox.isChecked()
         saved_values["cellname"] = self.cellname_box.currentText()
+        saved_values["variable_overrides"] = self.get_variable_overrides()
 
         try:
             merge_polygon_size = float(self.viamerge_edit.text())
@@ -1225,15 +1410,18 @@ class MainWindowBase(QMainWindow):
         exit_action.triggered.connect(self.close)
 
         file_menu.addAction(self.load_settings_action)
+        self.recent_settings_menu = file_menu.addMenu("Load Recent Settings")
         file_menu.addAction(self.save_action)
         file_menu.addSeparator()
         file_menu.addAction(self.import_model_action)
+        self.recent_model_menu = file_menu.addMenu("Import Recent Model")
         file_menu.addAction(self.export_model_action)
         file_menu.addSeparator()
         file_menu.addAction(self.load_default_action)
         file_menu.addAction(self.savedefault_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
+        self._populate_recent_menus()
 
         # hook for app-specific menus (e.g. setupEM's Simulator menu); no-op by default.
         # Placed before Tools so the menu order reads File, Simulator, Tools, Help.
@@ -1326,11 +1514,17 @@ class MainWindowBase(QMainWindow):
         self._previous_index = index
 
         # check if we switch to the Model editor tab, in that case store all other tabs
-        # (tab count/order differs between apps, e.g. setupThermal has no Frequencies
-        # tab, so look up the Code tab's index instead of hardcoding it)
+        # and regenerate the code preview from their current values (tab count/order
+        # differs between apps, e.g. setupThermal has no Frequencies tab, so look up the
+        # Code tab's index instead of hardcoding it). This overwrites any manual edits
+        # made directly in the Code tab's text box - deliberate, so the preview always
+        # reflects the other tabs' current settings (e.g. Input Files' Variable
+        # overrides) the moment you switch to Code, not just after Preview/Create Mesh/
+        # Start Simulation/Export.
         modeleditor_index = self.tabs_widget.indexOf(self.modeleditor_tab)
         if index == modeleditor_index:
             self.save_all_tabs()
+            self.modeleditor_tab.create_model_text()
 
         # Save model code only when model tab active
         self.export_model_action.setEnabled(index == modeleditor_index)
@@ -1400,6 +1594,7 @@ class MainWindowBase(QMainWindow):
                     # update ports/thermal objects, separate from the other internal data
                     self.apply_native_config_data(data)
                     self.load_all_tabs()
+                    self._add_recent_file(RECENT_SETTINGS_KEY, file_path)
                     QMessageBox.information(self, "Loaded", f"Settings loaded from {file_path}")
                     self.create_model_tab.log_area.clear()
                 else:
@@ -1473,11 +1668,69 @@ class MainWindowBase(QMainWindow):
                 self.apply_python_import_data(file_path)
 
                 self.load_all_tabs()
+                self._add_recent_file(RECENT_MODEL_KEY, file_path)
                 QMessageBox.information(self, "Loaded", f"Settings loaded from {file_path}")
                 self.create_model_tab.log_area.clear()
 
             else:
                 QMessageBox.information(self, "Error", f"Could not load file {file_path}")
+
+    # ---------- recent files (Load Settings / Import Model) ----------
+
+    def _recent_files(self, key):
+        files = QSettings(RECENT_FILES_ORG, self.APP_NAME).value(key, [])
+        # QSettings collapses a saved one-item list back to a bare string on read -
+        # a well-known quirk of the native (registry/plist) backends
+        if isinstance(files, str):
+            files = [files] if files else []
+        return list(files)
+
+    def _add_recent_file(self, key, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files(key) if os.path.normcase(f) != os.path.normcase(filename)]
+        files.insert(0, filename)
+        QSettings(RECENT_FILES_ORG, self.APP_NAME).setValue(key, files[:MAX_RECENT_FILES])
+        self._populate_recent_menus()
+
+    def _remove_recent_file(self, key, filename):
+        filename = os.path.abspath(filename)
+        files = [f for f in self._recent_files(key) if os.path.normcase(f) != os.path.normcase(filename)]
+        QSettings(RECENT_FILES_ORG, self.APP_NAME).setValue(key, files)
+        self._populate_recent_menus()
+
+    def _clear_recent_files(self, key):
+        QSettings(RECENT_FILES_ORG, self.APP_NAME).setValue(key, [])
+        self._populate_recent_menus()
+
+    def _populate_recent_menus(self):
+        self._populate_recent_menu(self.recent_settings_menu, RECENT_SETTINGS_KEY)
+        self._populate_recent_menu(self.recent_model_menu, RECENT_MODEL_KEY)
+
+    def _populate_recent_menu(self, menu, key):
+        menu.clear()
+        files = self._recent_files(key)
+        if not files:
+            empty_action = QAction("(none)", self)
+            empty_action.setEnabled(False)
+            menu.addAction(empty_action)
+            return
+        for filename in files:
+            action = QAction(filename, self)
+            action.triggered.connect(lambda checked=False, f=filename: self._open_recent_file(key, f))
+            menu.addAction(action)
+        menu.addSeparator()
+        clear_action = QAction("Clear Recent Files", self)
+        clear_action.triggered.connect(lambda: self._clear_recent_files(key))
+        menu.addAction(clear_action)
+
+    def _open_recent_file(self, key, filename):
+        if not os.path.isfile(filename):
+            QMessageBox.warning(
+                self, "File not found",
+                f"Could not find {filename}.\n\nIt will be removed from the recent files list.")
+            self._remove_recent_file(key, filename)
+            return
+        self.load_configuration_from_file(filename)
 
     def apply_native_config_data(self, data):
         # Hook: update the app-specific tab (ports / thermal objects) from
@@ -1510,6 +1763,7 @@ class MainWindowBase(QMainWindow):
 
             with open(filename, "w") as f:
                 json.dump(struct, f, indent=4)
+            self._add_recent_file(RECENT_SETTINGS_KEY, filename)
             QMessageBox.information(self, "Saved", f"Settings saved to {filename}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save settings to {filename}: {e}")
@@ -1564,6 +1818,7 @@ class MainWindowBase(QMainWindow):
             self.materials_list, self.dielectrics_list, self.metals_list = stackup_reader.read_substrate(filename)
             self.update_target_layer_choices(self.metals_list)
             self.file_tab.update_XML_description(filename)
+            self.file_tab.update_variable_overrides_grid(filename)
 
     def update_target_layer_choices(self, metals_list):
         # Hook: push the metal list to the app-specific tab that offers

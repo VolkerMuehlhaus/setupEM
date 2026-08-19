@@ -24,8 +24,8 @@ This module is deliberately kept separate from gds2palace's util_stackup_reader.
 the reader turns XML into the read-only object model (stackup_material,
 dielectric_layer, metal_layer, ...) used by the rest of gds2palace, while this
 module is for tools that need to load a file, edit it (materials/dielectrics/
-layers), and write it back out - such as this GUI stackup editor - while leaving
-any parts of the file they don't understand (e.g. Tables and XML comments)
+layers/tables), and write it back out - such as this GUI stackup editor - while
+leaving any parts of the file they don't understand (e.g. XML comments)
 completely untouched. It lives here in setupEM rather than in gds2palace because
 setupEM is its only real consumer - gds2palace's own workflow only ever reads
 stackup files, never edits/writes them.
@@ -243,6 +243,34 @@ def stamp_reference_format_comment(root, min_reader_version):
   root.insert(insert_index, ET.Comment(f" {REFERENCE_FORMAT_COMMENT_PREFIX} {min_reader_version} or newer "))
 
 
+DERIVED_LAYERS_FORMAT_COMMENT_PREFIX = "Derived layers require gds2palace util_stackup_reader.py version"
+
+
+def stamp_derived_layers_format_comment(root, min_reader_version):
+  """Insert or update a comment noting the minimum gds2palace reader version needed to
+     correctly resolve this file's <DerivedLayers>. Same shape and placement as
+     stamp_reference_format_comment() - see that function's docstring. Independent of that
+     comment (and of stamp_variables_format_comment()): a file can use any combination of
+     Reference/DerivedLayers/Variables, and each one gets its own stamp only if actually used,
+     since all three are unrelated reasons a "3.0"+ schemaVersion might be required.
+  Args:
+      root (xml.etree.ElementTree.Element): the <Stackup> root element
+      min_reader_version (string): util_stackup_reader.__version__ of the reader used to
+        perform the conversion, taken as the minimum version able to read the result back
+  """
+  for child in list(root):
+    if child.tag is ET.Comment and (child.text or "").strip().startswith(DERIVED_LAYERS_FORMAT_COMMENT_PREFIX):
+      root.remove(child)
+
+  insert_index = 0
+  for child in root:
+    if child.tag is ET.Comment:
+      insert_index += 1
+    else:
+      break
+  root.insert(insert_index, ET.Comment(f" {DERIVED_LAYERS_FORMAT_COMMENT_PREFIX} {min_reader_version} or newer "))
+
+
 VARIABLES_FORMAT_COMMENT_PREFIX = "<Variables>/\"=\" expressions require gds2palace util_stackup_reader.py version"
 
 
@@ -284,17 +312,35 @@ def _uses_variables_or_expressions(root):
   return False
 
 
+def _uses_reference_positioning(root):
+  """True if any Dielectric or Layer in this stackup uses Reference-relative positioning."""
+  dielectrics_el = get_dielectrics_element(root)
+  if dielectrics_el is not None and any(el.get("Reference") for el in dielectrics_el.findall("Dielectric")):
+    return True
+  layers_el = get_layers_element(root)
+  if layers_el is not None and any(el.get("Reference") for el in layers_el.findall("Layer")):
+    return True
+  return False
+
+
+def _uses_derived_layers(root):
+  """True if this stackup declares any <DerivedLayer>."""
+  derived_layers_el = get_derived_layers_element(root)
+  return derived_layers_el is not None and bool(derived_layers_el.findall("DerivedLayer"))
+
+
 def required_schema_version(root):
   """The minimum schemaVersion this stackup's current content actually needs: "3.1" if it
      uses <Variables>/"="-expressions (see _uses_variables_or_expressions()), else "3.0" if
-     any Dielectric or Layer uses Reference-relative positioning (the feature that bumped the
-     format before that - see util_stackup_reader.SUPPORTED_SCHEMA_VERSION), "2.0" otherwise.
+     any Dielectric or Layer uses Reference-relative positioning, or any <DerivedLayer> is
+     declared (both features that bumped the format before Variables did - see
+     util_stackup_reader.SUPPORTED_SCHEMA_VERSION), "2.0" otherwise.
      Used by save_stackup_tree() to catch schemaVersion="2.0"/"3.0" silently becoming a lie
      about the file's actual content - e.g. a Dielectric/Layer gaining a Reference attribute
      through some path other than "Convert to Reference position format" (which already sets
      schemaVersion itself), such as the Stackup Editor's one-time "make implicit dielectric
-     stacking explicit?" offer at save time, or a Variable/expression added directly via the
-     Variables tab.
+     stacking explicit?" offer at save time, a Variable/expression added directly via the
+     Variables tab, or a DerivedLayer added directly via the Derived Layers tab.
   Args:
       root (xml.etree.ElementTree.Element): the <Stackup> root element
   Returns:
@@ -302,11 +348,7 @@ def required_schema_version(root):
   """
   if _uses_variables_or_expressions(root):
     return "3.1"
-  dielectrics_el = get_dielectrics_element(root)
-  if dielectrics_el is not None and any(el.get("Reference") for el in dielectrics_el.findall("Dielectric")):
-    return "3.0"
-  layers_el = get_layers_element(root)
-  if layers_el is not None and any(el.get("Reference") for el in layers_el.findall("Layer")):
+  if _uses_reference_positioning(root) or _uses_derived_layers(root):
     return "3.0"
   return "2.0"
 
@@ -353,14 +395,74 @@ def _sort_layers_by_resulting_zmin (root):
     layers_el.append(child)
 
 
+def _sort_table_points_by_temperature(root):
+  """Reorders <Point> children within each <Table> by resolved Temperature, ascending.
+     Unlike _sort_layers_by_resulting_zmin() (purely cosmetic - file order has no meaning
+     to the reader), this one is load-bearing: the Elmer thermal-solver consumer
+     (gds2palace's util_simulation_setup.py) emits points in whatever order
+     util_stackup_reader.thermal_table.points iterates, with no sorting of its own, so an
+     out-of-order file produces a physically wrong piecewise-linear lookup curve.
+
+     parse_substrate() builds a thermal_tables_list internally but does not return it, so
+     this builds the smaller building block directly: one shared variables_list, then
+     stackup_reader.thermal_table(table_el, variables) per <Table> to get each Point's
+     resolved Temperature, in the same order as findall("Point").
+
+     Silently leaves order untouched if Temperature can't be fully resolved right now -
+     same "don't block save over a sort" reasoning as _sort_layers_by_resulting_zmin(); in
+     practice this never triggers, since validate_stackup() already ran and blocked the
+     save on any error before save_stackup_tree() is ever reached.
+
+     Any comment within a <Table> is moved to the front of that Table (ahead of every
+     <Point>), same handling _sort_layers_by_resulting_zmin() uses for <Layers> comments.
+  """
+  tables_el = get_tables_element(root)
+  if tables_el is None:
+    return
+  table_elements = tables_el.findall("Table")
+  if not table_elements:
+    return
+
+  try:
+    variables = stackup_reader.variables_list()
+    for data in root.iter("Variable"):
+      variables.append(stackup_reader.variable(data))
+    variables.resolve_all()
+  except (Exception, SystemExit):
+    return
+
+  for table_el in table_elements:
+    point_elements = table_el.findall("Point")
+    if len(point_elements) < 2:
+      continue
+    try:
+      resolved = stackup_reader.thermal_table(table_el, variables)
+    except (Exception, SystemExit):
+      continue
+    if len(resolved.points) != len(point_elements):
+      continue  # defensive - should never happen for a well-formed Table
+    temperature_by_id = {id(el): t for el, (t, _k) in zip(point_elements, resolved.points)}
+    sorted_points = sorted(point_elements, key=lambda el: temperature_by_id[id(el)])
+
+    children = list(table_el)
+    comments = [child for child in children if child.tag is ET.Comment]
+    new_children = comments + sorted_points
+
+    for child in children:
+      table_el.remove(child)
+    for child in new_children:
+      table_el.append(child)
+
+
 def save_stackup_tree(tree, filename):
   """Write a stackup tree back to disk with consistent indentation.
 
   Note: this re-serializes the whole document, so exact original whitespace and
   attribute order may change (any Reference-using Layer/Dielectric has its attribute
-  order deliberately normalized - see _reorder_attributes()), and <Layer> entries are
-  reordered by resulting Zmin, descending - see _sort_layers_by_resulting_zmin(). Comments
-  and all element content are preserved.
+  order deliberately normalized - see _reorder_attributes()), <Layer> entries are
+  reordered by resulting Zmin, descending - see _sort_layers_by_resulting_zmin() - and
+  each <Table>'s <Point> entries are reordered by resolved Temperature, ascending - see
+  _sort_table_points_by_temperature(). Comments and all element content are preserved.
 
   Also self-corrects schemaVersion="2.0"/"3.0" up to "3.0"/"3.1" if the content now needs it
   (see required_schema_version()) - every write goes through here, so this is the one place
@@ -382,7 +484,12 @@ def save_stackup_tree(tree, filename):
     stamp_variables_format_comment(root, stackup_reader.__version__)
   elif needed == "3.0" and root.get("schemaVersion") != "3.0":
     root.set("schemaVersion", "3.0")
-    stamp_reference_format_comment(root, stackup_reader.__version__)
+    # Reference and DerivedLayers are independent reasons "3.0" might be needed - stamp
+    # whichever one(s) are actually in use, not just one or the other
+    if _uses_reference_positioning(root):
+      stamp_reference_format_comment(root, stackup_reader.__version__)
+    if _uses_derived_layers(root):
+      stamp_derived_layers_format_comment(root, stackup_reader.__version__)
 
   layers_el = get_layers_element(root)
   if layers_el is not None:
@@ -397,6 +504,7 @@ def save_stackup_tree(tree, filename):
         _reorder_attributes(dielectric_el, _DIELECTRIC_REFERENCE_ATTR_ORDER)
 
   _sort_layers_by_resulting_zmin(root)
+  _sort_table_points_by_temperature(root)
 
   ET.indent(tree, space="  ")
   tree.write(filename, xml_declaration=True, encoding="UTF-8")
@@ -622,6 +730,68 @@ def set_operands(element, layer_numbers):
     ET.SubElement(element, "Operand", {"Layer": str(layernum)})
 
 
+# -------------------- Table / Point --------------------
+
+def get_tables_element(root, create=False):
+  """<Tables> is optional and, like <DerivedLayers>/<Variables>, may not exist yet - but
+  unlike both of those, it is a direct child of <Stackup> (a sibling of <Materials>/
+  <ELayers>, not nested inside <ELayers>) and is always the LAST child when present (see
+  XML_stackup_format.md's top-level structure diagram).
+  Args:
+      create (bool): if True and the element is missing, create (and append) it
+  """
+  tables_el = root.find("Tables")
+  if tables_el is None and create:
+    tables_el = ET.SubElement(root, "Tables")
+  return tables_el
+
+
+def add_table(root, **attrs):
+  """Append a new <Table> element, creating <Tables> if this is the first one. Keyword
+  args become attributes (None/"" skipped). Use add_point() separately to add its
+  <Point> children.
+  Returns:
+      xml.etree.ElementTree.Element: the new Table element
+  """
+  tables_el = get_tables_element(root, create=True)
+  el = ET.SubElement(tables_el, "Table")
+  for key, value in attrs.items():
+    if value is not None and value != "":
+      el.set(key, str(value))
+  return el
+
+
+def remove_table(root, element):
+  """Remove a <Table> element, and drop the now-empty <Tables> container too if that
+  was the last one (keeps a from-scratch file clean).
+  """
+  tables_el = get_tables_element(root)
+  if tables_el is None:
+    return
+  tables_el.remove(element)
+  # len(tables_el) alone would miss a <Tables> left holding only stray comments (a real
+  # case - e.g. a hand-authored file with one comment introducing each <Table>)
+  if not tables_el.findall("Table"):
+    root.remove(tables_el)
+
+
+def add_point(table_element, **attrs):
+  """Append a new <Point> element to a <Table>. Keyword args become attributes (None/""
+  skipped).
+  Returns:
+      xml.etree.ElementTree.Element: the new Point element
+  """
+  el = ET.SubElement(table_element, "Point")
+  for key, value in attrs.items():
+    if value is not None and value != "":
+      el.set(key, str(value))
+  return el
+
+
+def remove_point(table_element, element):
+  table_element.remove(element)
+
+
 # -------------------- validation --------------------
 
 def _is_float(value):
@@ -708,8 +878,8 @@ def _int_problem(value, known_variable_names):
 
 
 def validate_stackup(root):
-  """Validate Variables/Materials/Dielectrics/Layers/DerivedLayers against the rules in
-     XML_stackup_format.md. Tables is intentionally not checked here (not editable yet).
+  """Validate Variables/Tables/Materials/Dielectrics/Layers/DerivedLayers against the rules
+     in XML_stackup_format.md.
   Args:
       root (xml.etree.ElementTree.Element): root <Stackup> element
   Returns:
@@ -782,6 +952,47 @@ def validate_stackup(root):
   if remaining_variable_deps:
     errors.append(f"Circular Variable reference detected among: {sorted(remaining_variable_deps.keys())}")
 
+  # Tables are validated before Materials, and their names collected into table_names, since
+  # a Material's ThermalConductivityTable cross-references a Table by name (see below)
+  tables_el = get_tables_element(root)
+  table_names = []
+  if tables_el is not None:
+    for el in tables_el.findall("Table"):
+      name = el.get("Name")
+      label = name or "<unnamed table>"
+
+      if not name:
+        errors.append("Table is missing required attribute 'Name'")
+      elif name in table_names:
+        errors.append(f"Duplicate table Name '{name}'")
+      else:
+        table_names.append(name)
+
+      seen_temperatures = []  # concrete float literals only - expressions aren't evaluated here
+      for point_el in el.findall("Point"):
+        temperature = point_el.get("Temperature")
+        value = point_el.get("Value")
+
+        if temperature is None or temperature == "":
+          errors.append(f"Table '{label}' has a Point missing required attribute 'Temperature'")
+        else:
+          problem = _numeric_problem(temperature, known_variable_names)
+          if problem:
+            errors.append(f"Table '{label}' has invalid Point Temperature='{temperature}' ({problem})")
+          elif _is_float(temperature):
+            t = float(temperature)
+            if t in seen_temperatures:
+              errors.append(f"Table '{label}' has more than one Point with Temperature='{temperature}'")
+            else:
+              seen_temperatures.append(t)
+
+        if value is None or value == "":
+          errors.append(f"Table '{label}' has a Point missing required attribute 'Value'")
+        else:
+          problem = _numeric_problem(value, known_variable_names)
+          if problem:
+            errors.append(f"Table '{label}' has invalid Point Value='{value}' ({problem})")
+
   materials_el = get_materials_element(root)
   material_names = []
   if materials_el is not None:
@@ -808,6 +1019,10 @@ def validate_stackup(root):
           problem = _numeric_problem(value, known_variable_names)
           if problem:
             errors.append(f"Material '{label}' has invalid {attr}='{value}' ({problem})")
+
+      table_ref = el.get("ThermalConductivityTable")
+      if table_ref and not _is_expression(table_ref) and table_ref not in table_names:
+        errors.append(f"Material '{label}' references undefined ThermalConductivityTable '{table_ref}'")
 
   dielectrics_el = get_dielectrics_element(root)
   dielectric_names = []

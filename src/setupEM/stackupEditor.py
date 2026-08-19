@@ -36,6 +36,7 @@ untouched on save.
 """
 
 import argparse
+import ast
 import copy
 import os
 import re
@@ -89,7 +90,8 @@ MAX_RECENT_FILES = 10
 # ------------------------------------------------------------------
 # Column specs: (attribute, header label, kind)
 # kind in {"text", "computed", "materialtype", "layertype", "materialref",
-#          "operationtype", "operands", "color", "variabletype"}
+#          "operationtype", "operands", "color", "variabletype", "referenceedge",
+#          "dielectricref", "layerref_or_dielectricref", "tableref"}
 # ------------------------------------------------------------------
 
 # sentinel shown in the Type combo for "no Type set" (inferred from Value, the XML's own
@@ -115,7 +117,7 @@ MATERIAL_COLUMNS = [
     ("Rs", "Rs (Ohm/sq)", "text"),
     ("Density", "Density", "text"),
     ("ThermalConductivity", "Thermal Cond.", "text"),
-    ("ThermalConductivityTable", "Thermal Table", "text"),
+    ("ThermalConductivityTable", "Thermal Table", "tableref"),
     ("Color", "Color", "color"),
 ]
 
@@ -129,7 +131,7 @@ DIELECTRIC_COLUMNS = [
     ("Zmax", "Zmax", "text"),
     ("ResultZmin", "Zmin (resulting)", "computed"),
     ("ResultZmax", "Zmax (resulting)", "computed"),
-    ("Boundary", "Optional Boundary (GDS layer)", "text"),
+    ("Boundary", "Optional Boundary (GDS layer #)", "text"),
 ]
 
 LAYER_COLUMNS = [
@@ -144,6 +146,16 @@ LAYER_COLUMNS = [
     ("Thickness", "Thickness (resulting)", "computed"),
     ("ResultZmin", "Zmin (resulting)", "computed"),
     ("ResultZmax", "Zmax (resulting)", "computed"),
+]
+
+TABLE_COLUMNS = [
+    ("Name", "Table name", "text"),
+    ("PointCount", "Number of data points", "computed"),
+]
+
+POINT_COLUMNS = [
+    ("Temperature", "Temperature (K)", "text"),
+    ("Value", "Value", "text"),
 ]
 
 REFERENCE_EDGE_CHOICES = ["Top", "Bottom"]
@@ -192,6 +204,77 @@ def _resolve_all_expressions(root, variables):
             element.set(key, resolved)
 
 
+def _format_resolved_variable_value(value):
+    """Format a resolved Variable value (float or str, per util_stackup_reader.variable.value)
+       as literal text for direct use in an XML attribute - a whole-number float (e.g. 134.0,
+       the common case for something like a GDSII layer number) is written without a
+       trailing ".0", matching how such values are normally hand-typed in this format.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _substitute_variable_in_expression(value, deleted_name, resolved_value):
+    """Rewrites a single "="-expression attribute value, replacing every bare reference to
+       deleted_name with its resolved literal value - used when a Variable is deleted, so
+       every remaining use of it keeps working instead of becoming a dangling reference to
+       an undefined variable. If the whole expression was just that one variable reference
+       (the common case - also the ONLY case possible for a string-typed variable, which
+       XML_stackup_format.md only allows as the sole token of an expression), the result
+       collapses to a plain literal (no leading "="); otherwise "=" and the surrounding
+       expression structure are kept, with just that one identifier replaced by a numeric
+       constant.
+    Returns:
+        string: the new attribute value, unchanged if deleted_name doesn't appear in it
+    Raises:
+        SyntaxError: if value isn't a well-formed expression - callers should skip on this,
+          same as elsewhere in this module (should not happen for an already-valid file)
+    """
+    expr_tree = ast.parse(value[1:], mode="eval")
+    if isinstance(expr_tree.body, ast.Name) and expr_tree.body.id == deleted_name:
+        return _format_resolved_variable_value(resolved_value)
+
+    if not any(isinstance(node, ast.Name) and node.id == deleted_name for node in ast.walk(expr_tree)):
+        return value
+
+    # whole-number float -> int, same "no trailing .0" cleanup as the sole-token case above -
+    # only reachable with a number-valued resolved_value: a string variable can only appear as
+    # the sole token of an expression (see docstring), so it never reaches this branch
+    constant_value = int(resolved_value) if isinstance(resolved_value, float) and resolved_value.is_integer() else resolved_value
+
+    class _ReplaceName(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if node.id == deleted_name:
+                return ast.copy_location(ast.Constant(value=constant_value), node)
+            return node
+
+    new_tree = _ReplaceName().visit(expr_tree)
+    ast.fix_missing_locations(new_tree)
+    return "=" + ast.unparse(new_tree.body)
+
+
+def _resolve_variable_uses(root, deleted_name, resolved_value, skip_element):
+    """Walks every attribute anywhere in the tree (Materials, Dielectrics, Layers, other
+       Variables, Substrate, DerivedLayers, Tables) and rewrites every reference to
+       deleted_name via _substitute_variable_in_expression(), in place. skip_element is the
+       <Variable> about to be removed itself - excluded so its own Value isn't rewritten
+       right before it's deleted.
+    """
+    for element in root.iter():
+        if element is skip_element:
+            continue
+        for key, value in list(element.attrib.items()):
+            if not (isinstance(value, str) and value.startswith("=")):
+                continue
+            try:
+                new_value = _substitute_variable_in_expression(value, deleted_name, resolved_value)
+            except SyntaxError:
+                continue
+            if new_value != value:
+                element.set(key, new_value)
+
+
 def _compute_variable_values(elements):
     """Read-only ResolvedValue column for the Variables tab: each row's evaluated value,
        annotated with the resolved type in brackets (e.g. "0.96 (number)", "SG13G2
@@ -224,6 +307,14 @@ def _compute_layer_thickness(elements):
             text = ""
         computed[id(element)] = {"Thickness": text}
     return computed
+
+
+def _compute_table_point_counts(elements):
+    """Read-only "Number of data points" column for the Thermal Tables tab: how many
+       <Point> children each <Table> currently has, so the master list stays informative
+       without needing to open each table in the detail editor to see its size.
+    """
+    return {id(element): {"PointCount": f"{len(element.findall('Point'))} data points"} for element in elements}
 
 
 def _compute_layer_zpositions(elements, dielectrics_elements, variables, offset=0.0):
@@ -525,7 +616,7 @@ class ElementTableEditor(QWidget):
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
                  pre_set_attr_fn=None, reference_choices_fn=None,
                  header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None,
-                 invalid_fn=None):
+                 invalid_fn=None, table_choices_fn=None):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -563,6 +654,8 @@ class ElementTableEditor(QWidget):
              (Dielectrics + Layers) - unlike material_choices_fn, which only ever spans one; for
              Dielectrics it's Dielectric names only (a Dielectric's Reference can't target a
              Layer - Layers are resolved after Dielectrics).
+           table_choices_fn() -> list[str]: declared Table names, for the "tableref" kind
+             (Materials' ThermalConductivityTable column).
            header_tooltips: {attr: tooltip text} for columns whose header label alone
              could be misread (e.g. Zmin/Zmax meaning different things depending on
              whether the row uses Reference).
@@ -592,6 +685,7 @@ class ElementTableEditor(QWidget):
         self.material_choices_fn = material_choices_fn
         self.operand_lookup_fn = operand_lookup_fn
         self.reference_choices_fn = reference_choices_fn
+        self.table_choices_fn = table_choices_fn
         self.type_choices = type_choices or []
         self.on_changed = on_changed
         self.strip_fn = strip_fn
@@ -624,6 +718,15 @@ class ElementTableEditor(QWidget):
         for col in range(len(columns)):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
+        # the last column stretches to fill leftover width (above) - its header label
+        # defaults to centered like every other column, which reads oddly once it's
+        # sitting in a much wider column than its text needs; left-align just this one -
+        # except on the Materials tab, whose last column is a small Color swatch button,
+        # not a stretched text value, so its header stays centered like the button below it
+        if columns is not MATERIAL_COLUMNS:
+            last_header_item = self.table.horizontalHeaderItem(len(columns) - 1)
+            if last_header_item:
+                last_header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.itemChanged.connect(self._on_item_changed)
 
         if variable_names_fn:
@@ -721,6 +824,12 @@ class ElementTableEditor(QWidget):
                 choices = [REFERENCE_NONE_LABEL] + (self.reference_choices_fn() if self.reference_choices_fn else [])
                 self._make_combo_cell(row, col, element, attr, value or REFERENCE_NONE_LABEL, choices, editable=True,
                                        value_out_fn=lambda text: "" if text == REFERENCE_NONE_LABEL else text)
+            elif kind == "tableref":
+                not_applicable = bool(self.not_applicable_fn and self.not_applicable_fn(element, attr))
+                choices = [REFERENCE_NONE_LABEL] + (self.table_choices_fn() if self.table_choices_fn else [])
+                self._make_combo_cell(row, col, element, attr, value or REFERENCE_NONE_LABEL, choices, editable=True,
+                                       value_out_fn=lambda text: "" if text == REFERENCE_NONE_LABEL else text,
+                                       enabled=not not_applicable)
             elif kind == "operands":
                 operand_numbers = stackup_writer.get_operand_layers(element)
                 item = QTableWidgetItem(", ".join(operand_numbers))
@@ -729,9 +838,10 @@ class ElementTableEditor(QWidget):
                     item.setToolTip(", ".join(lookup.get(num, num) for num in operand_numbers))
                 self.table.setItem(row, col, item)
 
-    def _make_combo_cell(self, row, col, element, attr, value, choices, editable, value_out_fn=None):
+    def _make_combo_cell(self, row, col, element, attr, value, choices, editable, value_out_fn=None, enabled=True):
         combo = NoScrollComboBox()
         combo.setEditable(editable)
+        combo.setEnabled(enabled)
         items = list(choices)
         if value and value not in items:
             items = [value] + items
@@ -1042,7 +1152,7 @@ class StackupEditorWindow(QDialog):
             VARIABLE_COLUMNS,
             container_fn=self._variables_container,
             add_fn=lambda root, **attrs: stackup_writer.add_variable(root, **attrs),
-            remove_fn=stackup_writer.remove_variable,
+            remove_fn=self._remove_variable_and_resolve_uses,
             default_attrs_fn=self._default_variable_attrs,
             on_changed=self._on_variables_changed,
             type_choices=VARIABLE_TYPE_CHOICES,
@@ -1079,6 +1189,7 @@ class StackupEditorWindow(QDialog):
                 for attr in ("Permittivity", "DielectricLossTangent", "Conductivity", "Rs",
                              "Density", "ThermalConductivity")
             },
+            table_choices_fn=self._table_names,
             variable_names_fn=self._variable_names,
             invalid_fn=self._is_invalid_field,
         )
@@ -1165,6 +1276,54 @@ class StackupEditorWindow(QDialog):
         derived_layers_layout.addWidget(self.derived_layers_editor)
         derived_layers_tab.setLayout(derived_layers_layout)
 
+        self.tables_editor = ElementTableEditor(
+            TABLE_COLUMNS,
+            container_fn=self._tables_container,
+            add_fn=lambda root, **attrs: stackup_writer.add_table(root, **attrs),
+            remove_fn=stackup_writer.remove_table,
+            default_attrs_fn=self._default_table_attrs,
+            on_changed=self._on_tables_changed,
+            compute_fn=_compute_table_point_counts,
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
+        )
+        self.tables_editor.table.itemSelectionChanged.connect(
+            lambda: QTimer.singleShot(0, self._sync_points_editor_from_table_selection))
+        # left-align (default QHeaderView alignment is centered) - these headers read as
+        # labels ("Table name", "Number of data points"), not numbers, so left reads better
+        self.tables_editor.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.points_editor = ElementTableEditor(
+            POINT_COLUMNS,
+            container_fn=lambda table_el: list(table_el.findall("Point")) if table_el is not None else [],
+            add_fn=stackup_writer.add_point,
+            remove_fn=stackup_writer.remove_point,
+            default_attrs_fn=self._default_point_attrs,
+            on_changed=self._on_points_changed,
+            header_tooltips={
+                attr: "Numeric value, or \"=expression\" referencing a Variable"
+                for attr in ("Temperature", "Value")
+            },
+            variable_names_fn=self._variable_names,
+            invalid_fn=self._is_invalid_field,
+        )
+        self.points_editor.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        tables_tab = QWidget()
+        tables_layout = QVBoxLayout()
+        tables_hint = QLabel(
+            "Named temperature/thermal-conductivity lookup tables, referenced from a "
+            "Material's \"Thermal Table\" column. Select a table below to view/edit its "
+            "points. Points are sorted by Temperature automatically when the file is saved.")
+        tables_hint.setWordWrap(True)
+        tables_layout.addWidget(tables_hint)
+        tables_layout.addWidget(QLabel("Tables:"))
+        self.tables_editor.setMaximumHeight(160)   # short list; points can be 15-20+ per table
+        tables_layout.addWidget(self.tables_editor)
+        tables_layout.addWidget(QLabel("Points in selected table:"))
+        tables_layout.addWidget(self.points_editor)
+        tables_tab.setLayout(tables_layout)
+
         description_tab = QWidget()
         description_layout = QVBoxLayout()
         description_hint = QLabel(
@@ -1194,6 +1353,7 @@ class StackupEditorWindow(QDialog):
         self.tabs.addTab(self.dielectrics_editor, "Dielectric Stack")
         self.tabs.addTab(layers_tab, "Layers")
         self.tabs.addTab(derived_layers_tab, "Derived Layers")
+        self.tabs.addTab(tables_tab, "Thermal Tables")
         self.tabs.addTab(description_tab, "File Description")
         self.tabs.addTab(xml_preview_tab, "XML Preview")
         self.tabs.setCurrentWidget(self.materials_editor)   # Variables is first in tab order,
@@ -1311,7 +1471,11 @@ class StackupEditorWindow(QDialog):
             return True
 
         root = self.tree.getroot()
-        old_positions = _compute_dielectric_zpositions(self._dielectrics_container(root))
+        try:
+            variables = _build_variables_list(self._variables_container(root))
+            old_positions = _compute_dielectric_zpositions(self._dielectrics_container(root), variables)
+        except (Exception, SystemExit):
+            old_positions = {}  # couldn't resolve current data - handled below (skip the offer)
         old_zmax_text = old_positions.get(id(element), {}).get("ResultZmax")
 
         element.set("Thickness", new_value)  # apply the actual edit either way
@@ -1418,6 +1582,26 @@ class StackupEditorWindow(QDialog):
             # Material where "just pick the first material" is a harmless stand-in
         }
 
+    def _default_table_attrs(self):
+        return {
+            "Name": _unique_name(self._table_names(), "NewTable"),
+            # Points deliberately left for the user to add - same reasoning as
+            # DerivedLayer's Operands above: no sensible default curve to start from
+        }
+
+    def _default_point_attrs(self):
+        # avoid colliding with the currently-shown table's existing Temperatures - a
+        # fixed default (e.g. always "0") would immediately trip the duplicate-Temperature
+        # validation error the moment "Add" is clicked twice in a row
+        existing = []
+        for el in self.points_editor.row_elements:
+            try:
+                existing.append(float(el.get("Temperature")))
+            except (TypeError, ValueError):
+                pass
+        next_temperature = max(existing) + 10 if existing else 25
+        return {"Temperature": f"{next_temperature:g}", "Value": "0"}
+
     def _next_free_target_layer(self):
         # simple collision-avoidance so a freshly added row already has a usable
         # target number: highest layer/derived-layer number in use, plus one
@@ -1443,6 +1627,26 @@ class StackupEditorWindow(QDialog):
             return []
         return [v.get("Name") for v in self._variables_container(self.tree.getroot()) if v.get("Name")]
 
+    def _remove_variable_and_resolve_uses(self, root, element):
+        """remove_fn for variables_editor: before actually deleting the <Variable>, resolves
+           every remaining use of it (anywhere in the tree, including other Variables' own
+           Value) to its current literal value via _resolve_variable_uses() - so deleting a
+           variable never leaves a dangling "="-expression reference to an undefined name
+           behind. Falls back to a plain removal (no substitution) if the current data can't
+           be resolved right now (e.g. already mid-edit invalid) - same "don't block on this"
+           reasoning used elsewhere for compute_fn/pre_set_attr_fn hooks.
+        """
+        name = element.get("Name")
+        if name:
+            try:
+                variables = _build_variables_list(self._variables_container(root))
+                var = variables.get_by_name(name)
+                if var is not None:
+                    _resolve_variable_uses(root, name, var.value, skip_element=element)
+            except (Exception, SystemExit):
+                pass
+        stackup_writer.remove_variable(root, element)
+
     def _material_names(self):
         if self.tree is None:
             return []
@@ -1457,6 +1661,11 @@ class StackupEditorWindow(QDialog):
         if self.tree is None:
             return []
         return [d.get("Name") for d in self._dielectrics_container(self.tree.getroot()) if d.get("Name")]
+
+    def _table_names(self):
+        if self.tree is None:
+            return []
+        return [t.get("Name") for t in self._tables_container(self.tree.getroot()) if t.get("Name")]
 
     def _layer_name_by_number(self):
         # for the Derived Layers tab's Operands tooltip: a GDSII layer number used as an
@@ -1533,6 +1742,11 @@ class StackupEditorWindow(QDialog):
     def _derived_layers_container(root):
         derived_el = stackup_writer.get_derived_layers_element(root)
         return derived_el.findall("DerivedLayer") if derived_el is not None else []
+
+    @staticmethod
+    def _tables_container(root):
+        tables_el = stackup_writer.get_tables_element(root)
+        return tables_el.findall("Table") if tables_el is not None else []
 
     # ---------- file actions ----------
 
@@ -1725,6 +1939,11 @@ class StackupEditorWindow(QDialog):
         self.dielectrics_editor.set_root(root)
         self.layers_editor.set_root(root)
         self.derived_layers_editor.set_root(root)
+        self.tables_editor.set_root(root)
+        # new tree = new Elements, so nothing "the same Table" to rebind the detail
+        # editor to - always reset it explicitly rather than relying on
+        # itemSelectionChanged firing with the right timing during the reload above
+        self.points_editor.set_root(None)
 
         offset_el = stackup_writer.get_substrate_offset_element(root)
         self.offset_edit.setText(offset_el.get("Offset") if offset_el is not None else "0")
@@ -2147,7 +2366,7 @@ class StackupEditorWindow(QDialog):
             "position, falling back to absolute Zmin/Zmax only where it doesn't.\n"
             "- Derived layers are removed, along with any Layer entry that exists only to "
             "give a derived layer its Z-position (its Layer number was never real GDSII "
-            "geometry).\n"
+            "geometry) - schemaVersion \"2.0\" predates derived layers too.\n"
             "- Thermal data is removed: the Tables section, and Density/ThermalConductivity/"
             "ThermalConductivityTable on every Material.\n\n"
             "Resulting absolute positions stay exactly the same.")
@@ -2259,6 +2478,13 @@ class StackupEditorWindow(QDialog):
                 except ValueError:
                     pass
 
+            # this comment's claim (minimum reader version needed for DerivedLayers) no
+            # longer applies once DerivedLayers itself has been removed above
+            for child in list(root):
+                if child.tag is ET.Comment and (child.text or "").strip().startswith(
+                        stackup_writer.DERIVED_LAYERS_FORMAT_COMMENT_PREFIX):
+                    root.remove(child)
+
         # ---- remove thermal data: Tables section, and thermal attributes on Materials ----
         tables_el = root.find("Tables")
         if tables_el is not None:
@@ -2353,6 +2579,9 @@ class StackupEditorWindow(QDialog):
         self.dielectrics_editor.reload()
         self.layers_editor.reload()
         self.derived_layers_editor.reload()
+        self.tables_editor.reload()
+        if self.points_editor.root is not None:
+            self.points_editor.reload()
         self._on_changed(structural=structural, edited_field=edited_field)
 
     def _on_materials_changed(self, structural=False, edited_field=None):
@@ -2368,6 +2597,47 @@ class StackupEditorWindow(QDialog):
         # choices both depend on the current Dielectrics tab state, so refresh it too
         self.layers_editor.reload()
         self._on_changed(structural=structural, edited_field=edited_field)
+
+    def _on_tables_changed(self, structural=False, edited_field=None):
+        # table names may have changed (add/remove/rename) - refresh the Materials tab's
+        # ThermalConductivityTable dropdown choices, and resync the Points detail editor
+        # (a selected Table may have just been removed, or rows may have shifted)
+        self.materials_editor.reload()
+        self._sync_points_editor_from_table_selection()
+        self._on_changed(structural=structural, edited_field=edited_field)
+
+    def _on_points_changed(self, structural=False, edited_field=None):
+        self._resync_tables_editor_point_counts()
+        self._on_changed(structural=structural, edited_field=edited_field)
+
+    def _sync_points_editor_from_table_selection(self):
+        if self.tree is None:
+            self.points_editor.set_root(None)
+            return
+        selected = self.tables_editor.table.selectedIndexes()
+        row = selected[0].row() if selected else -1
+        row_elements = self.tables_editor.row_elements
+        table_el = row_elements[row] if 0 <= row < len(row_elements) else None
+        self.points_editor.set_root(table_el)
+
+    def _resync_tables_editor_point_counts(self):
+        """Refreshes the master Tables editor's Points (count) column after a Point is
+           added/removed/edited, without losing the currently-selected Table row. A plain
+           self.tables_editor.reload() clears the table's row selection (reload() never
+           re-selects anything), which - via the itemSelectionChanged-driven sync above -
+           would immediately blank the Points editor out from under the very edit that just
+           triggered this call. So: remember the bound Table element, reload, then find and
+           re-select its row if it's still there.
+        """
+        selected_table = self.points_editor.root
+        self.tables_editor.reload()
+        if selected_table is not None:
+            try:
+                row = self.tables_editor.row_elements.index(selected_table)
+            except ValueError:
+                row = -1
+            if row >= 0:
+                self.tables_editor.table.selectRow(row)
 
     def _on_changed(self, structural=False, edited_field=None):
         # every edit path (cell edit, add/remove/move, offset edit) funnels through
@@ -2451,6 +2721,7 @@ class StackupEditorWindow(QDialog):
         self._set_undo_available(bool(self._undo_stack))
         self._reload_all_editors()
         self._revalidate_and_refresh()
+        self._refresh_xml_preview_if_active()
 
     def _refresh_preview(self, root, errors):
         if errors:
