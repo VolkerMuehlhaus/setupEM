@@ -370,7 +370,7 @@ class FileInputTab(QWidget):
         self.XML_show_layout.setAlignment(Qt.AlignRight)
         self.show_XML_btn = QPushButton("Show Stackup")
         self.show_XML_btn.setFixedWidth(150)
-        self.show_XML_btn.clicked.connect(self.MainWindow.open_popup)
+        self.show_XML_btn.clicked.connect(self.show_stackup)
         self.XML_show_layout.addWidget(self.show_XML_btn)
         self.XML_layout.addLayout(self.XML_show_layout)
 
@@ -661,6 +661,15 @@ class FileInputTab(QWidget):
         self.MainWindow.read_XML()
 
         return True  # Tab change only possible when returning True
+
+    def show_stackup(self):
+        # "Show Stackup" is a plain button click, not a tab change, so nothing
+        # would otherwise flush the override grid into saved_values/materials_list
+        # before the popup reads them - save first so edited overrides not yet
+        # committed by switching tabs still show up in the preview.
+        if not self.save_values():
+            return
+        self.MainWindow.open_popup()
 
 
 # ---- Python Syntax Highlighter ----
@@ -1815,7 +1824,8 @@ class MainWindowBase(QMainWindow):
     def read_XML(self):
         filename = self.saved_values["SubstrateFile"]
         if pathlib.Path(filename).exists():
-            self.materials_list, self.dielectrics_list, self.metals_list = stackup_reader.read_substrate(filename)
+            self.materials_list, self.dielectrics_list, self.metals_list = stackup_reader.read_substrate(
+                filename, variable_overrides=self.saved_values.get("variable_overrides"))
             self.update_target_layer_choices(self.metals_list)
             self.file_tab.update_XML_description(filename)
             self.file_tab.update_variable_overrides_grid(filename)
