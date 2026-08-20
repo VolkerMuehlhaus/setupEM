@@ -244,3 +244,7 @@ If you then start KLayout using this script, a new menu item is available: Tools
 ```
 
 3. Name it e.g. **setupEM via KLayout**  
+
+# License
+
+This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later) - see [LICENSE](./LICENSE) for the full text.
