@@ -79,6 +79,8 @@ The setupEM module also installs these dependencies:
 - PySide6
 - scipy
 - requests
+- scikit-rf
+- matplotlib
     
 ---
 
