@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "setupEM"
-version = "0.3.12"
+dynamic = ["version"]
 description = "Python tool for configuration of gds2palace workflow with GUI."
-readme = "README.md"
+license = "GPL-3.0-or-later"
+readme = "README_pypi.md"
 authors = [
     { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
 ]
@@ -26,6 +27,9 @@ requires-python = ">=3.9"
 setupEM = "setupEM.setupEM:main"
 setupThermal = "setupEM.setupThermal:main"
 stackupEditor = "setupEM.stackupEditor:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "setupEM.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
