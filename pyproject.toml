@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "setupEM"
-version = "0.3.12"
+version = "0.3.13"
 description = "Python tool for configuration of gds2palace workflow with GUI."
 license = "GPL-3.0-or-later"
 readme = "README.md"
