@@ -1,6 +1,6 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-08-19
+Document version: 2026-08-21
 
 ## Contents
 [What's New](#whats-new)  
@@ -49,6 +49,7 @@ This chapter gives a brief overview of major features added since the previous e
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
+- **Start Simulation on Windows runs Palace directly and shows results automatically.** No more opening a terminal and typing `./run_sim` yourself - output streams live into the Log panel, Terminate actually works, and a results summary (degrees of freedom, simulation time, peak RAM, mesh-adaptation error indicators) appears automatically once a run finishes - see "[Create Model tab](#create-model-tab)".
 
 
 ## About setupEM and setupThermal
@@ -207,13 +208,15 @@ The buttons work top-down: **preview** the model geometry first, then **create t
 
 <img src="./png/createmodel2.png" alt="create" width="700">
 
-**Start Simulation** runs the solver: on Linux this starts Palace via script `run_sim`; on Windows it opens the Windows Subsystem for Linux (WSL) in the simulation directory.
+**Start Simulation** runs the solver: on Linux this starts Palace via script `run_sim` directly; on Windows it runs the same `run_sim` script inside the Windows Subsystem for Linux (WSL), automatically - no terminal window opens, and Palace's console output streams live into the Log panel below, the same as on Linux. This works for simulation directories on a LOCAL drive only - WSL cannot reach a network drive. **Terminate** stops a running simulation, including one running inside WSL on Windows.
 
 <img src="./png/createmodel3.png" alt="create" width="700">
 
-On Linux, this needs a `run_sim` script configured as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) (template in that repository's `scripts` directory). On Windows/WSL, type `./run_sim` in the opened terminal.
+This needs a `run_sim` script configured as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) (template in that repository's `scripts` directory); on Windows, the same requirement applies inside your WSL environment, e.g. `run_palace` needs to be reachable there via `PATH` (usually set up in `~/.profile`).
 
-To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output.
+When a Palace simulation finishes, a **results summary** is appended to the Log panel automatically: degrees of freedom, mesh elements, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read from Palace's own `palace.json`/`error-indicators.csv` output. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration.
+
+To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
 
 ## Code tab
 

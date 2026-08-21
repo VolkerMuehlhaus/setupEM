@@ -1246,6 +1246,16 @@ class CreateModelTabBase(QWidget):
         self.log_group.setLayout(self.log_layout)
         self.log_area = QPlainTextEdit()
         self.log_area.setReadOnly(True)
+        log_font = QFont()
+        # Consolas/Cascadia Mono: Windows. Ubuntu Mono: default on Ubuntu (this app's primary
+        # Linux target, see the Ubuntu 24.04 notice below) and narrower than DejaVu Sans Mono.
+        # Liberation Mono/DejaVu Sans Mono: broader Linux fallbacks. "monospace": generic
+        # fontconfig alias, guaranteed to resolve to an installed monospace font on Linux.
+        log_font.setFamilies(["Consolas", "Cascadia Mono", "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "monospace"])
+        log_font.setStyleHint(QFont.Monospace)
+        log_font.setFixedPitch(True)
+        log_font.setPointSize(9)
+        self.log_area.setFont(log_font)
         self.log_layout.addWidget(self.log_area)
 
         self.main_layout.addWidget(self.file_group)
