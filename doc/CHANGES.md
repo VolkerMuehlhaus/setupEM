@@ -1,4 +1,4 @@
-# What's New - August 19, 2026
+# What's New - August 21, 2026
 
 Changes since the version from about 3 months ago, focused on features that matter to end users. For general usage, see the main [README](../README.md).
 
@@ -51,3 +51,11 @@ Points don't need to be entered in temperature order - they're sorted automatica
 ## License correction
 
 Corrected a license inconsistency: the repository's LICENSE file said Apache-2.0, while every source file's own header comment already said GPLv3. The code headers were correct - setupEM imports gds2palace's Python API directly in-process, and gds2palace is itself GPLv3, so GPLv3 is the license actually required here. LICENSE, `pyproject.toml`, and the two files that had no header now all agree on GPLv3.
+
+## Faster, more informative Palace runs on Windows
+
+**Start Simulation** on Windows no longer opens a separate WSL terminal window and waits for you to type `./run_sim` yourself. It now runs `./run_sim` directly inside WSL and streams Palace's console output live into the Log panel, exactly like the existing Linux behavior - no terminal window appears at all. This also means **Terminate** now actually stops a running Windows/WSL simulation, and the Log panel accurately reflects when the run has really finished (previously the terminal launcher returned almost immediately, long before Palace itself was done). This still only works for simulation directories on a local drive - WSL cannot reach a network drive.
+
+When a Palace simulation finishes, a **results summary** is now appended to the Log panel automatically: degrees of freedom, mesh element count, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read directly from Palace's own `palace.json` and `error-indicators.csv` output files. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration plus the final converged result, so you can see how DOF and error indicators evolved across iterations at a glance.
+
+The Log panel also now uses a monospaced font (Consolas on Windows, Ubuntu Mono/DejaVu Sans Mono on Linux), so solver output and the results table line up in neat columns instead of a proportional font.

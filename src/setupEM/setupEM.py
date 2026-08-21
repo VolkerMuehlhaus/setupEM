@@ -54,6 +54,7 @@ if __package__ in (None, ""):
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
+    from palace_results import build_results_summary
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -61,6 +62,7 @@ else:
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
+    from .palace_results import build_results_summary
 
 
 '''
@@ -1079,6 +1081,26 @@ class CreateModelTab(CreateModelTabBase):
     are specific to this app.
     """
 
+    def __init__(self, MainWindow):
+        super().__init__(MainWindow)
+
+        # Tracks which action self.process is currently running, so on_finished() can tell a
+        # simulation run apart from a mesh-creation run (self.process is reused for both).
+        self._process_purpose = None
+
+    def _append_results_summary(self):
+        # Palace-only: parse palace.json / error-indicators.csv and append a results summary
+        # to the log. Called from on_finished() after a real simulation run.
+        run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+        summary = build_results_summary(run_path, saved_values['model_basename'])
+        self.log_area.appendPlainText("\n" + summary + "\n")
+
+    def on_finished(self, exit_code, exit_status):
+        super().on_finished(exit_code, exit_status)
+        # Auto-append the results summary after a real simulation run (not after mesh creation)
+        if self._process_purpose == "run_simulation" and self.MainWindow.PalaceMode:
+            self._append_results_summary()
+
     def create_model(self):
         # Request all tabs to save values again,
         # which can do some update to saved_values
@@ -1105,6 +1127,7 @@ class CreateModelTab(CreateModelTabBase):
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
+            self._process_purpose = "create_mesh"
             self.process.start(python_exe, [pymodel_filename])
 
 
@@ -1118,6 +1141,7 @@ class CreateModelTab(CreateModelTabBase):
 
         # clear log
         self.log_area.clear()
+        self._process_purpose = "run_simulation"
 
         if self.MainWindow.PalaceMode:
             self.log_area.appendPlainText("Trying to start Palace using script ./run_sim now")
@@ -1143,10 +1167,21 @@ class CreateModelTab(CreateModelTabBase):
 
 
                 wsl_run_path = windows_to_wsl_path(run_path)
-                # tell user what to do, we can open WSL in the right place but not start simulation
-                self.log_area.appendPlainText("Running on Windows with WSL, you need to type ./run_sim in the terminal yourself!")
-                self.log_area.appendPlainText("Note that this works for LOCAL drives only, we can't open WSL on network drive.")
-                self.process.start("cmd.exe", ["/c", "start", "wt.exe", "wsl", "--cd", wsl_run_path])
+                self.log_area.appendPlainText("Running on Windows with WSL: starting ./run_sim ...")
+                self.log_area.appendPlainText("Note that this works for LOCAL drives only, we can't open WSL on network drive.\n")
+                # Run wsl.exe directly as self.process (no terminal emulator in between), so Palace's
+                # stdout/stderr stream into this log via the existing on_stdout/on_stderr handlers, and
+                # on_finished fires with the real exit code when ./run_sim actually completes -- instead
+                # of opening a detached terminal window, whose own quoting/tokenization rules (cmd's
+                # "start", and wt.exe's own use of ";" as a pane/command separator) make embedding a
+                # multi-step shell command fragile, and whose completion can't be tracked anyway.
+                # bash -lc: login shell so ~/.profile (where PATH additions for run_palace/combine_snp
+                # usually live, per gds2palace's scripts/README.md) gets sourced, same as a manually
+                # typed ./run_sim in a fresh WSL login shell would.
+                self.process.start("wsl.exe", [
+                    "--cd", wsl_run_path,
+                    "--", "bash", "-lc", "./run_sim"
+                ])
             else:
                 # Linux
                 self.log_area.appendPlainText('Setting work directory ' + run_path)
