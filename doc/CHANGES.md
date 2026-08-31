@@ -1,3 +1,8 @@
+
+# What's New - August 31, 2026
+
+Added a "slower, most accurate (N=3)" mesh basis function option, available in Palace mode only since Elmer doesn't support it. Fixed the Frequencies tab silently dropping (or reusing stale) `fstart`/`fstop` when left blank.  
+
 # What's New - August 21, 2026
 
 Changes since the version from about 3 months ago, focused on features that matter to end users. For general usage, see the main [README](../README.md).
@@ -58,4 +63,3 @@ Corrected a license inconsistency: the repository's LICENSE file said Apache-2.0
 
 When a Palace simulation finishes, a **results summary** is now appended to the Log panel automatically: degrees of freedom, mesh element count, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read directly from Palace's own `palace.json` and `error-indicators.csv` output files. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration plus the final converged result, so you can see how DOF and error indicators evolved across iterations at a glance.
 
-The Log panel also now uses a monospaced font (Consolas on Windows, Ubuntu Mono/DejaVu Sans Mono on Linux), so solver output and the results table line up in neat columns instead of a proportional font.
