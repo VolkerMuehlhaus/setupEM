@@ -27,6 +27,7 @@ requires-python = ">=3.9"
 setupEM = "setupEM.setupEM:main"
 setupThermal = "setupEM.setupThermal:main"
 stackupEditor = "setupEM.stackupEditor:main"
+resultViewer = "setupEM.result_viewer:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "setupEM.__version__"}
