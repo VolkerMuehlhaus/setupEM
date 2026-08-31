@@ -653,7 +653,7 @@ class MeshTab(QWidget):
         self.main_layout.setAlignment(Qt.AlignTop)
 
         label_width = 250
-        edit_width = 150
+        edit_width = 170
 
 
         # ---------- MESH GROUP ----------
@@ -709,7 +709,7 @@ class MeshTab(QWidget):
         self.mesh_order_box = QComboBox()
         self.mesh_order_box.setFixedWidth(edit_width)
         self.mesh_order_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.mesh_order_box.addItems(["faster, less accurate (N=1)","default (N=2)", "slower, ultra accurate (N=3)"])
+        self.mesh_order_box.addItems(["faster, less accurate (N=1)","recommended (N=2)", "slower, most accurate (N=3)"])
         self.meshorder_layout.addWidget(self.mesh_order_box)
         self.mesh_order_box.setCurrentIndex(0)
         self.meshorder_layout.addStretch()
