@@ -107,7 +107,7 @@ On this tab, you configure input files:
 
 The fields for GDSII and XML file support drag & drop or you can use the Browse... buttons.
 
-Some pre-processing of the layout is also defined here: You can specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box. If your layout includes **polygons with holes**, you need to set the "Preprocess GDSII file" checkbox, otherwise you will get error messages during meshing.
+Some pre-processing of the layout is also defined here: You can specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box.
 
 <img src="./doc/png/inputfiles1.png" alt="input files" width="700">
 

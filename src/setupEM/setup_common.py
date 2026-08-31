@@ -32,7 +32,7 @@ mesh fields, the Python model code generator bodies) is intentionally left
 in setupEM.py / setupThermal.py, not here.
 """
 
-import sys, os, json, pathlib, ast, webbrowser
+import sys, os, json, pathlib, ast, webbrowser, io, contextlib
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
@@ -497,7 +497,7 @@ class FileInputTab(QWidget):
         self.MainWindow.saved_values["SubstrateFile"] = filename.replace('\\', '/')
         self.update_XML_description(filename)
         self.update_variable_overrides_grid(filename)
-        self.MainWindow.read_XML()  # safe if invalid filename
+        self.MainWindow.read_XML()  # shows an error dialog and keeps prior data on invalid/unparseable XML
         # file is read when leaving the files tab
 
     def update_XML_description(self, filename):
@@ -1834,8 +1834,22 @@ class MainWindowBase(QMainWindow):
     def read_XML(self):
         filename = self.saved_values["SubstrateFile"]
         if pathlib.Path(filename).exists():
-            self.materials_list, self.dielectrics_list, self.metals_list = stackup_reader.read_substrate(
-                filename, variable_overrides=self.saved_values.get("variable_overrides"))
+            captured_stdout = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(captured_stdout):
+                    materials_list, dielectrics_list, metals_list = stackup_reader.read_substrate(
+                        filename, variable_overrides=self.saved_values.get("variable_overrides"))
+            except (Exception, SystemExit) as e:
+                # SystemExit is caught deliberately (not just Exception): the reader
+                # reports hard validation failures (circular/ambiguous Reference,
+                # Offset+Reference conflict, ...) via print(...); exit(1) instead of
+                # raising - see the same pattern in stackupEditor.py's _refresh_preview().
+                # Capture stdout so that printed ERROR text (otherwise invisible in a
+                # GUI with no attached console) can be shown to the user.
+                details = captured_stdout.getvalue().strip() or str(e)
+                QMessageBox.critical(self, "Error", f"Could not load stackup {filename}:\n\n{details}")
+                return  # keep last-known-good materials_list/dielectrics_list/metals_list
+            self.materials_list, self.dielectrics_list, self.metals_list = materials_list, dielectrics_list, metals_list
             self.update_target_layer_choices(self.metals_list)
             self.file_tab.update_XML_description(filename)
             self.file_tab.update_variable_overrides_grid(filename)
