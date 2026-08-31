@@ -709,7 +709,7 @@ class MeshTab(QWidget):
         self.mesh_order_box = QComboBox()
         self.mesh_order_box.setFixedWidth(edit_width)
         self.mesh_order_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.mesh_order_box.addItems(["faster, less accurate","most accurate"])
+        self.mesh_order_box.addItems(["faster, less accurate (N=1)","default (N=2)", "slower, ultra accurate (N=3)"])
         self.meshorder_layout.addWidget(self.mesh_order_box)
         self.mesh_order_box.setCurrentIndex(0)
         self.meshorder_layout.addStretch()
@@ -923,6 +923,22 @@ class MeshTab(QWidget):
                 self.solver_box.setDisabled(True)
             else:
                 self.solver_box.setDisabled(False)
+        except:
+            pass
+
+        # order=3 (ultra accurate) is Palace-only: Elmer has no cubic-order solver
+        # templates in util_elmer.write_case_and_solver_files(), so it would silently
+        # fall back to first-order there. Disable that option under Elmer mode, and
+        # fall back to the default order if it was selected when switching into Elmer.
+        try:
+            ultra_accurate_index = 2
+            item = self.mesh_order_box.model().item(ultra_accurate_index)
+            if self.MainWindow.ElmerMode:
+                item.setEnabled(False)
+                if self.mesh_order_box.currentIndex() == ultra_accurate_index:
+                    self.mesh_order_box.setCurrentIndex(1)
+            else:
+                item.setEnabled(True)
         except:
             pass
 
