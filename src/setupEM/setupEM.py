@@ -181,29 +181,43 @@ class FrequenciesTab(QWidget):
 
 
     def save_values(self):
-        try:
-            fstart = float(self.start_edit.text())
-        except Exception:
-            # the only case when this field can be empty is when fpoint or fdump are defined
-            if self.start_edit.text()=="" and (self.fpoint_edit.text() != "" or self.fdump_edit.text() != ""):
-                return True
+        # fstart/fstop may be left empty only if fpoint or fdump supplies at least
+        # one frequency instead (gds2palace treats fstart/fstop as fully optional)
+        discrete_freqs_given = (self.fpoint_edit.text() != "" or self.fdump_edit.text() != "")
+
+        fstart = None
+        if self.start_edit.text() == "":
+            if discrete_freqs_given:
+                saved_values.pop("fstart", None) # don't leave stale sweep data behind
             else:
                 QMessageBox.warning(self, "Error", "Not a valid value for fstart")
                 self.start_edit.setText("0")
                 return False
-        saved_values ["fstart"] = float(fstart)
+        else:
+            try:
+                fstart = float(self.start_edit.text())
+            except Exception:
+                QMessageBox.warning(self, "Error", "Not a valid value for fstart")
+                self.start_edit.setText("0")
+                return False
+            saved_values ["fstart"] = fstart
 
-        try:
-            fstop = float(self.stop_edit.text())
-        except Exception:
-            # the only case when this field can be empty is when fpoint or fdump are defined
-            if self.stop_edit.text()=="" and (self.fpoint_edit.text() != "" or self.fdump_edit.text() != ""):
-                return True
+        fstop = None
+        if self.stop_edit.text() == "":
+            if discrete_freqs_given:
+                saved_values.pop("fstop", None) # don't leave stale sweep data behind
             else:
                 QMessageBox.warning(self, "Error", "Not a valid value for fstop")
                 self.stop_edit.setText("50")
                 return False
-        saved_values ["fstop"] = float(fstop)
+        else:
+            try:
+                fstop = float(self.stop_edit.text())
+            except Exception:
+                QMessageBox.warning(self, "Error", "Not a valid value for fstop")
+                self.stop_edit.setText("50")
+                return False
+            saved_values ["fstop"] = fstop
 
         if self.step_edit.text() != "":
             try:
@@ -231,10 +245,13 @@ class FrequenciesTab(QWidget):
             saved_values.pop("fdump",None)
 
         # if fstart == fstop == fdump or fstart == fstop == fstep, then remove fstart, fstop
-        if saved_values ["fstart"] == saved_values ["fstop"]:
+        if fstart is not None and fstop is not None and fstart == fstop:
             discrete_list1 = saved_values.get("fpoint", [])
             discrete_list2 = saved_values.get("fdump", [])
-            if saved_values ["fstart"] in discrete_list1 or saved_values ["fstart"] in discrete_list2:
+            if fstart in discrete_list1 or fstart in discrete_list2:
+                saved_values.pop("fstart", None)
+                saved_values.pop("fstop", None)
+                saved_values.pop("fstep", None)
                 self.start_edit.setText("")
                 self.stop_edit.setText("")
                 self.step_edit.setText("")
@@ -243,8 +260,13 @@ class FrequenciesTab(QWidget):
         return True  # Tab change only possible when returning True
 
     def load_values(self):
-        self.start_edit.setText(str(saved_values.get("fstart","0")))
-        self.stop_edit.setText(str(saved_values.get("fstop","50")))
+        # if fstart/fstop were intentionally omitted in favor of fpoint/fdump, keep the
+        # fields blank on reload instead of repopulating the "0"/"50" sweep defaults
+        discrete_freqs_given = ("fpoint" in saved_values) or ("fdump" in saved_values)
+        fstart_default = "" if discrete_freqs_given else "0"
+        fstop_default  = "" if discrete_freqs_given else "50"
+        self.start_edit.setText(str(saved_values.get("fstart",fstart_default)))
+        self.stop_edit.setText(str(saved_values.get("fstop",fstop_default)))
         self.step_edit.setText(str(saved_values.get("fstep","")))
 
         float_list  = saved_values.get("fpoint","")
