@@ -1,6 +1,6 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-08-21
+Document version: 2026-08-31
 
 ## Contents
 [What's New](#whats-new)  
@@ -19,6 +19,7 @@ Document version: 2026-08-21
 [Ports tab](#ports-tab)  
 [Mesh and Boundaries tab](#mesh-and-boundaries-tab)  
 [Create Model tab](#create-model-tab)  
+[Result Viewer](#result-viewer)  
 [Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
@@ -46,6 +47,7 @@ Document version: 2026-08-21
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
+- **A built-in Result Viewer**, reachable from **View Results...** on the Create Model tab — see chapter "[Result Viewer](#result-viewer)". Browse and plot Touchstone S-parameter results (dB/phase, Smith, zoomed Smith) without leaving setupEM or running the standalone `plot_snp.py` script by hand.
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
@@ -217,6 +219,28 @@ This needs a `run_sim` script configured as described in the [gds2palace documen
 When a Palace simulation finishes, a **results summary** is appended to the Log panel automatically: degrees of freedom, mesh elements, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read from Palace's own `palace.json`/`error-indicators.csv` output. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration.
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
+
+## Result Viewer
+
+Once you have Touchstone SnP results, click **View Results...** on the Create Model tab to open the built-in **Result Viewer** - no need to run the standalone `plot_snp.py` script by hand.
+
+<img src="./png/resultviewer_button.png" alt="view results button" width="700">
+
+The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter out the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result, so you can start with just the raw file and bring in the others only when needed.
+
+<img src="./png/resultviewer1.png" alt="result viewer" width="750">
+
+Pick which S-parameters to plot from the S-Parameters grid, sized to the lowest port count among the currently checked files. The top plot shows dB magnitude, the bottom shows phase, for every checked file overlaid with its own color and line style and one shared legend below - checking files across several runs, or a whole run group, overlays all of them at once:
+
+<img src="./png/resultviewer2.png" alt="result viewer multi-file overlay" width="750">
+
+For reflection parameters (S11, S22, ...), the Display panel can switch to a **Smith chart** or a **zoomed Smith chart** instead of dB+phase - this replaces the whole plot area, since a Smith chart isn't meaningful for non-reflection (transmission) parameters, which are listed as excluded from that view instead of shown empty:
+
+<img src="./png/resultviewer3.png" alt="result viewer smith chart" width="750">
+
+The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there's nothing to draw a line between.
+
+Result Viewer can also run standalone, without the full setupEM GUI: `python result_viewer.py [target_dir]`, or via the `resultViewer` console script installed with the package.
 
 ## Code tab
 

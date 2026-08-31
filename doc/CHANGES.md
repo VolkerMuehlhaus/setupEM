@@ -1,7 +1,9 @@
 
 # What's New - August 31, 2026
 
-Added a "slower, most accurate (N=3)" mesh basis function option, available in Palace mode only since Elmer doesn't support it. Fixed the Frequencies tab silently dropping (or reusing stale) `fstart`/`fstop` when left blank.  
+Added a "slower, most accurate (N=3)" mesh basis function option, available in Palace mode only since Elmer doesn't support it. Fixed the Frequencies tab silently dropping (or reusing stale) `fstart`/`fstop` when left blank.
+
+Added a built-in **Result Viewer** (Create Model tab > View Results...) for browsing Touchstone S-parameter results without leaving setupEM: a file tree grouped by run folder (check a whole folder or individual files), dB/phase or Smith/zoomed-Smith charts with a shared legend, and `_dc`/`_deembedded` filter checkboxes. Also runnable standalone via the `resultViewer` script.
 
 # What's New - August 21, 2026
 

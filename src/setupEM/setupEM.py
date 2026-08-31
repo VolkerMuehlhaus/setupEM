@@ -1126,6 +1126,12 @@ class CreateModelTab(CreateModelTabBase):
         # simulation run apart from a mesh-creation run (self.process is reused for both).
         self._process_purpose = None
 
+        # S-parameter result viewer: appended here (not in the shared CreateModelTabBase)
+        # since setupThermal has no S-parameters and must not show this button.
+        self.view_results_btn = QPushButton("📈 View Results...")
+        self.view_results_btn.clicked.connect(self.MainWindow.open_result_viewer)
+        self.file_layout.addWidget(self.view_results_btn)
+
     def _append_results_summary(self):
         # Palace-only: parse palace.json / error-indicators.csv and append a results summary
         # to the log. Called from on_finished() after a real simulation run.
@@ -1541,6 +1547,9 @@ class MainWindow(MainWindowBase):
         self.dielectrics_list = None
         self.metals_list = None
 
+        # S-parameter Result Viewer window, lazily created - see open_result_viewer()
+        self.result_viewer_window = None
+
         # Do not auto-load default values at this early startup stage,
         # instead this is done from File menu
         # self.user_inputs_file = DEFAULT_SETTINGS_FILE
@@ -1594,6 +1603,27 @@ class MainWindow(MainWindowBase):
 
         # update mesh settings that are not always visible
         self.mesh_tab.on_meshorder_changed(self.mesh_tab.mesh_order_box.currentText())
+
+
+    def open_result_viewer(self):
+        # local import: matplotlib/skrf are only needed once the viewer is actually
+        # opened, so this keeps them off setupEM's startup path. __package__ is
+        # None/"" when this module was loaded outside the setupEM package (e.g.
+        # setupEM.py run directly), so relative import fails - same dual-mode
+        # pattern used throughout this file/setup_common.py for sibling imports.
+        if __package__ in (None, ""):
+            from result_viewer import ResultViewerWindow
+        else:
+            from .result_viewer import ResultViewerWindow
+
+        if self.result_viewer_window is not None:
+            self.result_viewer_window.raise_()
+            self.result_viewer_window.activateWindow()
+            return
+
+        self.result_viewer_window = ResultViewerWindow(self)
+        self.result_viewer_window.destroyed.connect(lambda: setattr(self, "result_viewer_window", None))
+        self.result_viewer_window.show()
 
 
     def show_version(self):

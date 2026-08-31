@@ -2,6 +2,7 @@
 
 ## What's New
 
+- A built-in **Result Viewer** (Create Model tab > View Results...) to browse and plot Touchstone S-parameter results without leaving setupEM
 - **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
 - A graphical **Stackup XML Editor** (Tools > Edit Stackup XML...), including Variables, Reference-relative positioning, Derived Layers, and Thermal Tables
 - Input Files tab can now **override stackup Variables** (e.g. `total_thickness`) directly, without hand-editing the XML or the generated model
@@ -185,6 +186,30 @@ To start simulation on Windows from the WSL terminal, type
 ```
 
 To **create Touchstone SnP output** from simulation results, please have a look at the scripts directory. Script "combine_snp" runs Python code "combine_extend_snp.py", which scans your directories (working directory and below) and converts simulation results to Touchstone file format. Supported input file format: Palace and Elmer S-parameter data.
+
+## Result Viewer
+
+Once you have Touchstone SnP results, click **View Results...** on the Create Model tab to open the built-in **Result Viewer** - no need to run the standalone `plot_snp.py` script by hand.
+
+<img src="./doc/png/resultviewer_button.png" alt="view results button" width="700">
+
+The Result Viewer recursively scans the Target Directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. 
+The **Include _dc files** / **Include _deembedded files** checkboxes filter out DC-extrapolated and de-embedded variants created by `combine_extend_snp.py`, so you can start with just the raw result and bring in the others only when needed.
+
+<img src="./doc/png/resultviewer1.png" alt="result viewer" width="750">
+
+Pick which S-parameters to plot from the S-Parameters grid. 
+Checking files across several runs, or a whole run group, overlays all of them at once:
+
+<img src="./doc/png/resultviewer2.png" alt="result viewer multi-file overlay" width="750">
+
+For reflection parameters (S11, S22, ...), the Display panel can switch to a **Smith chart** or a **zoomed Smith chart** instead of dB+phase. 
+
+<img src="./doc/png/resultviewer3.png" alt="result viewer smith chart" width="750">
+
+The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there is nothing to draw a line between.
+
+Result Viewer can also be run standalone, without the full setupEM GUI, either directly (`python result_viewer.py [target_dir]`) or via the `resultViewer` console script installed with the package.
 
 ## Code 
 Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
