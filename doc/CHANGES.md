@@ -1,9 +1,14 @@
 
-# What's New - August 31, 2026
+# What's New - September 1, 2026
+
+Added a built-in **Result Viewer** (Create Model tab > View Results...) for browsing Touchstone S-parameter results without leaving setupEM: a file tree grouped by run folder (check a whole folder or individual files), dB/phase or Smith/zoomed-Smith charts with a shared legend, and `_dc`/`_deembedded` filter checkboxes. Also runnable standalone via the `resultViewer` script.
+
+Added a **Model Fit...** button (Create Model tab, next to View Results...) that launches [snp2le](https://github.com/iic-jku/snp2le) on the current run's raw S-parameter result to extract a lumped-element netlist - offering to install snp2le via pip automatically if it isn't already present.
+
+**Start Simulation** now checks whether the output directory already holds results from a previous run, and asks whether to delete or keep them (default: delete) before launching the solver, so old and new results don't get mixed together.
 
 Added a "slower, most accurate (N=3)" mesh basis function option, available in Palace mode only since Elmer doesn't support it. Fixed the Frequencies tab silently dropping (or reusing stale) `fstart`/`fstop` when left blank.
 
-Added a built-in **Result Viewer** (Create Model tab > View Results...) for browsing Touchstone S-parameter results without leaving setupEM: a file tree grouped by run folder (check a whole folder or individual files), dB/phase or Smith/zoomed-Smith charts with a shared legend, and `_dc`/`_deembedded` filter checkboxes. Also runnable standalone via the `resultViewer` script.
 
 # What's New - August 21, 2026
 

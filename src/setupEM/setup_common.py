@@ -39,7 +39,7 @@ import requests
 import gdspy
 from scipy.interpolate import interp1d
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QLabel, QLineEdit, QComboBox,
     QPushButton, QFileDialog, QMessageBox, QGroupBox,
     QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame,
@@ -1208,42 +1208,49 @@ class CreateModelTabBase(QWidget):
         self.label1.setFixedWidth(120)
         self.modelname_layout.addWidget(self.label1)
         self.modelname_edit = QLineEdit("")
-        self.modelname_edit.setFixedWidth(250)
         self.modelname_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         # install event filter, so we capture when edit looses focus
         self.modelname_edit.editingFinished.connect(self.on_modelname_edit_done)
-
         self.modelname_layout.addWidget(self.modelname_edit)
-        self.modelname_layout.addStretch()
         self.file_layout.addLayout(self.modelname_layout)
-
-        self.preview_model_btn = QPushButton("⚙️ Preview model geometry in gmsh")
-        self.preview_model_btn.clicked.connect(self.preview_model)
-        self.file_layout.addWidget(self.preview_model_btn)
-
-        self.create_model_btn = QPushButton("⚙️ Create mesh and simulation settings file")
-        self.create_model_btn.clicked.connect(self.create_mesh)
-        self.file_layout.addWidget(self.create_model_btn)
-
-        self.run_layout = QHBoxLayout()
-        self.create_run_btn = QPushButton("▶️ Start Simulation")
-        self.create_run_btn.clicked.connect(self.run_model)
-        self.run_layout.addWidget(self.create_run_btn)
-        self.kill_btn = QPushButton("🛑 Terminate ")
-        self.kill_btn.clicked.connect(self.terminate_run)
-        self.run_layout.addWidget(self.kill_btn)
-        self.run_layout.setStretch(0, 5)  # index 0 = Run
-        self.run_layout.setStretch(1, 1)  # index 1 = Terminate
-
-        self.file_layout.addLayout(self.run_layout)
 
         self.file_group.setLayout(self.file_layout)
 
-        # Log group
+        # Actions group - kept visually separate (its own framed group) from the
+        # input fields above. Preview/Create Mesh/Start Simulation/Terminate (plus,
+        # in setupEM's subclass, View Results/Model Fit) all share this grid so
+        # their right edges line up at exactly the same two-thirds/one-third split
+        # - a QGridLayout keeps columns aligned across rows; independent
+        # QHBoxLayouts can't guarantee that once some rows have two widgets (e.g.
+        # Start Simulation/Terminate) and others have one (Preview/Create Mesh).
+        self.actions_group = QGroupBox("Actions")
+        self.actions_layout = QVBoxLayout()
+        self.buttons_grid = QGridLayout()
+        self.buttons_grid.setColumnStretch(0, 2)  # primary column: two thirds
+        self.buttons_grid.setColumnStretch(1, 1)  # secondary column: one third
 
-        self.log_group = QGroupBox("Log file")
-        self.log_layout = QVBoxLayout()
-        self.log_group.setLayout(self.log_layout)
+        self.preview_model_btn = QPushButton("⚙️ Preview model geometry in gmsh")
+        self.preview_model_btn.clicked.connect(self.preview_model)
+        self.buttons_grid.addWidget(self.preview_model_btn, 0, 0)
+
+        self.create_model_btn = QPushButton("⚙️ Create mesh and simulation settings file")
+        self.create_model_btn.clicked.connect(self.create_mesh)
+        self.buttons_grid.addWidget(self.create_model_btn, 1, 0)
+
+        self.create_run_btn = QPushButton("▶️ Start Simulation")
+        self.create_run_btn.clicked.connect(self.run_model)
+        self.buttons_grid.addWidget(self.create_run_btn, 2, 0)
+        self.kill_btn = QPushButton("🛑 Terminate ")
+        self.kill_btn.clicked.connect(self.terminate_run)
+        self.buttons_grid.addWidget(self.kill_btn, 2, 1)
+
+        self.actions_layout.addLayout(self.buttons_grid)
+
+        # Log file: kept inside the Actions frame (not its own group box) since it is
+        # the direct output of the actions above (Preview/Create Mesh/Start Simulation),
+        # not an independent input section.
+        self.actions_layout.addSpacing(10)
+        self.actions_layout.addWidget(QLabel("Log file:"))
         self.log_area = QPlainTextEdit()
         self.log_area.setReadOnly(True)
         log_font = QFont()
@@ -1256,11 +1263,13 @@ class CreateModelTabBase(QWidget):
         log_font.setFixedPitch(True)
         log_font.setPointSize(9)
         self.log_area.setFont(log_font)
-        self.log_layout.addWidget(self.log_area)
+        self.actions_layout.addWidget(self.log_area)
+
+        self.actions_group.setLayout(self.actions_layout)
 
         self.main_layout.addWidget(self.file_group)
         self.main_layout.addSpacing(20)
-        self.main_layout.addWidget(self.log_group)
+        self.main_layout.addWidget(self.actions_group)
         self.setLayout(self.main_layout)
 
         # --- QProcess setup ---
