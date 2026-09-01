@@ -1144,9 +1144,28 @@ class CreateModelTab(CreateModelTabBase):
     def open_model_fit(self):
         SNP2LE_URL = "https://github.com/iic-jku/snp2le"
 
+        # invalidate_caches(): after a just-completed "pip install snp2le" run (see
+        # on_finished() below), the import system's directory-listing cache for
+        # site-packages can still be stale in this same process, so a find_spec()
+        # right after install could still report "not found" without this.
+        importlib.invalidate_caches()
         if importlib.util.find_spec("snp2le") is None:
-            self.log_area.appendPlainText("⚠️ snp2le is not installed. Install it with: pip install snp2le")
-            self.log_area.appendPlainText(SNP2LE_URL)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Model Fit")
+            box.setText("snp2le is not installed. Install it now with pip?")
+            install_btn = box.addButton("Install", QMessageBox.AcceptRole)
+            box.addButton("Cancel", QMessageBox.RejectRole)
+            box.setDefaultButton(install_btn)
+            box.exec()
+
+            if box.clickedButton() is install_btn:
+                self.log_area.appendPlainText("Installing snp2le with pip ...")
+                self._process_purpose = "install_snp2le"
+                self.process.start(sys.executable, ["-m", "pip", "install", "snp2le"])
+            else:
+                self.log_area.appendPlainText("⚠️ snp2le is not installed. Install it with: pip install snp2le")
+                self.log_area.appendPlainText(SNP2LE_URL)
             return
 
         # local import: only needed once snp2le is actually launched, same lazy-import
@@ -1200,6 +1219,18 @@ class CreateModelTab(CreateModelTabBase):
         # Auto-append the results summary after a real simulation run (not after mesh creation)
         if self._process_purpose == "run_simulation" and self.MainWindow.PalaceMode:
             self._append_results_summary()
+        elif self._process_purpose == "install_snp2le":
+            importlib.invalidate_caches()
+            if exit_code == 0 and importlib.util.find_spec("snp2le") is not None:
+                self.log_area.appendPlainText("snp2le installed successfully.\n")
+                # re-enter open_model_fit(): this time find_spec() succeeds, so it
+                # goes straight to finding the raw result file and launching snp2le.
+                self.open_model_fit()
+            else:
+                self.log_area.appendPlainText(
+                    f"⚠️ snp2le installation failed (exit code {exit_code}). "
+                    f"Try manually: pip install snp2le\n"
+                )
 
     def create_model(self):
         # Request all tabs to save values again,
@@ -1740,14 +1771,25 @@ class MainWindow(MainWindowBase):
     def show_version(self):
         setupEM_version = importlib.metadata.version("setupEM")
         gds2palace_version = importlib.metadata.version("gds2palace")
-        version_info = f"Installed:\nsetupEM {setupEM_version}\ngds2palace {gds2palace_version}"
+        # snp2le (used by Model Fit) is an optional dependency, not installed by default
+        try:
+            snp2le_version = importlib.metadata.version("snp2le")
+        except importlib.metadata.PackageNotFoundError:
+            snp2le_version = "not installed"
+        version_info = f"Installed:\nsetupEM {setupEM_version}\ngds2palace {gds2palace_version}\nsnp2le {snp2le_version}"
 
         # get latest available version information
         latest_setupEM = self.get_latest_version("setupEM")
         latest_gds2palace = self.get_latest_version("gds2palace")
         latest_info = f"Latest version:\nsetupEM {latest_setupEM}\ngds2palace : {latest_gds2palace}"
+        upgrade_info = "\n\nYou can update using\n  pip install gds2palace --upgrade\n  pip install setupEM --upgrade"
+        if snp2le_version != "not installed":
+            # only worth checking/offering an upgrade for a package the user actually has
+            latest_snp2le = self.get_latest_version("snp2le")
+            latest_info += f"\nsnp2le {latest_snp2le}"
+            upgrade_info += "\n  pip install snp2le --upgrade"
+        upgrade_info += '\nafter exiting this program\n'    
         version_info = version_info + '\n\n' + latest_info
-        upgrade_info = "\n\nYou can update using\n  pip install gds2palace --upgrade\n  pip install setupEM --upgrade\nafter exiting this program"
 
         QMessageBox.information(self,"Version information",version_info + upgrade_info)
 

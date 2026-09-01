@@ -2,10 +2,14 @@
 
 ## What's New
 
-- A built-in **Result Viewer** (Create Model tab > View Results...) to browse and plot Touchstone S-parameter results without leaving setupEM
-- **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
+setupEM includes two built-in tools for working with simulation results directly, without external scripts:
+
+- **Result Viewer** (Create Model tab > View Results...) plots Touchstone S-parameter results - dB/phase, Smith chart, zoomed Smith chart - without leaving setupEM. See section "[Result Viewer](#result-viewer)".
+- **Model Fit** (Create Model tab > Model Fit...) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results - offering to install it via pip if it isn't already present. See section "[Model Fit](#model-fit)".
+
 - A graphical **Stackup XML Editor** (Tools > Edit Stackup XML...), including Variables, Reference-relative positioning, Derived Layers, and Thermal Tables
 - Input Files tab can now **override stackup Variables** (e.g. `total_thickness`) directly, without hand-editing the XML or the generated model
+- **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
 
 See [CHANGES.md](doc/CHANGES.md) for details.
 
@@ -176,6 +180,8 @@ The buttons are used top down: You can first preview the resulting model geometr
 
 To start simulation, use the "Run palace" button. If you are on Linux, this will start Palace using script "run_sim". If you are on Windows, this will start the Linux Subsystem for Windows (WSL) and open a command prompt in the simulation directory.
 
+If the output directory already has results from a previous run, you are asked whether to delete or keep them before starting - default is to delete, so a rerun with different settings doesn't leave stale results mixed in with the new ones.
+
 <img src="./doc/png/createmodel3.png" alt="create" width="700">
 
 To start simulation on Linux, it is required that you have configured a script "run_sim" as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf). You can find a template [here](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/tree/main/scripts) in the gds2palace repository.
@@ -210,6 +216,24 @@ For reflection parameters (S11, S22, ...), the Display panel can switch to a **S
 The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there is nothing to draw a line between.
 
 Result Viewer can also be run standalone, without the full setupEM GUI, either directly (`python result_viewer.py [target_dir]`) or via the `resultViewer` console script installed with the package.
+
+## Model Fit
+
+Click **Model Fit...** on the Create Model tab (next to **View Results...**) to extract a lumped-element netlist from the current run's S-parameter result, using [snp2le](https://github.com/iic-jku/snp2le) - an external, open-source tool, not part of setupEM.
+
+<img src="./doc/png/resultviewer_button.png" alt="model fit button" width="700">
+
+If snp2le isn't installed, setupEM offers to install it for you via pip:
+
+<img src="./doc/png/modelfit1.png" alt="snp2le not installed" width="350">
+
+Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - no need to click Model Fit a second time. Choosing **Cancel** logs the manual install command and the project link instead.
+
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+
+<img src="./doc/png/modelfit2.png" alt="snp2le starting" width="700">
+
+If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
 
 ## Code 
 Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.

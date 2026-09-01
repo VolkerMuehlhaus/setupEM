@@ -1,8 +1,9 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-08-31
+Document version: 2026-09-01
 
 ## Contents
+[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [What's New](#whats-new)  
 [About setupEM and setupThermal](#about-setupem-and-setupthermal)  
 [Installation](#installation)  
@@ -20,6 +21,7 @@ Document version: 2026-08-31
 [Mesh and Boundaries tab](#mesh-and-boundaries-tab)  
 [Create Model tab](#create-model-tab)  
 [Result Viewer](#result-viewer)  
+[Model Fit](#model-fit)  
 [Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
@@ -43,15 +45,22 @@ Document version: 2026-08-31
 &ensp;[Undo and Recent Files](#undo-and-recent-files)  
 [See also](#see-also)  
 
+## Result Viewer and Model Fit
+
+setupEM includes two built-in tools for working with simulation results directly, without external scripts:
+
+- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
+- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
+
 ## What's New
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
-- **A built-in Result Viewer**, reachable from **View Results...** on the Create Model tab — see chapter "[Result Viewer](#result-viewer)". Browse and plot Touchstone S-parameter results (dB/phase, Smith, zoomed Smith) without leaving setupEM or running the standalone `plot_snp.py` script by hand.
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
 - **Start Simulation on Windows runs Palace directly and shows results automatically.** No more opening a terminal and typing `./run_sim` yourself - output streams live into the Log panel, Terminate actually works, and a results summary (degrees of freedom, simulation time, peak RAM, mesh-adaptation error indicators) appears automatically once a run finishes - see "[Create Model tab](#create-model-tab)".
+- **Start Simulation now checks for leftover results from a previous run** before launching the solver, and offers to delete them (default) or keep them — see "[Create Model tab](#create-model-tab)".
 
 
 ## About setupEM and setupThermal
@@ -212,6 +221,8 @@ The buttons work top-down: **preview** the model geometry first, then **create t
 
 **Start Simulation** runs the solver: on Linux this starts Palace via script `run_sim` directly; on Windows it runs the same `run_sim` script inside the Windows Subsystem for Linux (WSL), automatically - no terminal window opens, and Palace's console output streams live into the Log panel below, the same as on Linux. This works for simulation directories on a LOCAL drive only - WSL cannot reach a network drive. **Terminate** stops a running simulation, including one running inside WSL on Windows.
 
+If the output directory already holds results from a previous run, **Start Simulation** asks first whether to delete them or keep them (default: delete), so stale results don't linger alongside a rerun with different settings. Only the solver's own output is a deletion candidate - the mesh, `config.json`, and the run script that Create Mesh just wrote are never touched.
+
 <img src="./png/createmodel3.png" alt="create" width="700">
 
 This needs a `run_sim` script configured as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) (template in that repository's `scripts` directory); on Windows, the same requirement applies inside your WSL environment, e.g. `run_palace` needs to be reachable there via `PATH` (usually set up in `~/.profile`).
@@ -241,6 +252,24 @@ For reflection parameters (S11, S22, ...), the Display panel can switch to a **S
 The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there's nothing to draw a line between.
 
 Result Viewer can also run standalone, without the full setupEM GUI: `python result_viewer.py [target_dir]`, or via the `resultViewer` console script installed with the package.
+
+## Model Fit
+
+Click **Model Fit...** on the Create Model tab (next to **View Results...**) to extract a lumped-element netlist from the current run's S-parameter result, using [snp2le](https://github.com/iic-jku/snp2le) - an external, open-source tool, not part of setupEM.
+
+<img src="./png/resultviewer_button.png" alt="model fit button" width="700">
+
+If snp2le isn't installed, setupEM offers to install it for you via pip:
+
+<img src="./png/modelfit1.png" alt="snp2le not installed" width="350">
+
+Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - there's no need to click Model Fit a second time. Choosing **Cancel** instead logs the manual install command and the project link.
+
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+
+<img src="./png/modelfit2.png" alt="snp2le starting" width="700">
+
+If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
 
 ## Code tab
 
