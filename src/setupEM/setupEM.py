@@ -17,9 +17,10 @@
 ########################################################################
 
 
-import sys, json, os, pathlib, ast, webbrowser, argparse
+import sys, json, os, pathlib, ast, webbrowser, argparse, shutil, re
 import numpy as np
 import importlib.metadata
+import importlib.util
 import requests
 import gdspy
 from scipy.interpolate import interp1d
@@ -54,7 +55,7 @@ if __package__ in (None, ""):
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
-    from palace_results import build_results_summary
+    from palace_results import build_results_summary, find_output_dir
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -62,7 +63,7 @@ else:
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
-    from .palace_results import build_results_summary
+    from .palace_results import build_results_summary, find_output_dir
 
 
 '''
@@ -1126,11 +1127,66 @@ class CreateModelTab(CreateModelTabBase):
         # simulation run apart from a mesh-creation run (self.process is reused for both).
         self._process_purpose = None
 
-        # S-parameter result viewer: appended here (not in the shared CreateModelTabBase)
-        # since setupThermal has no S-parameters and must not show this button.
+        # S-parameter result viewer + model fit: appended here (not in the shared
+        # CreateModelTabBase) since setupThermal has no S-parameters and must not
+        # show these buttons. Added as a row of the base class's buttons_grid
+        # (not a separate layout) so this row's two-thirds/one-third split lines
+        # up exactly with Preview/Create Mesh/Start Simulation above, in the same
+        # Actions group.
+        row = self.buttons_grid.rowCount()
         self.view_results_btn = QPushButton("📈 View Results...")
         self.view_results_btn.clicked.connect(self.MainWindow.open_result_viewer)
-        self.file_layout.addWidget(self.view_results_btn)
+        self.buttons_grid.addWidget(self.view_results_btn, row, 0)
+        self.model_fit_btn = QPushButton("🧩 Model Fit...")
+        self.model_fit_btn.clicked.connect(self.open_model_fit)
+        self.buttons_grid.addWidget(self.model_fit_btn, row, 1)
+
+    def open_model_fit(self):
+        SNP2LE_URL = "https://github.com/iic-jku/snp2le"
+
+        if importlib.util.find_spec("snp2le") is None:
+            self.log_area.appendPlainText("⚠️ snp2le is not installed. Install it with: pip install snp2le")
+            self.log_area.appendPlainText(SNP2LE_URL)
+            return
+
+        # local import: only needed once snp2le is actually launched, same lazy-import
+        # style used by open_result_viewer() for its own heavy imports.
+        if __package__ in (None, ""):
+            from result_viewer import find_touchstone_files
+        else:
+            from .result_viewer import find_touchstone_files
+
+        if self.MainWindow.PalaceMode:
+            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+        else:
+            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+
+        raw_files = [
+            path for path in find_touchstone_files(run_path)
+            if '_dc' not in os.path.basename(path) and '_deembedded' not in os.path.basename(path)
+        ]
+
+        if not raw_files:
+            QMessageBox.warning(self, "Model Fit",
+                                 f"No raw S-parameter result file found in {run_path}.\nRun a simulation first.")
+            return
+        if len(raw_files) > 1:
+            self.log_area.appendPlainText("⚠️ Multiple raw S-parameter result files found, using the first one:")
+            for path in raw_files:
+                self.log_area.appendPlainText("  " + path)
+        raw_file = raw_files[0]
+
+        # snp2le's GUI mode takes no filename argument (only its "-b" batch mode does) -
+        # the file has to be loaded by hand via the GUI's own file picker, so point the
+        # user at it explicitly and start snp2le in that file's directory, so its file
+        # picker opens there instead of wherever setupEM happened to be launched from.
+        raw_dir = os.path.dirname(raw_file)
+        self.log_area.appendPlainText("Starting snp2le ...")
+        self.log_area.appendPlainText(SNP2LE_URL)
+        self.log_area.appendPlainText(f"In the snp2le window, load: {raw_file}")
+        self._process_purpose = "model_fit"
+        self.process.setWorkingDirectory(raw_dir)
+        self.process.start(sys.executable, ["-m", "snp2le"])
 
     def _append_results_summary(self):
         # Palace-only: parse palace.json / error-indicators.csv and append a results summary
@@ -1180,8 +1236,63 @@ class CreateModelTab(CreateModelTabBase):
 
 
 
+    def _confirm_clear_previous_results(self, run_path):
+        """If run_path already holds solver output from a previous run, ask the user
+        (default: delete) whether to remove it before starting a new simulation. Only
+        ever touches solver-OUTPUT data - never the mesh/config/run script that "Create
+        Mesh" just wrote, since those are still needed to start this run.
+
+        Palace writes all of its results into one dedicated subdirectory (named in
+        config.json's Problem.Output, resolved via find_output_dir()), so that whole
+        subtree is the deletion target. Elmer has no such subdirectory - its solver
+        writes scalar_results.*/fields*.vtu*/*.sNp files directly into run_path
+        alongside the mesh/config - so those are matched and removed individually.
+        """
+        if self.MainWindow.PalaceMode:
+            output_dir = find_output_dir(run_path, saved_values['model_basename'])
+            if not os.path.isdir(output_dir) or not os.listdir(output_dir):
+                return
+            targets = [output_dir]
+        else:
+            targets = []
+            if os.path.isdir(run_path):
+                for fn in os.listdir(run_path):
+                    full_path = os.path.join(run_path, fn)
+                    if not os.path.isfile(full_path):
+                        continue
+                    if fn in ("scalar_results.dat", "scalar_results.names") or \
+                       fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
+                        targets.append(full_path)
+            if not targets:
+                return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Previous simulation results found")
+        box.setText(
+            f"This run's output directory already contains results from a previous "
+            f"simulation:\n\n{run_path}\n\nDelete the existing results before starting?"
+        )
+        delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
+        box.addButton("Keep", QMessageBox.RejectRole)
+        box.setDefaultButton(delete_btn)
+        box.exec()
+
+        if box.clickedButton() is delete_btn:
+            for target in targets:
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
+                else:
+                    os.remove(target)
+
     def run_model(self):
         # Run model that we created before
+
+        if self.MainWindow.PalaceMode:
+            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+        else:
+            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        self._confirm_clear_previous_results(run_path)
 
         # clear log
         self.log_area.clear()

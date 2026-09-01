@@ -29,7 +29,7 @@ import re
 _ITERATION_RE = re.compile(r'^iteration(\d+)$')
 
 
-def _find_output_dir(run_path, model_basename):
+def find_output_dir(run_path, model_basename):
     # config.json's Problem.Output is a path relative to config.json's own directory
     config_path = os.path.join(run_path, 'config.json')
     output_rel = None
@@ -132,7 +132,7 @@ def build_results_summary(run_path, model_basename):
     """Return a formatted multi-line summary of Palace results found under run_path,
     or an explanatory message if nothing is there yet.
     """
-    output_dir = _find_output_dir(run_path, model_basename)
+    output_dir = find_output_dir(run_path, model_basename)
     if not os.path.isdir(output_dir):
         return (f"No Palace results found yet (expected output directory: {output_dir}) "
                  "-- has the simulation finished?")
