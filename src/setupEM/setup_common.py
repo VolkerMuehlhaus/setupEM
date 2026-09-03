@@ -1411,6 +1411,42 @@ class MainWindowBase(QMainWindow):
 
     TAB_HEADER_COLORS = ["#FFCDD2", "#C8E6C9", "#BBDEFB", "#FFF9C4", "#D1C4E9"]
 
+    def __init__(self):
+        super().__init__()
+        # let the whole window accept a dropped *.simcfg / *.tsimcfg file,
+        # not just the individual file-path fields (see FileDropLineEdit)
+        self.setAcceptDrops(True)
+
+    # ---------- Drag & drop native config file onto the window ----------
+    def _config_file_from_drop(self, event):
+        if not event.mimeData().hasUrls():
+            return None
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path and pathlib.Path(path).suffix.upper() == "." + self.CONFIG_SUFFIX.upper():
+                return path
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._config_file_from_drop(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._config_file_from_drop(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        file_path = self._config_file_from_drop(event)
+        if file_path:
+            event.acceptProposedAction()
+            self.load_configuration_from_file(file_path)
+        else:
+            event.ignore()
+
     # ---------- Menu Bar ----------
     def create_menu_bar(self):
         menu_bar = self.menuBar()
