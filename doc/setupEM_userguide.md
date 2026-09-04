@@ -281,7 +281,7 @@ Use **File > Export to \*.py model** to save the current code to disk without ru
 
 ## File menu
 
-Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal), including a "Default Settings" configuration (stored in your home directory) that's reloaded independently of any project.
+Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal), including a "Default Settings" configuration (stored in your home directory) that's reloaded independently of any project. You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Settings ...**.
 
 **Load Settings ...** and **Import from \*.py model ...** each have a **Recent** submenu right below them, listing your last 10 files of that kind for quick reopening; saving a settings file adds it to that list too. Use "Clear Recent Files" in either submenu to reset it.
 

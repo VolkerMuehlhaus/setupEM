@@ -324,7 +324,7 @@ class FileInputTab(QWidget):
         self.viamerge_layout = QHBoxLayout()
         self.viamerge_label1 = QLabel("Merge via arrays with spacing ")
         self.viamerge_label1.setFixedWidth(left_label_width)
-        self.viamerge_edit = QLineEdit("0")
+        self.viamerge_edit = QLineEdit("0.5")
         self.viamerge_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.viamerge_edit.setFixedWidth(70)
         self.viamerge_label2 = QLabel(" micron or more, value 0 disables via array merging")
@@ -643,7 +643,7 @@ class FileInputTab(QWidget):
             merge_polygon_size = float(self.viamerge_edit.text())
         except Exception:
             QMessageBox.warning(self, "Error", f"Not a valid value for via array merging")
-            self.viamerge_edit.setText("0")
+            self.viamerge_edit.setText("0.5")
             return False
         saved_values["merge_polygon_size"] = float(merge_polygon_size)
 
@@ -1411,6 +1411,42 @@ class MainWindowBase(QMainWindow):
 
     TAB_HEADER_COLORS = ["#FFCDD2", "#C8E6C9", "#BBDEFB", "#FFF9C4", "#D1C4E9"]
 
+    def __init__(self):
+        super().__init__()
+        # let the whole window accept a dropped *.simcfg / *.tsimcfg file,
+        # not just the individual file-path fields (see FileDropLineEdit)
+        self.setAcceptDrops(True)
+
+    # ---------- Drag & drop native config file onto the window ----------
+    def _config_file_from_drop(self, event):
+        if not event.mimeData().hasUrls():
+            return None
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path and pathlib.Path(path).suffix.upper() == "." + self.CONFIG_SUFFIX.upper():
+                return path
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._config_file_from_drop(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._config_file_from_drop(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        file_path = self._config_file_from_drop(event)
+        if file_path:
+            event.acceptProposedAction()
+            self.load_configuration_from_file(file_path)
+        else:
+            event.ignore()
+
     # ---------- Menu Bar ----------
     def create_menu_bar(self):
         menu_bar = self.menuBar()
@@ -1633,6 +1669,8 @@ class MainWindowBase(QMainWindow):
                     "XML_filename": "SubstrateFile",
                     "GdsFile": "GdsFile",
                     "purpose": "purpose",
+                    "cellname": "cellname",
+                    "variable_overrides": "variable_overrides",
                     "SubstrateFile": "SubstrateFile",
                     "merge_polygon_size": "merge_polygon_size",
                     "preprocess_gds": "preprocess_gds",
@@ -1645,12 +1683,12 @@ class MainWindowBase(QMainWindow):
                     "fpoint": "fpoint",
                     "fdump": "fdump",
                     "refined_cellsize": "refined_cellsize",
+                    "refined_cellsize_override": "refined_cellsize_override",
                     "cells_per_wavelength": "cells_per_wavelength",
                     "meshsize_max": "meshsize_max",
                     "adaptive_mesh_iterations": "adaptive_mesh_iterations",
                     "order": "order",
                     "iterative": "iterative",
-                    "elmer": "elmer",
                     "ELMER_MPI_THREADS": "ELMER_MPI_THREADS"
                 }
 
@@ -1670,7 +1708,7 @@ class MainWindowBase(QMainWindow):
                             if import_key not in import_value:  # skip the section where key might appear in different context
                                 # get the internal name for this variable
                                 varname = import_mapping.get(import_key, '')
-                                if varname == "fpoint" or varname == "fdump":
+                                if varname in ("fpoint", "fdump", "variable_overrides", "refined_cellsize_override"):
                                     saved_values[varname] = ast.literal_eval(import_value)
                                 elif varname in ["gds_filename", "XML_filename", "GdsFile", "SubstrateFile"]:
                                     # check if we have full path for files in imported Python script,
@@ -1690,6 +1728,19 @@ class MainWindowBase(QMainWindow):
                                         saved_values[varname] = int(raw)
                                     else:
                                         saved_values[varname] = raw
+
+                # ask whether future "Create Model" output should overwrite this same
+                # file, or start a fresh model (today's GDS-derived default)
+                reuse = QMessageBox.question(
+                    self, "Import Model",
+                    f"Use '{os.path.basename(file_path)}' as the output file for this model too?\n\n"
+                    "Yes: Create Model / Start Simulation will overwrite this file.\n"
+                    "No: pick a model name and target directory on the Create Model(s) tab.",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) == QMessageBox.Yes
+                if reuse:
+                    saved_values['sim_path'] = os.path.dirname(file_path).replace('\\', '/')
+                    saved_values['model_basename'] = pathlib.Path(file_path).stem
 
                 # read port/thermal assignments in workflow syntax for gds2palace Python code, and
                 # apply any app-specific post-import state (e.g. setupEM's simulator mode)

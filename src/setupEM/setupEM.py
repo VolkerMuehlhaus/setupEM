@@ -644,6 +644,130 @@ class PortsTab(QWidget):
 
 
 
+class RefinedCellsizeOverrideDialog(QDialog):
+    """Popup editor for settings['refined_cellsize_override'], opened from
+    MeshTab's "Advanced..." button. Lets the user set a different mesh
+    refinement cell size for specific metal/sheet layers, instead of the
+    single global "Mesh refinement at metal edges" value. The Layer column
+    is restricted to metals_list.getallplanarmetals() (conductor/sheet
+    layers) - vias and dielectrics never produce boundary curves in
+    gds2palace's meshing code, so a name outside that list would silently
+    have no effect if it were allowed to be typed in.
+    """
+
+    def __init__(self, parent, layer_choices, current_overrides):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Mesh Refinement Overrides")
+        self.resize(420, 400)
+        self.setModal(True)
+
+        self._layer_choices = layer_choices
+        self._result = []
+
+        layout = QVBoxLayout()
+
+        info = QLabel("Override the mesh refinement cell size for specific layers\n"
+                      "(all other layers keep using the default set above).")
+        layout.addWidget(info)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Layer", "Cell size (µm)", ""])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table)
+
+        for name, value in current_overrides:
+            self._add_row(name, value)
+
+        add_row_layout = QHBoxLayout()
+        add_btn = QPushButton("+ Add Row")
+        add_btn.clicked.connect(lambda: self._add_row())
+        add_row_layout.addWidget(add_btn)
+        add_row_layout.addStretch()
+        layout.addLayout(add_row_layout)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self._on_ok)
+        button_layout.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def _add_row(self, name="", value=""):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        combo = QComboBox()
+        combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        combo.addItem("")
+        combo.addItems(self._layer_choices)
+        if name and name not in self._layer_choices:
+            # tolerate a saved override for a layer no longer in the current
+            # stackup, same tolerant style as the Cellname combo box
+            combo.addItem(name)
+        if name:
+            combo.setCurrentText(name)
+        self.table.setCellWidget(row, 0, combo)
+
+        value_text = "" if value == "" else str(value)
+        self.table.setItem(row, 1, QTableWidgetItem(value_text))
+
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedWidth(28)
+        remove_btn.clicked.connect(lambda: self._remove_row_containing(remove_btn))
+        self.table.setCellWidget(row, 2, remove_btn)
+
+    def _remove_row_containing(self, button):
+        # look up the row by identity rather than a captured index, since
+        # row indices shift whenever an earlier row is removed
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, 2) is button:
+                self.table.removeRow(row)
+                return
+
+    def _on_ok(self):
+        overrides = []
+        seen_layers = set()
+        for row in range(self.table.rowCount()):
+            combo = self.table.cellWidget(row, 0)
+            layer = combo.currentText().strip() if combo else ""
+            if not layer:
+                continue  # blank row - not yet configured, skip silently
+
+            value_item = self.table.item(row, 1)
+            value_text = value_item.text().strip() if value_item else ""
+            try:
+                value = float(value_text)
+                if value <= 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Error", f"Not a valid cell size for layer '{layer}'")
+                return
+
+            if layer in seen_layers:
+                QMessageBox.warning(self, "Error", f"Layer '{layer}' is selected more than once")
+                return
+            seen_layers.add(layer)
+            overrides.append([layer, value])
+
+        self._result = overrides
+        self.accept()
+
+    def get_overrides(self):
+        return self._result
+
+
 class MeshTab(QWidget):
     def __init__(self, MainWindow):
         super().__init__()
@@ -662,42 +786,44 @@ class MeshTab(QWidget):
         self.mesh_layout = QVBoxLayout()
 
         self.refinement_layout = QHBoxLayout()
-        self.label2 = QLabel("Mesh refinement at metal edges")
+        self.label2 = QLabel("Mesh refinement at metal edges (µm)")
         self.label2.setFixedWidth(label_width)
         self.refinement_layout.addWidget(self.label2)
         self.refinement_edit = QLineEdit("5")
         self.refinement_edit.setFixedWidth(edit_width)
         self.refinement_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
         self.refinement_layout.addWidget(self.refinement_edit)
-        self.label3 = QLabel(" µm ")
-        self.refinement_layout.addWidget(self.label3)
+        self.refined_override_btn = QPushButton("Advanced...")
+        self.refined_override_btn.clicked.connect(self.open_refined_cellsize_override_dialog)
+        self.refinement_layout.addWidget(self.refined_override_btn)
         self.refinement_layout.addStretch()
         self.mesh_layout.addLayout(self.refinement_layout)
 
+        # in-memory copy of settings['refined_cellsize_override'] (list of
+        # [layername, value] pairs), edited via the "Advanced..." dialog;
+        # harvested into saved_values by save_values() like every other field
+        self._refined_cellsize_override = []
+
         self.cells_lambda_layout = QHBoxLayout()
-        self.label4 = QLabel("Mesh cells per wavelength")
+        self.label4 = QLabel("Mesh cells per wavelength (min 10)")
         self.label4.setFixedWidth(label_width)
         self.cells_lambda_layout.addWidget(self.label4)
         self.cells_lambda_edit = QLineEdit("10")
         self.cells_lambda_edit.setFixedWidth(edit_width)
         self.cells_lambda_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.cells_lambda_layout.addWidget(self.cells_lambda_edit)
-        self.label5 = QLabel(" (min 10)")
-        self.cells_lambda_layout.addWidget(self.label5)
         self.cells_lambda_layout.addStretch()
         self.mesh_layout.addLayout(self.cells_lambda_layout)
 
 
         self.cells_maxsize_layout = QHBoxLayout()
-        self.label6 = QLabel("Mesh cell maximum size absolute")
+        self.label6 = QLabel("Mesh cell maximum size absolute (µm)")
         self.label6.setFixedWidth(label_width)
         self.cells_maxsize_layout.addWidget(self.label6)
         self.cells_maxsize_edit = QLineEdit("100")
         self.cells_maxsize_edit.setFixedWidth(edit_width)
         self.cells_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.cells_maxsize_layout.addWidget(self.cells_maxsize_edit)
-        self.label5 = QLabel(" µm ")
-        self.cells_maxsize_layout.addWidget(self.label5)
         self.cells_maxsize_layout.addStretch()
         self.mesh_layout.addLayout(self.cells_maxsize_layout)
 
@@ -916,6 +1042,22 @@ class MeshTab(QWidget):
         self.setLayout(self.main_layout)
 
 
+    def _update_refined_override_button_label(self):
+        n = len(self._refined_cellsize_override)
+        self.refined_override_btn.setText(f"Advanced... ({n})" if n > 0 else "Advanced...")
+
+    def open_refined_cellsize_override_dialog(self):
+        metals_list = self.MainWindow.metals_list
+        if metals_list is None:
+            QMessageBox.warning(self, "Error", "Load a GDSII file and XML stackup first")
+            return
+
+        layer_choices = [metal.name for metal in metals_list.getallplanarmetals()]
+        dialog = RefinedCellsizeOverrideDialog(self, layer_choices, self._refined_cellsize_override)
+        if dialog.exec() == QDialog.Accepted:
+            self._refined_cellsize_override = dialog.get_overrides()
+            self._update_refined_override_button_label()
+
     def on_meshorder_changed(self, value):
     # callback when mesh order changed, so that we can show/hide edit fields
         try:
@@ -952,6 +1094,7 @@ class MeshTab(QWidget):
             self.refinement_edit.setText("5")
             return False
         saved_values ["refined_cellsize"] = float(value)
+        saved_values ["refined_cellsize_override"] = self._refined_cellsize_override
 
         saved_values ["order"] = self.mesh_order_box.currentIndex()+1
 
@@ -1053,6 +1196,8 @@ class MeshTab(QWidget):
 
     def load_values(self):
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize","5")))
+        self._refined_cellsize_override = list(saved_values.get("refined_cellsize_override", []))
+        self._update_refined_override_button_label()
         self.cells_lambda_edit.setText(str(saved_values.get("cells_per_wavelength","10")))
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max","100")))
         self.AMR_iterations_edit.setText(str(saved_values.get("adaptive_mesh_iterations","0")))
@@ -1080,17 +1225,23 @@ class MeshTab(QWidget):
             self.airaround_edit.setText(saved_values.get("margin","200"))
             self.airaround_box.setCurrentIndex(0)
         else:
-            if "," in str(air):
-                # we have a list of 6 values
-                air_as_list = air.split(',')
-                if len(air_as_list) == 6:
-                    self.airaround_box.setCurrentIndex(1)
-                    self.airxmin_edit.setText(air_as_list[0])
-                    self.airxmax_edit.setText(air_as_list[1])
-                    self.airymin_edit.setText(air_as_list[2])
-                    self.airymax_edit.setText(air_as_list[3])
-                    self.airzmin_edit.setText(air_as_list[4])
-                    self.airzmax_edit.setText(air_as_list[5])
+            # native JSON round-trip stores this as a real list of floats;
+            # .py import stores it as a comma-separated string instead
+            if isinstance(air, list):
+                air_as_list = [str(v) for v in air]
+            elif "," in str(air):
+                air_as_list = [v.strip() for v in str(air).split(',')]
+            else:
+                air_as_list = None
+
+            if air_as_list and len(air_as_list) == 6:
+                self.airaround_box.setCurrentIndex(1)
+                self.airxmin_edit.setText(air_as_list[0])
+                self.airxmax_edit.setText(air_as_list[1])
+                self.airymin_edit.setText(air_as_list[2])
+                self.airymax_edit.setText(air_as_list[3])
+                self.airzmin_edit.setText(air_as_list[4])
+                self.airzmax_edit.setText(air_as_list[5])
             else:
                 # we have air_around defined as a single value
                 self.airaround_box.setCurrentIndex(0)
@@ -1171,9 +1322,9 @@ class CreateModelTab(CreateModelTabBase):
         # local import: only needed once snp2le is actually launched, same lazy-import
         # style used by open_result_viewer() for its own heavy imports.
         if __package__ in (None, ""):
-            from result_viewer import find_touchstone_files
+            from result_viewer import find_touchstone_files, is_amr_iteration_snapshot
         else:
-            from .result_viewer import find_touchstone_files
+            from .result_viewer import find_touchstone_files, is_amr_iteration_snapshot
 
         if self.MainWindow.PalaceMode:
             run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
@@ -1189,23 +1340,28 @@ class CreateModelTab(CreateModelTabBase):
             QMessageBox.warning(self, "Model Fit",
                                  f"No raw S-parameter result file found in {run_path}.\nRun a simulation first.")
             return
-        if len(raw_files) > 1:
-            self.log_area.appendPlainText("⚠️ Multiple raw S-parameter result files found, using the first one:")
-            for path in raw_files:
-                self.log_area.appendPlainText("  " + path)
-        raw_file = raw_files[0]
 
-        # snp2le's GUI mode takes no filename argument (only its "-b" batch mode does) -
-        # the file has to be loaded by hand via the GUI's own file picker, so point the
-        # user at it explicitly and start snp2le in that file's directory, so its file
-        # picker opens there instead of wherever setupEM happened to be launched from.
+        # adaptive mesh refinement leaves one snapshot touchstone file per
+        # iteration<N>/ subfolder alongside the final, fully-refined result
+        # directly in run_path - prefer that final result over the snapshots.
+        final_candidates = [p for p in raw_files if not is_amr_iteration_snapshot(p)] or raw_files
+        if len(final_candidates) > 1:
+            self.log_area.appendPlainText("⚠️ Multiple raw S-parameter result files found, using the newest one:")
+            for path in final_candidates:
+                self.log_area.appendPlainText("  " + path)
+        raw_file = max(final_candidates, key=os.path.getmtime)
+
+        # naming a .sNp file on the command line opens snp2le's GUI on it directly
+        # (see https://github.com/iic-jku/snp2le/blob/main/doc/architecture.md);
+        # still start it in that file's directory, so any relative paths it uses
+        # (e.g. for exporting a fit) resolve there instead of wherever setupEM
+        # happened to be launched from.
         raw_dir = os.path.dirname(raw_file)
-        self.log_area.appendPlainText("Starting snp2le ...")
+        self.log_area.appendPlainText(f"Starting snp2le on {raw_file} ...")
         self.log_area.appendPlainText(SNP2LE_URL)
-        self.log_area.appendPlainText(f"In the snp2le window, load: {raw_file}")
         self._process_purpose = "model_fit"
         self.process.setWorkingDirectory(raw_dir)
-        self.process.start(sys.executable, ["-m", "snp2le"])
+        self.process.start(sys.executable, ["-m", "snp2le", raw_file])
 
     def _append_results_summary(self):
         # Palace-only: parse palace.json / error-indicators.csv and append a results summary
@@ -1516,7 +1672,7 @@ class ModelEditorTab(QWidget):
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
-            ignore_list.append(['preview_only','no_preview'])
+            ignore_list.extend(['preview_only','no_preview'])
 
         for key in saved_values.keys():
             if not key in special_keylist:
@@ -1802,20 +1958,30 @@ class MainWindow(MainWindowBase):
     def apply_native_config_data(self, data):
         # update ports, they are separate from the other internal data
         self.ports_tab.update_port_from_import(data.get("ports"))
+        # restore simulator mode (not part of saved_values, see native_config_extra_struct)
+        if data.get("elmer_mode", False):
+            self.setElmerMode()
+        else:
+            self.setPalaceMode()
 
     def apply_python_import_data(self, file_path):
         # read port assignments in workflow syntax for gds2palace Python code
         ports = parse_python_ports_definitions(file_path)
         self.ports_tab.update_port_from_import(ports)
 
-        # set simulator
-        if self.saved_values.get("elmer", False):
+        # Elmer/Palace mode is expressed only by which simulation_setup.create_*()
+        # call the script makes, never as a literal settings['elmer'] assignment
+        # (parse_assignments() skips lines whose value contains "settings"), so
+        # detect it directly from the source text instead.
+        with open(file_path) as f:
+            text = f.read()
+        if "create_elmer(" in text:
             self.setElmerMode()
         else:
             self.setPalaceMode()
 
     def native_config_extra_struct(self):
-        return {"ports": simulation_ports_to_struct(simulation_ports)}
+        return {"ports": simulation_ports_to_struct(simulation_ports), "elmer_mode": self.ElmerMode}
 
     def update_target_layer_choices(self, metals_list):
         self.ports_tab.update_layers(metals_list)
