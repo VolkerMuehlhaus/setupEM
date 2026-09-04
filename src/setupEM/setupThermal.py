@@ -486,7 +486,7 @@ class MeshTab(QWidget):
         self.label6 = QLabel("Mesh cell maximum size")
         self.label6.setFixedWidth(label_width)
         self.cells_maxsize_layout.addWidget(self.label6)
-        self.cells_maxsize_edit = QLineEdit("10")
+        self.cells_maxsize_edit = QLineEdit("100")
         self.cells_maxsize_edit.setFixedWidth(edit_width)
         self.cells_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.cells_maxsize_layout.addWidget(self.cells_maxsize_edit)
@@ -507,7 +507,7 @@ class MeshTab(QWidget):
         self.label7 = QLabel("Dielectric stackup: oversize by")
         self.label7.setFixedWidth(label_width)
         self.margins_layout.addWidget(self.label7)
-        self.margins_edit = QLineEdit("200")
+        self.margins_edit = QLineEdit("100")
         self.margins_edit.setFixedWidth(edit_width)
         self.margins_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
         self.margins_layout.addWidget(self.margins_edit)
@@ -545,7 +545,7 @@ class MeshTab(QWidget):
             value = float(self.margins_edit.text())
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value for dielectric oversize margin")
-            self.margins_edit.setText("200")
+            self.margins_edit.setText("100")
             return False
         saved_values ["margin"] = float(value)
 
@@ -737,7 +737,7 @@ class ModelEditorTab(QWidget):
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
-            ignore_list.append(['preview_only','no_preview'])
+            ignore_list.extend(['preview_only','no_preview'])
 
         for key in saved_values.keys():
             if not key in special_keylist:

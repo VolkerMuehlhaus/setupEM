@@ -205,6 +205,32 @@ def find_touchstone_files(target_dir):
     return sorted(matches)
 
 
+# AWS Palace adaptive mesh refinement writes one result snapshot per
+# iteration<N>/ subfolder alongside the final, fully-refined result in the
+# parent directory itself (see _ITERATION_RE in palace_results.py, reverse
+# engineered from real Palace output) - same convention, applied per path
+# component so it matches regardless of how deep target_dir's own scan went.
+_AMR_ITERATION_DIR_RE = re.compile(r'^iteration\d+$')
+
+
+def is_amr_iteration_snapshot(path):
+    """True if path sits inside an AMR "iterationN" output folder, i.e. it's
+    a per-iteration snapshot rather than the final result."""
+    parts = os.path.normpath(path).split(os.sep)
+    return any(_AMR_ITERATION_DIR_RE.match(part) for part in parts)
+
+
+def pick_final_result_file(paths):
+    """Given a list of touchstone file paths, prefer the final result (any
+    path with no "iterationN" component) over AMR per-iteration snapshots;
+    break ties (or fall back, if every path is a snapshot) by newest mtime.
+    Returns None for an empty list."""
+    if not paths:
+        return None
+    final_candidates = [p for p in paths if not is_amr_iteration_snapshot(p)] or paths
+    return max(final_candidates, key=os.path.getmtime)
+
+
 # ------------------------------------------------------------------
 # Result Viewer window
 # ------------------------------------------------------------------
@@ -364,13 +390,12 @@ class ResultViewerWindow(QDialog):
                 item.setFlags(Qt.NoItemFlags)
                 self.file_list.addTopLevelItem(item)
             else:
-                # drop checked paths that no longer exist; auto-check the newest
-                # file if nothing is checked (e.g. first open), so the window
-                # isn't blank
+                # drop checked paths that no longer exist; auto-check the final
+                # result (preferring it over any AMR per-iteration snapshot) if
+                # nothing is checked (e.g. first open), so the window isn't blank
                 self._checked_paths &= set(self._master_files)
                 if not self._checked_paths:
-                    newest = max(self._master_files, key=os.path.getmtime)
-                    self._checked_paths = {newest}
+                    self._checked_paths = {pick_final_result_file(self._master_files)}
 
                 # group by each file's immediate parent directory (relative to
                 # target_dir), not a Palace/Elmer-specific convention like
