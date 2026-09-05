@@ -1,4 +1,12 @@
 
+# What's New - September 5, 2026
+
+Added a **View fields in Paraview...** button (Create Model tab), shown once `fdump` is set, to open Palace or Elmer EM field-dump results directly. "View Results..." is renamed to **View S-Parameters...** for clarity.
+
+Fixed Elmer EM simulations failing to start on Windows: the run script never actually launched (silently, with no log output), and MPI-enabled runs now check that Microsoft MPI is installed first, with a clear message and download link if it's missing instead of a cryptic failure.
+
+Fixed importing an existing model file and choosing to reuse its filename: it could silently rename the output to a different file than the one imported. Fixed `fdump`/`fpoint` showing raw Hz values instead of GHz after importing a model file. `fdump` is now usable in Elmer mode too (previously hidden).
+
 # What's New - September 1, 2026
 
 Added a built-in **Result Viewer** (Create Model tab > View Results...) for browsing Touchstone S-parameter results without leaving setupEM: a file tree grouped by run folder (check a whole folder or individual files), dB/phase or Smith/zoomed-Smith charts with a shared legend, and `_dc`/`_deembedded` filter checkboxes. Also runnable standalone via the `resultViewer` script.

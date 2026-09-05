@@ -27,6 +27,7 @@ import csv
 import re
 import math
 import cmath
+import glob
 
 _ITERATION_RE = re.compile(r'^iteration(\d+)$')
 
@@ -45,6 +46,23 @@ def find_output_dir(run_path, model_basename):
     if not output_rel:
         output_rel = 'output/' + model_basename
     return os.path.normpath(os.path.join(run_path, output_rel))
+
+
+def find_paraview_files(run_path, model_basename):
+    """All ParaView collection files under this run's Palace output directory, found
+    recursively. Palace's own field-dump feature (triggered by fdump/SaveStep) writes
+    its category/excitation folder structure without gds2palace's control - confirmed
+    (on two Palace versions) to only keep the last-solved excitation's Cycle files, so
+    no fixed filename or count can be assumed here. Falls back to loose .vtu if no .pvd
+    exists yet. Empty list if the output directory doesn't exist / has nothing yet.
+    """
+    output_dir = find_output_dir(run_path, model_basename)
+    if not os.path.isdir(output_dir):
+        return []
+    pvd_files = sorted(glob.glob(os.path.join(output_dir, '**', '*.pvd'), recursive=True))
+    if pvd_files:
+        return pvd_files
+    return sorted(glob.glob(os.path.join(output_dir, '**', '*.vtu'), recursive=True))
 
 
 def _read_palace_json(dir_path):

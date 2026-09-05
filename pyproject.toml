@@ -19,7 +19,8 @@ dependencies = [
     "scikit-rf",
     "matplotlib",
     "numpy",
-    "gdspy"
+    "gdspy",
+    "meshio"
 ]
 requires-python = ">=3.9"
 
