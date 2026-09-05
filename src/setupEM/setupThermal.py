@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, pathlib, ast, webbrowser, argparse, subprocess, shutil, glob
+import sys, json, os, pathlib, ast, webbrowser, argparse
 import numpy as np
 import importlib.metadata
 import requests
@@ -616,37 +616,10 @@ class CreateModelTab(CreateModelTabBase):
     def launch_paraview(self):
         run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
         vtu_path = find_thermal_vtu(run_path)
-
-        if vtu_path is None:
-            self.log_area.appendPlainText(f"⚠️ No thermal results .vtu found yet under {run_path}\n")
-            return
-
-        paraview_exe = shutil.which("paraview")
-        if paraview_exe is None and os.name == "nt":
-            # Not on PATH: fall back to searching the usual install locations, newest first.
-            candidates = (
-                glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
-                + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
-            )
-            if candidates:
-                paraview_exe = max(candidates, key=os.path.getmtime)
-
-        if paraview_exe is None:
-            self.log_area.appendPlainText(
-                "⚠️ ParaView not found on PATH. Install it, or add it to PATH, "
-                f"then open manually:\n{vtu_path}\n"
-            )
-            return
-
-        # Detached, non-blocking launch (like klayout_setupEM.py's setupEM launch) -- this is
-        # a fire-and-forget external GUI viewer, unrelated to self.process's solver-run lifecycle.
-        env = os.environ.copy()
-        env.pop("PYTHONHOME", None)
-        try:
-            subprocess.Popen([paraview_exe, vtu_path], env=env)
-            self.log_area.appendPlainText(f"Starting ParaView on {vtu_path} ...\n")
-        except OSError as e:
-            self.log_area.appendPlainText(f"⚠️ Failed to launch ParaView: {e}\n")
+        self._open_in_paraview(
+            [vtu_path] if vtu_path else [],
+            f"⚠️ No thermal results .vtu found yet under {run_path}\n"
+        )
 
     def create_model(self):
         # Request all tabs to save values again,

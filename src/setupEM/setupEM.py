@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, pathlib, ast, webbrowser, argparse, shutil, re
+import sys, json, os, pathlib, ast, webbrowser, argparse, shutil, re, glob
 import numpy as np
 import importlib.metadata
 import importlib.util
@@ -55,7 +55,7 @@ if __package__ in (None, ""):
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
-    from palace_results import build_results_summary, find_output_dir
+    from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -63,7 +63,7 @@ else:
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
     )
-    from .palace_results import build_results_summary, find_output_dir
+    from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
 
 '''
@@ -244,6 +244,8 @@ class FrequenciesTab(QWidget):
             saved_values ["fdump"] = ast.literal_eval('['+text+']')
         else:
             saved_values.pop("fdump",None)
+        # "View fields in Paraview" is only relevant once fdump is set
+        self.MainWindow.create_model_tab._update_paraview_button_visibility()
 
         # if fstart == fstop == fdump or fstart == fstop == fstep, then remove fstart, fstop
         if fstart is not None and fstop is not None and fstart == fstop:
@@ -1285,12 +1287,25 @@ class CreateModelTab(CreateModelTabBase):
         # up exactly with Preview/Create Mesh/Start Simulation above, in the same
         # Actions group.
         row = self.buttons_grid.rowCount()
-        self.view_results_btn = QPushButton("📈 View Results...")
+        self.view_results_btn = QPushButton("📈 View S-Parameters...")
         self.view_results_btn.clicked.connect(self.MainWindow.open_result_viewer)
         self.buttons_grid.addWidget(self.view_results_btn, row, 0)
         self.model_fit_btn = QPushButton("🧩 Model Fit...")
         self.model_fit_btn.clicked.connect(self.open_model_fit)
         self.buttons_grid.addWidget(self.model_fit_btn, row, 1)
+
+        # "View fields in Paraview" opens field-dump data (Palace fdump / Elmer EM
+        # fields*.vtu), a separate row since it's independent of the S-parameter
+        # viewer/model fit above. Only meaningful when fdump is set (otherwise there's
+        # never any field data to open), so it's hidden rather than shown greyed-out -
+        # kept in sync with saved_values['fdump'] via _update_paraview_button_visibility(),
+        # called from here, from load_values() (project/model import), and from
+        # FrequenciesTab.save_values() (live edits to the fdump field).
+        row = self.buttons_grid.rowCount()
+        self.paraview_btn = QPushButton("🖼️ View fields in Paraview...")
+        self.paraview_btn.clicked.connect(self.launch_paraview)
+        self.buttons_grid.addWidget(self.paraview_btn, row, 0)
+        self._update_paraview_button_visibility()
 
     def open_model_fit(self):
         SNP2LE_URL = "https://github.com/iic-jku/snp2le"
@@ -1369,6 +1384,43 @@ class CreateModelTab(CreateModelTabBase):
         run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
         summary = build_results_summary(run_path, saved_values['model_basename'])
         self.log_area.appendPlainText("\n" + summary + "\n")
+
+    def _update_paraview_button_visibility(self):
+        self.paraview_btn.setVisible(bool(saved_values.get('fdump')))
+
+    def load_values(self):
+        super().load_values()
+        self._update_paraview_button_visibility()
+
+    def launch_paraview(self):
+        if self.MainWindow.PalaceMode:
+            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+            file_paths = find_paraview_files(run_path, saved_values['model_basename'])
+            not_found = (
+                f"⚠️ No Palace field-dump output found under "
+                f"{find_output_dir(run_path, saved_values['model_basename'])}\n"
+                "(set fdump to specific frequencies before running the simulation)\n"
+            )
+        else:
+            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+            # Output File Name = File "fields" has no path prefix, so Elmer resolves it
+            # relative to the Mesh DB directory ("mesh" under run_path) rather than
+            # run_path itself - confirmed against a real run (same resolution mechanism
+            # found for thermal_results.vtu). Check run_path too, defensively.
+            search_dirs = [os.path.join(run_path, "mesh"), run_path]
+            file_paths = []
+            for pattern in ("fields*.pvd", "fields*.vtu"):
+                for d in search_dirs:
+                    file_paths = sorted(glob.glob(os.path.join(d, pattern)))
+                    if file_paths:
+                        break
+                if file_paths:
+                    break
+            not_found = (
+                f"⚠️ No Elmer field-dump output found under {run_path}\n"
+                "(set fdump to specific frequencies before running the simulation)\n"
+            )
+        self._open_in_paraview(file_paths, not_found)
 
     def on_finished(self, exit_code, exit_status):
         super().on_finished(exit_code, exit_status)
@@ -1546,17 +1598,27 @@ class CreateModelTab(CreateModelTabBase):
 
                 self.log_area.appendPlainText('Setting work directory ' + run_path)
 
-                # rename file to batch file, but only if that has not already
-                # been done by a previous run (otherwise os.rename() fails on
-                # the second run because run_elmer no longer exists)
-                run_file_orig = os.path.join(run_path, 'run_elmer')
-                run_file = run_file_orig.replace('run_elmer','run_elmer.bat')
-                if os.path.exists(run_file_orig):
-                    os.rename(run_file_orig, run_file)
-
+                # create_elmer_run_script() (util_utilities.py) writes run_elmer.bat
+                # directly on Windows (proper .bat content - no "#!/bin/bash" shebang,
+                # and MS-MPI's "mpiexec -n N" instead of the Linux-only "mpirun -np N"),
+                # so no rename step is needed here any more.
+                if saved_values.get('ELMER_MPI_THREADS', 1) > 1 and shutil.which("mpiexec") is None:
+                    self.log_area.appendPlainText(
+                        "⚠️ This model requests MPI multithreading, but 'mpiexec' was not "
+                        "found on PATH. On Windows, Elmer uses Microsoft MPI - download and "
+                        "install it from "
+                        "https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi "
+                        "and restart setupEM, or switch to 1 thread (no multithreading) on the "
+                        "Mesh and Boundaries tab.\n"
+                    )
+                    return
                 self.process.setWorkingDirectory(run_path)
-                # start simulation
-                self.process.start("run_elmer.bat")
+                # start simulation - full path, not just "run_elmer.bat": Windows'
+                # CreateProcess resolves a bare relative program name against the
+                # CALLING process's own cwd/PATH, not the child's setWorkingDirectory(),
+                # so a bare filename here silently fails with FailedToStart even though
+                # setWorkingDirectory() is set correctly.
+                self.process.start(os.path.join(run_path, "run_elmer.bat"))
             else:
                 # Linux
                 self.log_area.appendPlainText('Setting work directory ' + run_path)
@@ -1895,7 +1957,9 @@ class MainWindow(MainWindowBase):
         self.PalaceMode = False
         self.ElmerMode  = True
         self.setWindowTitle(APP_NAME + ' Elmer')
-        self.frequencies_tab.dump_group.setVisible(False)
+        # fdump now also enables Elmer EM field dumps (Exec Solver = Always), not just
+        # Palace's SaveStep - so this group must stay visible/usable in Elmer mode too.
+        self.frequencies_tab.dump_group.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
 

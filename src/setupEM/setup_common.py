@@ -32,7 +32,7 @@ mesh fields, the Python model code generator bodies) is intentionally left
 in setupEM.py / setupThermal.py, not here.
 """
 
-import sys, os, json, pathlib, ast, webbrowser, io, contextlib
+import sys, os, json, pathlib, ast, webbrowser, io, contextlib, subprocess, shutil, glob
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
@@ -1277,6 +1277,7 @@ class CreateModelTabBase(QWidget):
         self.process.readyReadStandardOutput.connect(self.on_stdout)
         self.process.readyReadStandardError.connect(self.on_stderr)
         self.process.finished.connect(self.on_finished)
+        self.process.errorOccurred.connect(self.on_process_error)
 
     def on_modelname_edit_done(self):
         # Model name edit field has changed
@@ -1297,6 +1298,64 @@ class CreateModelTabBase(QWidget):
     def on_finished(self, exit_code, exit_status):
         """Handle process completion."""
         self.log_area.appendPlainText(f"\n--- Process finished with exit code {exit_code} ---\n")
+
+    def on_process_error(self, error):
+        """Handle QProcess itself failing to launch or run - most importantly
+        FailedToStart (program not found, or not executable, e.g. a .bat with content
+        the current shell can't run). Without this, such failures were silent: none of
+        readyReadStandardOutput/readyReadStandardError/finished ever fire for a process
+        that never actually started, leaving the log blank with no indication anything
+        went wrong.
+        """
+        messages = {
+            QProcess.FailedToStart: "the program could not be started (not found, or not executable)",
+            QProcess.Crashed: "the process crashed",
+            QProcess.Timedout: "the process timed out",
+            QProcess.WriteError: "an error occurred while writing to the process",
+            QProcess.ReadError: "an error occurred while reading from the process",
+            QProcess.UnknownError: "an unknown error occurred",
+        }
+        detail = messages.get(error, f"error code {error}")
+        self.log_area.appendPlainText(f"\n⚠️ Process error: {detail}\n")
+
+    def _open_in_paraview(self, file_paths, not_found_message):
+        """Locate ParaView and open it on file_paths (a list of .pvd/.vtu paths), or
+        log not_found_message if file_paths is empty. Shared by setupEM.py (Palace
+        field dumps / Elmer EM fields) and setupThermal.py (thermal_results.vtu) -
+        each caller is responsible for finding its own result files and wording its
+        own "nothing found" message; this only handles locating/launching ParaView.
+        Detached, non-blocking launch (like klayout_setupEM.py's setupEM launch) -
+        this is a fire-and-forget external GUI viewer, unrelated to self.process's
+        solver-run lifecycle.
+        """
+        if not file_paths:
+            self.log_area.appendPlainText(not_found_message)
+            return
+
+        paraview_exe = shutil.which("paraview")
+        if paraview_exe is None and os.name == "nt":
+            # Not on PATH: fall back to searching the usual install locations, newest first.
+            candidates = (
+                glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
+                + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
+            )
+            if candidates:
+                paraview_exe = max(candidates, key=os.path.getmtime)
+
+        if paraview_exe is None:
+            self.log_area.appendPlainText(
+                "⚠️ ParaView not found on PATH. Install it, or add it to PATH, "
+                "then open manually:\n" + "\n".join(file_paths) + "\n"
+            )
+            return
+
+        env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        try:
+            subprocess.Popen([paraview_exe, *file_paths], env=env)
+            self.log_area.appendPlainText("Starting ParaView on:\n" + "\n".join(file_paths) + "\n")
+        except OSError as e:
+            self.log_area.appendPlainText(f"⚠️ Failed to launch ParaView: {e}\n")
 
     def browse_directory(self):
         directory = QFileDialog.getExistingDirectory(
@@ -1328,9 +1387,15 @@ class CreateModelTabBase(QWidget):
                 if "===" in model_basename:
                     model_basename = ""
 
-        # no simulator name prefix
-        model_basename = model_basename.replace('palace_', '')
-        model_basename = model_basename.replace('elmer_', '')
+        # Strip a stale simulator-name prefix left over from a different solver choice
+        # (e.g. "elmer_..." after switching to Palace mode) - but never strip a prefix
+        # that already matches the current choice, otherwise importing an existing
+        # model and reusing its filename would silently rename it to a different file
+        # (setupThermal has no PalaceMode attribute at all; it's always Elmer, so only
+        # a "palace_" prefix would ever be considered stale there).
+        palace_mode = getattr(self.MainWindow, 'PalaceMode', False)
+        mismatched_prefix = 'elmer_' if palace_mode else 'palace_'
+        model_basename = model_basename.replace(mismatched_prefix, '')
 
         self.modelname_edit.setText(model_basename)
 
@@ -1708,7 +1773,11 @@ class MainWindowBase(QMainWindow):
                             if import_key not in import_value:  # skip the section where key might appear in different context
                                 # get the internal name for this variable
                                 varname = import_mapping.get(import_key, '')
-                                if varname in ("fpoint", "fdump", "variable_overrides", "refined_cellsize_override"):
+                                if varname in ("fpoint", "fdump"):
+                                    # same Hz-in-code / GHz-in-GUI unit split as fstart/fstop/fstep below,
+                                    # just per-element since these are lists
+                                    saved_values[varname] = [f / 1e9 for f in ast.literal_eval(import_value)]
+                                elif varname in ("variable_overrides", "refined_cellsize_override"):
                                     saved_values[varname] = ast.literal_eval(import_value)
                                 elif varname in ["gds_filename", "XML_filename", "GdsFile", "SubstrateFile"]:
                                     # check if we have full path for files in imported Python script,
