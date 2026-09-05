@@ -1483,9 +1483,13 @@ class CreateModelTab(CreateModelTabBase):
 
         Palace writes all of its results into one dedicated subdirectory (named in
         config.json's Problem.Output, resolved via find_output_dir()), so that whole
-        subtree is the deletion target. Elmer has no such subdirectory - its solver
-        writes scalar_results.*/fields*.vtu*/*.sNp files directly into run_path
-        alongside the mesh/config - so those are matched and removed individually.
+        subtree is the deletion target. Elmer's SaveScalars/ResultOutputSolver write
+        bare filenames (no path prefix) in their .sif config, so Elmer resolves them
+        relative to the Mesh DB directory ("mesh" under run_path) rather than run_path
+        itself - confirmed against real runs (same resolution mechanism found for
+        thermal_results.vtu, and combine_snp.py itself expects "scalar_results" under
+        a "mesh" parent and writes the resulting .sNp file there too). run_path itself
+        is also checked, defensively, in case some variant writes there directly.
         """
         if self.MainWindow.PalaceMode:
             output_dir = find_output_dir(run_path, saved_values['model_basename'])
@@ -1494,12 +1498,14 @@ class CreateModelTab(CreateModelTabBase):
             targets = [output_dir]
         else:
             targets = []
-            if os.path.isdir(run_path):
-                for fn in os.listdir(run_path):
-                    full_path = os.path.join(run_path, fn)
+            for search_dir in (os.path.join(run_path, "mesh"), run_path):
+                if not os.path.isdir(search_dir):
+                    continue
+                for fn in os.listdir(search_dir):
+                    full_path = os.path.join(search_dir, fn)
                     if not os.path.isfile(full_path):
                         continue
-                    if fn in ("scalar_results.dat", "scalar_results.names") or \
+                    if fn in ("scalar_results", "scalar_results.names") or \
                        fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
                         targets.append(full_path)
             if not targets:
