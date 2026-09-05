@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, pathlib, ast, webbrowser, argparse
+import sys, json, os, pathlib, ast, webbrowser, argparse, subprocess, shutil, glob
 import numpy as np
 import importlib.metadata
 import requests
@@ -53,12 +53,14 @@ if __package__ in (None, ""):
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
+    from thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
+    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
 
 
 '''
@@ -569,6 +571,83 @@ class CreateModelTab(CreateModelTabBase):
     are specific to this app.
     """
 
+    def __init__(self, MainWindow):
+        super().__init__(MainWindow)
+
+        # Tracks which action self.process is currently running, so on_finished() can tell a
+        # simulation run apart from a mesh-creation run (self.process is reused for both).
+        self._process_purpose = None
+
+        # "View in ParaView" is thermal-only (Palace/EM results are S-parameters, not a 3D
+        # field to open directly), added as its own row of the base class's buttons_grid so
+        # it lines up with Preview/Create Mesh/Start Simulation above, in the same Actions group.
+        row = self.buttons_grid.rowCount()
+        self.paraview_btn = QPushButton("🖼️ View in ParaView")
+        self.paraview_btn.clicked.connect(self.launch_paraview)
+        self.buttons_grid.addWidget(self.paraview_btn, row, 0)
+
+    def _append_thermal_results_summary(self):
+        # Parse thermal_results.dat / thermal_results.vtu and append a results summary
+        # to the log. Called from on_finished() after a real simulation run.
+        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+
+        # Heat sources first, then constant-temperature boundaries, regardless of the
+        # order they were added in the GUI.
+        rows = []
+        for thermal_object in thermal_objects.objects:
+            if isinstance(thermal_object, simulation_setup.heatsource):
+                rows.append(["Heat source", str(thermal_object.source_layernum),
+                             str(thermal_object.target_layername), f"{thermal_object.power} W"])
+        for thermal_object in thermal_objects.objects:
+            if isinstance(thermal_object, simulation_setup.constanttemp):
+                rows.append(["Const. temp", str(thermal_object.source_layernum),
+                             str(thermal_object.target_layername), f"{thermal_object.temp} K"])
+        source_lines = format_source_table(rows) if rows else None
+
+        summary = build_thermal_summary(run_path, source_lines=source_lines)
+        self.log_area.appendPlainText("\n" + summary + "\n")
+
+    def on_finished(self, exit_code, exit_status):
+        super().on_finished(exit_code, exit_status)
+        # Auto-append the results summary after a real simulation run (not after mesh creation)
+        if self._process_purpose == "run_simulation":
+            self._append_thermal_results_summary()
+
+    def launch_paraview(self):
+        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        vtu_path = find_thermal_vtu(run_path)
+
+        if vtu_path is None:
+            self.log_area.appendPlainText(f"⚠️ No thermal results .vtu found yet under {run_path}\n")
+            return
+
+        paraview_exe = shutil.which("paraview")
+        if paraview_exe is None and os.name == "nt":
+            # Not on PATH: fall back to searching the usual install locations, newest first.
+            candidates = (
+                glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
+                + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
+            )
+            if candidates:
+                paraview_exe = max(candidates, key=os.path.getmtime)
+
+        if paraview_exe is None:
+            self.log_area.appendPlainText(
+                "⚠️ ParaView not found on PATH. Install it, or add it to PATH, "
+                f"then open manually:\n{vtu_path}\n"
+            )
+            return
+
+        # Detached, non-blocking launch (like klayout_setupEM.py's setupEM launch) -- this is
+        # a fire-and-forget external GUI viewer, unrelated to self.process's solver-run lifecycle.
+        env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        try:
+            subprocess.Popen([paraview_exe, vtu_path], env=env)
+            self.log_area.appendPlainText(f"Starting ParaView on {vtu_path} ...\n")
+        except OSError as e:
+            self.log_area.appendPlainText(f"⚠️ Failed to launch ParaView: {e}\n")
+
     def create_model(self):
         # Request all tabs to save values again,
         # which can do some update to saved_values
@@ -606,6 +685,7 @@ class CreateModelTab(CreateModelTabBase):
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
+            self._process_purpose = "create_mesh"
             self.process.start(python_exe, [pymodel_filename])
 
 
@@ -622,6 +702,7 @@ class CreateModelTab(CreateModelTabBase):
 
         # clear log
         self.log_area.clear()
+        self._process_purpose = "run_simulation"
 
         # try to start from output directory
         run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
