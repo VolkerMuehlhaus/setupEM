@@ -2033,13 +2033,20 @@ class MainWindow(MainWindowBase):
         ports = parse_python_ports_definitions(file_path)
         self.ports_tab.update_port_from_import(ports)
 
-        # Elmer/Palace mode is expressed only by which simulation_setup.create_*()
-        # call the script makes, never as a literal settings['elmer'] assignment
-        # (parse_assignments() skips lines whose value contains "settings"), so
-        # detect it directly from the source text instead.
+        # Elmer/Palace mode isn't captured by the general settings-dict import
+        # (parse_assignments() skips lines whose value contains "settings", and
+        # 'elmer' isn't in import_mapping anyway), so detect it directly from the
+        # source text instead. Two valid ways a script selects Elmer mode:
+        #  - calling simulation_setup.create_elmer(...) (what create_model_text()
+        #    itself generates, with a space before "(" - a plain "create_elmer("
+        #    substring check never matches that)
+        #  - setting settings['elmer'] = True directly and calling create_model()
+        #    itself (create_elmer() is only a thin wrapper that sets this same flag)
         with open(file_path) as f:
             text = f.read()
-        if "create_elmer(" in text:
+        elmer_call = re.search(r'create_elmer\s*\(', text)
+        elmer_flag = re.search(r'settings\s*\[\s*[\'"]elmer[\'"]\s*\]\s*=\s*True\b', text, re.IGNORECASE)
+        if elmer_call or elmer_flag:
             self.setElmerMode()
         else:
             self.setPalaceMode()
