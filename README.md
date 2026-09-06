@@ -83,10 +83,14 @@ sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxc
 The setupEM module also installs these dependencies:
 - gds2palace
 - PySide6
+- shiboken6
 - scipy
 - requests
 - scikit-rf
 - matplotlib
+- numpy
+- gdspy
+- meshio
     
 ---
 
