@@ -53,14 +53,14 @@ if __package__ in (None, ""):
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
-    from thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
+    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
-    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
+    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 
 
 '''
@@ -645,7 +645,7 @@ class CreateModelTab(CreateModelTabBase):
 
     def launch_paraview(self):
         run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
-        vtu_path = find_thermal_vtu(run_path)
+        vtu_path = find_thermal_paraview_file(run_path)
         self._open_in_paraview(
             [vtu_path] if vtu_path else [],
             f"⚠️ No thermal results .vtu found yet under {run_path}\n"

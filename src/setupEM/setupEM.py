@@ -1409,7 +1409,7 @@ class CreateModelTab(CreateModelTabBase):
             # found for thermal_results.vtu). Check run_path too, defensively.
             search_dirs = [os.path.join(run_path, "mesh"), run_path]
             file_paths = []
-            for pattern in ("fields*.pvd", "fields*.vtu"):
+            for pattern in ("fields*.pvd", "fields*.pvtu", "fields*.vtu"):
                 for d in search_dirs:
                     file_paths = sorted(glob.glob(os.path.join(d, pattern)))
                     if file_paths:

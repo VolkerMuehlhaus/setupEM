@@ -71,6 +71,22 @@ def find_thermal_vtu(run_path):
     return max(matches, key=os.path.getmtime)
 
 
+def find_thermal_paraview_file(run_path):
+    """Return the best file to hand to ParaView for the thermal results: a .pvtu
+    (written when the solve was split across multiple partitions - it's the index
+    that ties the per-partition pieces back into one dataset) if one exists, else
+    the plain .vtu from find_thermal_vtu(). Use this for launching ParaView, not
+    find_thermal_vtu() directly - a .pvtu has no data arrays of its own, so it
+    would break read_minmax_temperature()'s parsing if used there instead.
+    """
+    matches = []
+    for d in _candidate_dirs(run_path):
+        matches += glob.glob(os.path.join(d, "thermal_results*.pvtu"))
+    if matches:
+        return max(matches, key=os.path.getmtime)
+    return find_thermal_vtu(run_path)
+
+
 def read_minmax_temperature(run_path):
     """Return (t_min, t_max) from thermal_results.dat, or None if missing/unparsable."""
     path = find_thermal_dat(run_path)
