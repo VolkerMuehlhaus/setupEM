@@ -501,6 +501,28 @@ class MeshTab(QWidget):
         self.main_layout.addWidget(self.mesh_group)
 
 
+        # ---------- ELMER SOLVER GROUP ----------
+        self.Elmer_group = QGroupBox("Elmer solver settings")
+        self.Elmer_layout = QVBoxLayout()
+
+        self.solver_layout = QHBoxLayout()
+        self.solverlabel = QLabel("Solver")
+        self.solverlabel.setFixedWidth(label_width)
+        self.solver_layout.addWidget(self.solverlabel)
+
+        self.solver_box = QComboBox()
+        self.solver_box.setFixedWidth(edit_width)
+        self.solver_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.solver_box.addItems(["iterative","direct"])
+        self.solver_layout.addWidget(self.solver_box)
+        self.solver_box.setCurrentIndex(1)
+        self.solver_layout.addStretch()
+        self.Elmer_layout.addLayout(self.solver_layout)
+
+        self.Elmer_group.setLayout(self.Elmer_layout)
+        self.main_layout.addWidget(self.Elmer_group)
+
+
         # ---------- BOUNDARY GROUP ----------
         self.mesh_group = QGroupBox("Boundary settings")
         self.mesh_layout = QVBoxLayout()
@@ -551,6 +573,9 @@ class MeshTab(QWidget):
             return False
         saved_values ["margin"] = float(value)
 
+        # iterative or direct solver for Elmer
+        saved_values["iterative"] = "iterative" in self.solver_box.currentText()
+
         # all saved
         return True
 
@@ -559,6 +584,11 @@ class MeshTab(QWidget):
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize","5")))
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max","100")))
         self.margins_edit.setText(str(saved_values.get("margin","100")))
+
+        if saved_values.get("iterative", False):
+            self.solver_box.setCurrentIndex(0)
+        else:
+            self.solver_box.setCurrentIndex(1)
 
 
 
@@ -786,7 +816,7 @@ class ModelEditorTab(QWidget):
         special_keylist = ['thermal_objects','materials_list','dielectrics_list','metals_list',
                            'layernumbers','allpolygons']
         # List of keys that we don't write to Python model code editor
-        ignore_list     = ['model_basename','sim_path','iterative']
+        ignore_list     = ['model_basename','sim_path']
 
 
         if forExport:
