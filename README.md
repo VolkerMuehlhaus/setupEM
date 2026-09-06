@@ -8,6 +8,7 @@ setupEM includes two built-in tools for working with simulation results directly
 - **Model Fit** (Create Model tab > Model Fit...) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results - offering to install it via pip if it isn't already present. See section "[Model Fit](#model-fit)".
 
 - A graphical **Stackup XML Editor** (Tools > Edit Stackup XML...), including Variables, Reference-relative positioning, Derived Layers, and Thermal Tables
+- The stackup preview graphics are **interactive**: click a shape for its properties, and selection syncs both ways with the Stackup Editor's tables
 - Input Files tab can now **override stackup Variables** (e.g. `total_thickness`) directly, without hand-editing the XML or the generated model
 - **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
 
