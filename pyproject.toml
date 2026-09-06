@@ -12,8 +12,9 @@ authors = [
     { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
 ]
 dependencies = [
-    "gds2palace>=0.4.0",
+    "gds2palace>=0.4.3",
     "PySide6",
+    "shiboken6",
     "scipy",
     "requests",
     "scikit-rf",

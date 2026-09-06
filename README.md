@@ -8,6 +8,7 @@ setupEM includes two built-in tools for working with simulation results directly
 - **Model Fit** (Create Model tab > Model Fit...) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results - offering to install it via pip if it isn't already present. See section "[Model Fit](#model-fit)".
 
 - A graphical **Stackup XML Editor** (Tools > Edit Stackup XML...), including Variables, Reference-relative positioning, Derived Layers, and Thermal Tables
+- The stackup preview graphics are **interactive**: click a shape for its properties, and selection syncs both ways with the Stackup Editor's tables
 - Input Files tab can now **override stackup Variables** (e.g. `total_thickness`) directly, without hand-editing the XML or the generated model
 - **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
 
@@ -22,6 +23,11 @@ When you install setupEM, the gds2palace workflow is automatically installed in 
 The setupEM package now includes setupThermal also, which is the equivalent of setupEM for thermal models using [Elmer](https://www.elmerfem.org/blog/). To run a thermal model in Elmer, you need to have Elmer installed. Elmer installation is **not** done automatically!
 
 An overview of the SetupEM user interface is given below in chapter "Using setupEM"
+
+Two more external tools are used by parts of the workflow, and are not installed automatically:
+
+- [ParaView](https://www.paraview.org/) — to view field-dump output (Palace/Elmer EM) and Elmer thermal result files via the "View fields/results in Paraview" buttons.
+- An MPI implementation — only needed for multi-process Elmer runs (the Elmer solver settings' multithreading option). Use OpenMPI or MPICH on Linux/macOS; on Windows, install [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi) (setupEM checks for this and shows a download link if it's missing).
 
 
 ## Installing the AWS Palace FEM solver engine
@@ -82,10 +88,14 @@ sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxc
 The setupEM module also installs these dependencies:
 - gds2palace
 - PySide6
+- shiboken6
 - scipy
 - requests
 - scikit-rf
 - matplotlib
+- numpy
+- gdspy
+- meshio
     
 ---
 

@@ -53,14 +53,14 @@ if __package__ in (None, ""):
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
-    from thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
+    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
     )
-    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_vtu
+    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 
 
 '''
@@ -501,6 +501,28 @@ class MeshTab(QWidget):
         self.main_layout.addWidget(self.mesh_group)
 
 
+        # ---------- ELMER SOLVER GROUP ----------
+        self.Elmer_group = QGroupBox("Elmer solver settings")
+        self.Elmer_layout = QVBoxLayout()
+
+        self.solver_layout = QHBoxLayout()
+        self.solverlabel = QLabel("Solver")
+        self.solverlabel.setFixedWidth(label_width)
+        self.solver_layout.addWidget(self.solverlabel)
+
+        self.solver_box = QComboBox()
+        self.solver_box.setFixedWidth(edit_width)
+        self.solver_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.solver_box.addItems(["iterative","direct"])
+        self.solver_layout.addWidget(self.solver_box)
+        self.solver_box.setCurrentIndex(1)
+        self.solver_layout.addStretch()
+        self.Elmer_layout.addLayout(self.solver_layout)
+
+        self.Elmer_group.setLayout(self.Elmer_layout)
+        self.main_layout.addWidget(self.Elmer_group)
+
+
         # ---------- BOUNDARY GROUP ----------
         self.mesh_group = QGroupBox("Boundary settings")
         self.mesh_layout = QVBoxLayout()
@@ -551,6 +573,9 @@ class MeshTab(QWidget):
             return False
         saved_values ["margin"] = float(value)
 
+        # iterative or direct solver for Elmer
+        saved_values["iterative"] = "iterative" in self.solver_box.currentText()
+
         # all saved
         return True
 
@@ -559,6 +584,11 @@ class MeshTab(QWidget):
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize","5")))
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max","100")))
         self.margins_edit.setText(str(saved_values.get("margin","100")))
+
+        if saved_values.get("iterative", False):
+            self.solver_box.setCurrentIndex(0)
+        else:
+            self.solver_box.setCurrentIndex(1)
 
 
 
@@ -615,7 +645,7 @@ class CreateModelTab(CreateModelTabBase):
 
     def launch_paraview(self):
         run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
-        vtu_path = find_thermal_vtu(run_path)
+        vtu_path = find_thermal_paraview_file(run_path)
         self._open_in_paraview(
             [vtu_path] if vtu_path else [],
             f"⚠️ No thermal results .vtu found yet under {run_path}\n"
@@ -786,7 +816,7 @@ class ModelEditorTab(QWidget):
         special_keylist = ['thermal_objects','materials_list','dielectrics_list','metals_list',
                            'layernumbers','allpolygons']
         # List of keys that we don't write to Python model code editor
-        ignore_list     = ['model_basename','sim_path','iterative']
+        ignore_list     = ['model_basename','sim_path']
 
 
         if forExport:
@@ -935,8 +965,8 @@ class MainWindow(MainWindowBase):
     # ---------- Menu actions ----------
 
     def show_version(self):
-        setupEM_version = importlib.metadata.version("setupEM")
-        gds2palace_version = importlib.metadata.version("gds2palace")
+        setupEM_version = self.get_setupEM_version()
+        gds2palace_version = self.get_gds2palace_version()
         version_info = f"Installed:\nsetupEM {setupEM_version}\ngds2palace {gds2palace_version}"
 
         # get latest available version information

@@ -155,7 +155,7 @@ Some layout pre-processing is defined here too: **Merge via arrays with spacing*
 
 ### Show Stackup
 
-The **Show stackup** button visualizes the chosen stackup and its material properties. Dielectric materials are color coded to show permittivity at a glance; metal layers show sheet resistance, thickness, and spacing to neighboring layers.
+The **Show stackup** button visualizes the chosen stackup and its material properties. Dielectric materials are color coded to show permittivity at a glance; metal layers show sheet resistance, thickness, and spacing to neighboring layers. Click any shape for its name, material, and z-position/thickness in a flyout.
 
 <img src="./png/showstackup1.png" alt="stackup" width="750">
 
@@ -371,6 +371,8 @@ Same **Mesh refinement at the edges** / **Mesh cell maximum size absolute** / ba
 ## The Stackup Editor
 
 The Stackup Editor is a standalone graphical tool for creating and editing the XML stackup files used throughout this workflow - materials, the dielectric stack, drawn metal/via layers, derived layers, named Variables, and thermal conductivity tables. It replaces hand-editing this XML in a text editor.
+
+Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
 
 ### Launching the editor
 

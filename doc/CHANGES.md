@@ -1,4 +1,16 @@
 
+# What's New - September 6, 2026
+
+The stackup cross-section preview (**Show stackup**, and the Stackup Editor's live preview) is now interactive: click a dielectric, metal, or via to see its name, material, and z-position/thickness in a flyout. In the Stackup Editor, clicking a shape also selects the matching row in the Dielectric Stack/Layers tables, and selecting a row highlights the matching shape in the preview.
+
+The Stackup Editor now closes itself automatically when a different substrate XML is chosen in the main window, if it has no unsaved changes, instead of staying open showing a file that no longer matches what's selected.
+
+setupThermal now has an **Elmer solver settings** group (Mesh tab), matching setupEM's, to choose between the iterative and direct linear solver for the Elmer thermal solve - defaults to direct. Previously this could only be set by hand-editing the generated model script, and the setting was silently dropped even then.
+
+ParaView launching (Palace and Elmer EM field dumps, Elmer thermal results) now prefers a `.pvtu` file over loose `.vtu` pieces when one exists, so a multi-partition (MPI) run opens as one combined dataset instead of disconnected fragments.
+
+The Frequencies tab's field-dump control is now solver-aware: Elmer mode shows a plain **"Enable field dump"** checkbox instead of a frequency list, since Elmer has no per-frequency `SaveStep` like Palace - any `fdump` value there dumps fields at *every* solved frequency (sweep and `fpoint` together), so listing specific frequencies was misleading. Palace mode is unchanged, keeping its per-frequency `fdump` list. This also sidesteps a gds2palace bug (see its own CHANGES.md) where a frequency listed in both the sweep and `fdump` was silently solved twice.
+
 # What's New - September 5, 2026
 
 Added a **View fields in Paraview...** button (Create Model tab), shown once `fdump` is set, to open Palace or Elmer EM field-dump results directly. "View Results..." is renamed to **View S-Parameters...** for clarity.

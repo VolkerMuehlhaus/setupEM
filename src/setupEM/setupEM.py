@@ -165,10 +165,21 @@ class FrequenciesTab(QWidget):
         self.dump_layout = QHBoxLayout()
 
         self.fdump_layout = QVBoxLayout()
-        self.fdump_layout.addWidget(QLabel("fdump [GHz], values separated by comma"))
+        self.fdump_label = QLabel("fdump [GHz], values separated by comma")
+        self.fdump_layout.addWidget(self.fdump_label)
         self.fdump_edit = QLineEdit("")
         self.fdump_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.fdump_layout.addWidget(self.fdump_edit)
+
+        # Elmer has no per-sample SaveStep like Palace - any fdump value turns on
+        # field-dump output at every solved frequency (sweep + fpoint together), so a
+        # per-frequency list is misleading there. Elmer mode shows this checkbox instead
+        # of fdump_edit; only one of the two is ever visible, toggled in setPalaceMode()/
+        # setElmerMode(). Both widgets always exist so mode switches are just a visibility
+        # flip, no rebuilding.
+        self.fdump_enabled_checkbox = QCheckBox("Enable field dump at all frequencies")
+        self.fdump_layout.addWidget(self.fdump_enabled_checkbox)
+
         self.dump_layout.addLayout(self.fdump_layout)
         self.dump_group.setLayout(self.dump_layout)
 
@@ -184,7 +195,9 @@ class FrequenciesTab(QWidget):
     def save_values(self):
         # fstart/fstop may be left empty only if fpoint or fdump supplies at least
         # one frequency instead (gds2palace treats fstart/fstop as fully optional)
-        discrete_freqs_given = (self.fpoint_edit.text() != "" or self.fdump_edit.text() != "")
+        fdump_given = (self.fdump_enabled_checkbox.isChecked() if self.MainWindow.ElmerMode
+                       else self.fdump_edit.text() != "")
+        discrete_freqs_given = (self.fpoint_edit.text() != "" or fdump_given)
 
         fstart = None
         if self.start_edit.text() == "":
@@ -239,18 +252,35 @@ class FrequenciesTab(QWidget):
         else:
             saved_values.pop("fpoint",None) # delete key
 
-        text = self.fdump_edit.text()
-        if text != "":
-            saved_values ["fdump"] = ast.literal_eval('['+text+']')
+        if self.MainWindow.ElmerMode:
+            saved_values["fdump_enabled"] = self.fdump_enabled_checkbox.isChecked()
+            # don't touch saved_values["fdump"] here - it's Palace-only data (a real
+            # frequency list) and must survive a round-trip through Elmer mode untouched
+            have_sweep = ("fstart" in saved_values and "fstop" in saved_values)
+            have_fpoint = bool(saved_values.get("fpoint"))
+            if self.fdump_enabled_checkbox.isChecked() and not have_sweep and not have_fpoint:
+                QMessageBox.warning(self, "Error",
+                    "Field dump needs at least one frequency: set fstart/fstop or fpoint first.")
+                self.fdump_enabled_checkbox.setChecked(False)
+                saved_values["fdump_enabled"] = False
+                return False
         else:
-            saved_values.pop("fdump",None)
+            text = self.fdump_edit.text()
+            if text != "":
+                saved_values ["fdump"] = ast.literal_eval('['+text+']')
+            else:
+                saved_values.pop("fdump",None)
+            # don't touch saved_values["fdump_enabled"] here either, same reasoning
         # "View fields in Paraview" is only relevant once fdump is set
         self.MainWindow.create_model_tab._update_paraview_button_visibility()
 
         # if fstart == fstop == fdump or fstart == fstop == fstep, then remove fstart, fstop
         if fstart is not None and fstop is not None and fstart == fstop:
             discrete_list1 = saved_values.get("fpoint", [])
-            discrete_list2 = saved_values.get("fdump", [])
+            # fdump no longer holds real per-frequency data in Elmer mode, and collapsing
+            # the sweep away here would remove the very fstop value the field-dump
+            # checkbox's generated code depends on (see ModelEditorTab.create_model_text)
+            discrete_list2 = [] if self.MainWindow.ElmerMode else saved_values.get("fdump", [])
             if fstart in discrete_list1 or fstart in discrete_list2:
                 saved_values.pop("fstart", None)
                 saved_values.pop("fstop", None)
@@ -265,7 +295,9 @@ class FrequenciesTab(QWidget):
     def load_values(self):
         # if fstart/fstop were intentionally omitted in favor of fpoint/fdump, keep the
         # fields blank on reload instead of repopulating the "0"/"50" sweep defaults
-        discrete_freqs_given = ("fpoint" in saved_values) or ("fdump" in saved_values)
+        fdump_given = saved_values.get("fdump_enabled", False) if self.MainWindow.ElmerMode \
+                      else ("fdump" in saved_values)
+        discrete_freqs_given = ("fpoint" in saved_values) or fdump_given
         fstart_default = "" if discrete_freqs_given else "0"
         fstop_default  = "" if discrete_freqs_given else "50"
         self.start_edit.setText(str(saved_values.get("fstart",fstart_default)))
@@ -277,6 +309,7 @@ class FrequenciesTab(QWidget):
 
         float_list  = saved_values.get("fdump","")
         self.fdump_edit.setText(','.join(map(str, float_list)))
+        self.fdump_enabled_checkbox.setChecked(bool(saved_values.get("fdump_enabled", False)))
 
 
 class PortsTab(QWidget):
@@ -1386,7 +1419,11 @@ class CreateModelTab(CreateModelTabBase):
         self.log_area.appendPlainText("\n" + summary + "\n")
 
     def _update_paraview_button_visibility(self):
-        self.paraview_btn.setVisible(bool(saved_values.get('fdump')))
+        if self.MainWindow.ElmerMode:
+            visible = bool(saved_values.get('fdump_enabled'))
+        else:
+            visible = bool(saved_values.get('fdump'))
+        self.paraview_btn.setVisible(visible)
 
     def load_values(self):
         super().load_values()
@@ -1409,7 +1446,7 @@ class CreateModelTab(CreateModelTabBase):
             # found for thermal_results.vtu). Check run_path too, defensively.
             search_dirs = [os.path.join(run_path, "mesh"), run_path]
             file_paths = []
-            for pattern in ("fields*.pvd", "fields*.vtu"):
+            for pattern in ("fields*.pvd", "fields*.pvtu", "fields*.vtu"):
                 for d in search_dirs:
                     file_paths = sorted(glob.glob(os.path.join(d, pattern)))
                     if file_paths:
@@ -1418,7 +1455,7 @@ class CreateModelTab(CreateModelTabBase):
                     break
             not_found = (
                 f"⚠️ No Elmer field-dump output found under {run_path}\n"
-                "(set fdump to specific frequencies before running the simulation)\n"
+                "(enable field dump before running the simulation)\n"
             )
         self._open_in_paraview(file_paths, not_found)
 
@@ -1731,12 +1768,21 @@ class ModelEditorTab(QWidget):
         special_keylist = ['simulation_ports','materials_list','dielectrics_list','metals_list',
                            'layernumbers','allpolygons']
         # List of keys that we don't write to Python model code editor
-        ignore_list     = ['model_basename','sim_path']
+        # fdump_enabled is a GUI-only toggle (Elmer mode), never a real gds2palace setting
+        ignore_list     = ['model_basename','sim_path','fdump_enabled']
 
 
         # Keywords that are excluded in Palace mode
         if self.MainWindow.PalaceMode:
             ignore_list.append('iterative')
+
+        if self.MainWindow.ElmerMode:
+            # Elmer mode shows a plain on/off checkbox (fdump_enabled) instead of Palace's
+            # per-frequency fdump list - suppress the generic per-key emission of fdump
+            # here so a stale Palace-mode list saved earlier in the same session doesn't
+            # leak into an Elmer-mode script; the synthesized settings['fdump'] line
+            # (below, after special_keylist) is emitted instead when the checkbox is on.
+            ignore_list.append('fdump')
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
@@ -1746,6 +1792,23 @@ class ModelEditorTab(QWidget):
             if not key in special_keylist:
                 if not key in ignore_list:
                     add_key(key)
+
+        if self.MainWindow.ElmerMode and bool(saved_values.get('fdump_enabled')):
+            # Elmer has no per-frequency SaveStep like Palace - it dumps fields at every
+            # solved frequency once any fdump value is set, so reuse an already-solved
+            # frequency here rather than asking the user to pick one. This is harmless
+            # (adds no extra solve) as long as util_elmer.write_elmer_frequencies()
+            # dedupes the combined frequency list, which it does.
+            # Known limitation: this line's RHS references "settings", so
+            # parse_assignments() (setup_common.py) skips it entirely on Import -
+            # re-importing an exported Elmer+fdump script loses fdump_enabled (loads
+            # unchecked). Not fixed here since it's a silent no-op, not a crash.
+            add_text("\n# 'Enable field dump' checkbox: Elmer dumps fields at every solved")
+            add_text("# frequency once fdump is non-empty, so reuse an already-solved one")
+            if 'fstop' in saved_values:
+                add_text("settings['fdump'] = [settings['fstop']]")
+            elif saved_values.get('fpoint'):
+                add_text("settings['fdump'] = [settings['fpoint'][0]]")
 
 
         add_text("\n# ===================== port definitions =======================")
@@ -1951,6 +2014,10 @@ class MainWindow(MainWindowBase):
         self.ElmerMode  = False
         self.setWindowTitle(APP_NAME + ' Palace')
         self.frequencies_tab.dump_group.setVisible(True)
+        self.frequencies_tab.dump_group.setTitle("Optional list of fixed frequencies creating field dump data for visualization (Paraview files))")
+        self.frequencies_tab.fdump_label.setVisible(True)
+        self.frequencies_tab.fdump_edit.setVisible(True)
+        self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
         self.mesh_tab.Elmer_group.setVisible(False)
 
@@ -1963,9 +2030,14 @@ class MainWindow(MainWindowBase):
         self.PalaceMode = False
         self.ElmerMode  = True
         self.setWindowTitle(APP_NAME + ' Elmer')
-        # fdump now also enables Elmer EM field dumps (Exec Solver = Always), not just
-        # Palace's SaveStep - so this group must stay visible/usable in Elmer mode too.
+        # Elmer has no per-sample SaveStep like Palace - any fdump value turns on
+        # field-dump output at every solved frequency, so it shows a plain on/off
+        # checkbox here instead of Palace's per-frequency fdump list.
         self.frequencies_tab.dump_group.setVisible(True)
+        self.frequencies_tab.dump_group.setTitle("Create field dump data for visualization (Paraview files)")
+        self.frequencies_tab.fdump_label.setVisible(False)
+        self.frequencies_tab.fdump_edit.setVisible(False)
+        self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
 
@@ -1995,8 +2067,8 @@ class MainWindow(MainWindowBase):
 
 
     def show_version(self):
-        setupEM_version = importlib.metadata.version("setupEM")
-        gds2palace_version = importlib.metadata.version("gds2palace")
+        setupEM_version = self.get_setupEM_version()
+        gds2palace_version = self.get_gds2palace_version()
         # snp2le (used by Model Fit) is an optional dependency, not installed by default
         try:
             snp2le_version = importlib.metadata.version("snp2le")
