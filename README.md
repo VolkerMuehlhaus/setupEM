@@ -24,6 +24,11 @@ The setupEM package now includes setupThermal also, which is the equivalent of s
 
 An overview of the SetupEM user interface is given below in chapter "Using setupEM"
 
+Two more external tools are used by parts of the workflow, and are not installed automatically:
+
+- [ParaView](https://www.paraview.org/) — to view field-dump output (Palace/Elmer EM) and Elmer thermal result files via the "View fields/results in Paraview" buttons.
+- An MPI implementation — only needed for multi-process Elmer runs (the Elmer solver settings' multithreading option). Use OpenMPI or MPICH on Linux/macOS; on Windows, install [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi) (setupEM checks for this and shows a download link if it's missing).
+
 
 ## Installing the AWS Palace FEM solver engine
 **setupEM** creates and runs simulation models for the AWS Palace FEM solver engine. The underlying solver **AWS Palace** can be installed in multiple ways. For a smooth interaction with the gds2palace workflow, it is recommended to create some scripts that help running the model and convert the Palace results to SnP Touchstone files.
