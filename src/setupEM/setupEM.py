@@ -1995,8 +1995,8 @@ class MainWindow(MainWindowBase):
 
 
     def show_version(self):
-        setupEM_version = importlib.metadata.version("setupEM")
-        gds2palace_version = importlib.metadata.version("gds2palace")
+        setupEM_version = self.get_setupEM_version()
+        gds2palace_version = self.get_gds2palace_version()
         # snp2le (used by Model Fit) is an optional dependency, not installed by default
         try:
             snp2le_version = importlib.metadata.version("snp2le")

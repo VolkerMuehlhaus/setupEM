@@ -33,6 +33,7 @@ in setupEM.py / setupThermal.py, not here.
 """
 
 import sys, os, json, pathlib, ast, webbrowser, io, contextlib, subprocess, shutil, glob
+import importlib.metadata
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
@@ -1873,6 +1874,43 @@ class MainWindowBase(QMainWindow):
               "  pip install gds2palace --upgrade")
 
     # ---------- Version check (PyPI) ----------
+    def get_setupEM_version(self):
+        """Live __version__ of the setupEM package (this distribution) - not
+           importlib.metadata.version("setupEM"), which is a static snapshot of
+           the dist-info written at install time. For an editable
+           ("pip install -e .") install, that snapshot goes stale the moment
+           __version__ is bumped in the source afterward without reinstalling -
+           confirmed in this workspace: metadata reported "0.3.13" while the
+           live source was already at "0.6.2". That silently under-reports how
+           current a local dev checkout is, and the version-check dialog would
+           offer a "pip install --upgrade" that's actively wrong advice for an
+           editable install. Falls back to importlib.metadata in the unlikely
+           case setupEM can't be self-imported (e.g. setupEM.py run directly,
+           unpackaged, with no setupEM package importable at all).
+        """
+        try:
+            from . import __version__
+            return __version__
+        except ImportError:
+            try:
+                return importlib.metadata.version("setupEM")
+            except importlib.metadata.PackageNotFoundError:
+                return "unknown"
+
+    def get_gds2palace_version(self):
+        """Live gds2palace.__version__ - see get_setupEM_version() for why this
+           is preferred over importlib.metadata.version("gds2palace") (the same
+           staleness issue applies to an editable gds2palace install; confirmed
+           in this workspace: metadata reported "0.3.6" while the live source
+           was already at "0.4.1")."""
+        version = getattr(gds2palace, "__version__", None)
+        if version:
+            return version
+        try:
+            return importlib.metadata.version("gds2palace")
+        except importlib.metadata.PackageNotFoundError:
+            return "unknown"
+
     def get_latest_version(self, package_name: str) -> str:
         # Network call on the GUI thread: bounded with a short timeout and
         # wrapped in try/except so a network failure or hang can't crash or

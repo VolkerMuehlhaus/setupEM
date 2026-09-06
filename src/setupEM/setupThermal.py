@@ -935,8 +935,8 @@ class MainWindow(MainWindowBase):
     # ---------- Menu actions ----------
 
     def show_version(self):
-        setupEM_version = importlib.metadata.version("setupEM")
-        gds2palace_version = importlib.metadata.version("gds2palace")
+        setupEM_version = self.get_setupEM_version()
+        gds2palace_version = self.get_gds2palace_version()
         version_info = f"Installed:\nsetupEM {setupEM_version}\ngds2palace {gds2palace_version}"
 
         # get latest available version information
