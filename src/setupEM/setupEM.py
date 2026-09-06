@@ -177,7 +177,7 @@ class FrequenciesTab(QWidget):
         # of fdump_edit; only one of the two is ever visible, toggled in setPalaceMode()/
         # setElmerMode(). Both widgets always exist so mode switches are just a visibility
         # flip, no rebuilding.
-        self.fdump_enabled_checkbox = QCheckBox("Enable field dump (Elmer dumps fields at every solved frequency)")
+        self.fdump_enabled_checkbox = QCheckBox("Enable field dump at all frequencies")
         self.fdump_layout.addWidget(self.fdump_enabled_checkbox)
 
         self.dump_layout.addLayout(self.fdump_layout)
@@ -2014,6 +2014,7 @@ class MainWindow(MainWindowBase):
         self.ElmerMode  = False
         self.setWindowTitle(APP_NAME + ' Palace')
         self.frequencies_tab.dump_group.setVisible(True)
+        self.frequencies_tab.dump_group.setTitle("Optional list of fixed frequencies creating field dump data for visualization (Paraview files))")
         self.frequencies_tab.fdump_label.setVisible(True)
         self.frequencies_tab.fdump_edit.setVisible(True)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
@@ -2033,6 +2034,7 @@ class MainWindow(MainWindowBase):
         # field-dump output at every solved frequency, so it shows a plain on/off
         # checkbox here instead of Palace's per-frequency fdump list.
         self.frequencies_tab.dump_group.setVisible(True)
+        self.frequencies_tab.dump_group.setTitle("Create field dump data for visualization (Paraview files)")
         self.frequencies_tab.fdump_label.setVisible(False)
         self.frequencies_tab.fdump_edit.setVisible(False)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
