@@ -43,11 +43,12 @@ import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import shiboken6
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
+    QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
 )
 from PySide6.QtGui import (
     QColor, QFontMetrics, QKeySequence, QAction, QFontDatabase,
@@ -973,11 +974,11 @@ class StackupPreviewWindow(QWidget):
     """Own top-level window for the live stackup cross-section preview, so it
        gets real screen space instead of sharing the editor window with the
        editing tables. Reuses the same VectorWidget instance as the editor -
-       updates happen by mutating that widget's data and calling .update(),
-       so this window doesn't need any refresh logic of its own.
+       updates happen by calling that widget's refresh(), so this window
+       doesn't need any refresh logic of its own.
 
-    Deliberately NOT WA_DeleteOnClose: the QScrollArea here owns the shared
-    VectorWidget (setWidget() reparents it), so destroying this window on
+    Deliberately NOT WA_DeleteOnClose: this window's layout owns the shared
+    VectorWidget (addWidget() reparents it), so destroying this window on
     close would destroy that widget too, breaking the editor that still
     references it. Closing (the X button) just hides the window instead.
 
@@ -997,11 +998,10 @@ class StackupPreviewWindow(QWidget):
         self.setWindowTitle("Stackup Preview")
         self.resize(700, 900)
 
+        # vector_widget is a QGraphicsView, already self-scrolling - no QScrollArea
+        # wrapper needed (or wanted: it would nest a second set of scrollbars).
         layout = QVBoxLayout()
-        scroll = QScrollArea()
-        scroll.setWidget(vector_widget)
-        scroll.setWidgetResizable(True)
-        layout.addWidget(scroll)
+        layout.addWidget(vector_widget)
         self.setLayout(layout)
 
     def closeEvent(self, event):
@@ -1033,6 +1033,10 @@ class StackupEditorWindow(QDialog):
 
         self.tree = None
         self.current_filename = None
+        # serialized snapshot as of the last load/new/save - has_unsaved_changes()
+        # compares against this; lets the main app decide whether this editor can
+        # be closed silently (e.g. when a different substrate file is selected there)
+        self._saved_snapshot = None
 
         # bounded multi-level undo: _last_snapshot is always an independent deep
         # copy of the tree as it was right before the most recent change;
@@ -1252,6 +1256,10 @@ class StackupEditorWindow(QDialog):
         layers_layout.addLayout(offset_row)
         layers_layout.addWidget(self.layers_editor)
         layers_tab.setLayout(layers_layout)
+        # saved as an attribute (unlike the other plain tab containers) because
+        # _on_preview_element_selected() needs to switch to it by widget identity -
+        # self.layers_editor itself is not the tab's widget, layers_tab is
+        self.layers_tab = layers_tab
 
         self.derived_layers_editor = ElementTableEditor(
             DERIVED_LAYER_COLUMNS,
@@ -1288,7 +1296,7 @@ class StackupEditorWindow(QDialog):
             invalid_fn=self._is_invalid_field,
         )
         self.tables_editor.table.itemSelectionChanged.connect(
-            lambda: QTimer.singleShot(0, self._sync_points_editor_from_table_selection))
+            lambda: QTimer.singleShot(0, self._guarded(self._sync_points_editor_from_table_selection)))
         # left-align (default QHeaderView alignment is centered) - these headers read as
         # labels ("Table name", "Number of data points"), not numbers, so left reads better
         self.tables_editor.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1380,6 +1388,26 @@ class StackupEditorWindow(QDialog):
             via_label_suffix_fn=self.MainWindow.stackup_via_label_suffix,
         )
         self.vector_widget.setMinimumSize(600, 800)
+
+        # two-way sync between the preview graphics and the Dielectric Stack/Layers
+        # tables: clicking a shape in the preview selects its row (and switches to
+        # its tab); selecting a row highlights the matching shape in the preview.
+        # Deferred via QTimer.singleShot(0, ...), same pattern already used for the
+        # Tables<->Points sync above (_sync_points_editor_from_table_selection) -
+        # avoids reentering Qt's selection/item machinery synchronously from
+        # within a signal it's still emitting. Wrapped in self._guarded(...): this
+        # window can be closed (manually, or auto-closed - see
+        # _close_stackup_editor_if_clean in setup_common.py) in the interval between
+        # scheduling one of these and the timer actually firing, which would
+        # otherwise hit a RuntimeError from touching an already-deleted Qt widget.
+        self.vector_widget.elementSelected.connect(
+            lambda kind, name: QTimer.singleShot(
+                0, self._guarded(lambda: self._on_preview_element_selected(kind, name))))
+        self.dielectrics_editor.table.itemSelectionChanged.connect(
+            lambda: QTimer.singleShot(0, self._guarded(self._on_dielectrics_row_selected)))
+        self.layers_editor.table.itemSelectionChanged.connect(
+            lambda: QTimer.singleShot(0, self._guarded(self._on_layers_row_selected)))
+
         # created once and kept for the editor's lifetime, but deliberately with
         # no Qt parent (see StackupPreviewWindow docstring) - cleaned up explicitly
         # in closeEvent() below rather than via Qt's parent-child auto-delete
@@ -1392,6 +1420,29 @@ class StackupEditorWindow(QDialog):
             self.new_file()
 
         self._open_preview_window()
+
+    def _guarded(self, fn):
+        """Wraps fn (called with no arguments) so it's a no-op if this window (or
+           its vector_widget) has already been destroyed - guards every
+           QTimer.singleShot(0, ...) deferred call in this file, since this window
+           can be closed (manually, or auto-closed - see
+           _close_stackup_editor_if_clean in setup_common.py) in the interval
+           between scheduling one and the timer actually firing, which would
+           otherwise raise "Internal C++ object already deleted" from touching
+           self.tabs/self.tree/etc. on a dead widget.
+
+           Checks vector_widget separately from self: it lives in preview_window,
+           which has no Qt parent relationship to this window (see
+           StackupPreviewWindow's docstring) and is torn down via its own
+           deleteLater() call in closeEvent() below - a separate deferred-deletion
+           chain that isn't guaranteed to finish strictly after (or before) this
+           window's own WA_DeleteOnClose teardown, so self being still-valid at the
+           moment this runs does not guarantee vector_widget still is too.
+        """
+        def wrapper():
+            if shiboken6.isValid(self) and shiboken6.isValid(self.vector_widget):
+                fn()
+        return wrapper
 
     def _open_preview_window(self):
         self.preview_window.show()
@@ -2087,6 +2138,8 @@ class StackupEditorWindow(QDialog):
         # upgrade again if the version changes further from here, not on every save
         self._loaded_schema_version = root.get("schemaVersion")
         self._add_recent_file(filename)
+        # this is now the "nothing to lose" baseline again
+        self._mark_saved_baseline()
 
         saved_values = getattr(self.MainWindow, "saved_values", {}) or {}
         substrate_file = saved_values.get("SubstrateFile")
@@ -2693,6 +2746,23 @@ class StackupEditorWindow(QDialog):
         # file's invalidity is meaningless for this one
         self._was_valid = True
         self._invalid_field = None
+        # also the new "nothing to lose" baseline for has_unsaved_changes()
+        self._mark_saved_baseline()
+
+    def _mark_saved_baseline(self):
+        self._saved_snapshot = (
+            ET.tostring(self.tree.getroot(), encoding="unicode") if self.tree is not None else None
+        )
+
+    def has_unsaved_changes(self):
+        """True if the in-memory tree differs from what was last loaded/created/saved.
+           Used by the main app to decide whether this editor can be closed silently
+           (e.g. when a different substrate file is selected there) without risking
+           losing an in-progress edit.
+        """
+        if self.tree is None:
+            return False
+        return ET.tostring(self.tree.getroot(), encoding="unicode") != self._saved_snapshot
 
     def _record_undo_point(self):
         if self.tree is None:
@@ -2740,10 +2810,38 @@ class StackupEditorWindow(QDialog):
             # process over a gap in that mirroring rather than just skipping a
             # preview refresh.
             return
-        self.vector_widget.materials_list = materials_list
-        self.vector_widget.dielectrics_list = dielectrics_list
-        self.vector_widget.metals_list = metals_list
-        self.vector_widget.update()
+        self.vector_widget.refresh(materials_list, dielectrics_list, metals_list)
+
+    def _on_preview_element_selected(self, kind, name):
+        """Preview -> table: a shape was clicked in the cross-section preview -
+           switch to its tab and select its row there."""
+        editor = self.dielectrics_editor if kind == "dielectric" else self.layers_editor
+        tab_widget = editor if kind == "dielectric" else self.layers_tab
+        try:
+            row = next(i for i, el in enumerate(editor.row_elements) if el.get("Name") == name)
+        except StopIteration:
+            return
+        self.tabs.setCurrentWidget(tab_widget)
+        if editor.table.currentRow() != row:
+            editor.table.selectRow(row)
+
+    def _on_dielectrics_row_selected(self):
+        """Table -> preview: a Dielectric Stack row was selected - highlight the
+           matching slab in the preview."""
+        row = self.dielectrics_editor.table.currentRow()
+        if 0 <= row < len(self.dielectrics_editor.row_elements):
+            name = self.dielectrics_editor.row_elements[row].get("Name")
+            if name:
+                self.vector_widget.select_element("dielectric", name)
+
+    def _on_layers_row_selected(self):
+        """Table -> preview: a Layers row was selected - highlight the matching
+           metal/via/sheet box in the preview."""
+        row = self.layers_editor.table.currentRow()
+        if 0 <= row < len(self.layers_editor.row_elements):
+            name = self.layers_editor.row_elements[row].get("Name")
+            if name:
+                self.vector_widget.select_element("layer", name)
 
     def _refresh_validation_status(self, errors):
         if not errors:
