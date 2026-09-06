@@ -5,6 +5,8 @@ The stackup cross-section preview (**Show stackup**, and the Stackup Editor's li
 
 The Stackup Editor now closes itself automatically when a different substrate XML is chosen in the main window, if it has no unsaved changes, instead of staying open showing a file that no longer matches what's selected.
 
+setupThermal now has an **Elmer solver settings** group (Mesh tab), matching setupEM's, to choose between the iterative and direct linear solver for the Elmer thermal solve - defaults to direct. Previously this could only be set by hand-editing the generated model script, and the setting was silently dropped even then.
+
 # What's New - September 5, 2026
 
 Added a **View fields in Paraview...** button (Create Model tab), shown once `fdump` is set, to open Palace or Elmer EM field-dump results directly. "View Results..." is renamed to **View S-Parameters...** for clarity.
