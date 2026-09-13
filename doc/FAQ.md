@@ -43,6 +43,10 @@ Only with an outdated gds2palace install. Mesh generation was redesigned so cuto
 
 A `<Variable>` in the XML stackup is a named value, or an expression built from other Variables, that other stackup attributes such as a dielectric thickness can reference. On the Input Files tab, any Variable with a plain value gets an editable override for the current run, without touching the XML. This only reaches stackup attributes, though. It is not a general parametric variable system for port impedance, geometry dimensions, or sweep ranges the way project variables work in HFSS or ADS.
 
+### Can I simulate at different temperatures, the way some tools support a temperature sweep or a TempCo material setting?
+
+There's no dedicated "simulation temperature" field the way a commercial tool's tech file might have one. Instead, you build it from the same Variables/expression mechanism: declare an operating-temperature Variable (e.g. `Temp_Celsius`) and write each temperature-dependent metal's Conductivity as a `"="`-expression of it, following the standard sheet-resistance temperature-coefficient equation `sigma(T) = sigma(T0) / [1 + TC1*(T-T0)]`. A stackup built this way works in setupEM like any other: override `Temp_Celsius` on the Input Files tab to simulate at one temperature. You only need the underlying Python model script directly, from the command line, if you want to loop over several temperatures automatically in one run instead of overriding and re-running by hand each time. See [`EM_temperature_coefficient`](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/tree/main/more_examples/EM_temperature_coefficient) in the gds2palace repository for a complete worked example, including real IHP SG13G2 temperature coefficients, such a temperature loop, and a Palace-simulated S21 comparison at two temperatures.
+
 ## Frequencies
 
 ### What is the adaptive frequency sweep, and how does it compare to HFSS's interpolating sweep?
