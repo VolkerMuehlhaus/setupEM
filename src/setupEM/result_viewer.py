@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QCheckBox, QSizePolicy, QStyleFactory,
     QFileDialog, QMessageBox, QMenu,
 )
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QTimer, QProcess
 
 # __package__ is None/"" when this file is run directly rather than imported as part
@@ -425,6 +426,12 @@ class ResultViewerWindow(QDialog):
         self.nav_toolbar = NavigationToolbar2QT(self.canvas, self)
         main_layout.addWidget(self.nav_toolbar)
         main_layout.addWidget(self.canvas, 1)
+
+        # Ctrl+C copies the plot itself (not the toolbar/file list/controls) to
+        # the clipboard as an image - window-scoped (default QShortcut context)
+        # so it fires regardless of which child widget currently has focus
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(self.canvas.grab()))
 
     # ---------- Qt event hooks ----------
 

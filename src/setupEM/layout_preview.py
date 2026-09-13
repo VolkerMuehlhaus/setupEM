@@ -35,7 +35,10 @@ from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsSimpleTextItem,
     QGraphicsEllipseItem, QGraphicsPathItem, QSlider, QSplitter, QApplication,
     )
-from PySide6.QtGui import QColor, QBrush, QPen, QPolygonF, QPainter, QFont, QPainterPath, QTransform
+from PySide6.QtGui import (
+    QColor, QBrush, QPen, QPolygonF, QPainter, QFont, QPainterPath, QTransform,
+    QShortcut, QKeySequence,
+    )
 from PySide6.QtCore import Qt, QPointF, Signal
 
 from gds2palace import gds_reader, stackup_reader
@@ -354,7 +357,42 @@ class LayoutPreviewWindow(QDialog):
         main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
 
+        # Ctrl+C copies the canvas (the drawn layout, not the legend/buttons) to
+        # the clipboard as an image - window-scoped (default QShortcut context)
+        # so it fires regardless of which child widget currently has focus, since
+        # nothing in this window has its own competing text-copy behavior
+        QShortcut(QKeySequence.Copy, self).activated.connect(self._copy_canvas_to_clipboard)
+
+        # Up/Down cycles the highlighted selection through the Layers section (not
+        # markers) in the same top-to-bottom order shown in the legend, when a
+        # layer is currently selected - see _layer_names_ordered/_cycle_highlighted_layer().
+        # Plain Key_Up/Key_Down as a window-scoped QShortcut (not a keyPressEvent
+        # override) reliably wins over the canvas/slider's own default arrow-key
+        # handling (scrolling/value-stepping) regardless of which child has focus -
+        # confirmed empirically: Qt's ambient shortcut system intercepts the key
+        # before QGraphicsView/QSlider's own keyPressEvent ever sees it, unless a
+        # widget explicitly opts out via ShortcutOverride (neither does here).
+        self._layer_names_ordered = []  # top-to-bottom legend order, set in refresh()
+        QShortcut(QKeySequence(Qt.Key_Up), self).activated.connect(
+            lambda: self._cycle_highlighted_layer(-1))
+        QShortcut(QKeySequence(Qt.Key_Down), self).activated.connect(
+            lambda: self._cycle_highlighted_layer(1))
+
         self.refresh()
+
+    def _copy_canvas_to_clipboard(self):
+        QApplication.clipboard().setPixmap(self.canvas.grab())
+
+    def _cycle_highlighted_layer(self, step):
+        # only cycles an active Layers-section selection - a marker (port/source/
+        # boundary) selection, or no selection at all, is left alone since
+        # "the list of layers" doesn't include those
+        if self._highlighted_layer_name not in self._layer_names_ordered:
+            return
+        index = self._layer_names_ordered.index(self._highlighted_layer_name)
+        new_name = self._layer_names_ordered[(index + step) % len(self._layer_names_ordered)]
+        self.set_highlighted_layer(new_name)
+        self._notify_layer_selection_changed()
 
     def _clear_legend(self):
         self._checkboxes = []
@@ -363,6 +401,7 @@ class LayoutPreviewWindow(QDialog):
         self._highlight_zvalue_by_name = {}
         self._legend_layer_rows = {}
         self._layer_layernum_by_name = {}
+        self._layer_names_ordered = []
         # the highlight items themselves were just destroyed by scene.clear()
         # in refresh() (called right before this) - drop the stale references,
         # but keep _highlighted_layer_name itself so it survives a refresh
@@ -640,6 +679,8 @@ class LayoutPreviewWindow(QDialog):
             layer_legend_rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
             for zmin, zmax, color_name, tooltip, group, name in layer_legend_rows:
                 self._add_legend_row(color_name, tooltip, group, layer_name=name)
+            # same top-to-bottom order as the legend - see _cycle_highlighted_layer()
+            self._layer_names_ordered = [name for *_, name in layer_legend_rows]
             self._update_legend_selection_styling()
 
             # marker shapes (EM ports / thermal sources / thermal boundaries),

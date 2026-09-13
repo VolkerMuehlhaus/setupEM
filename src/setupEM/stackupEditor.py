@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QColor, QFontMetrics, QKeySequence, QAction, QFontDatabase,
-    QSyntaxHighlighter, QTextCharFormat, QFont,
+    QSyntaxHighlighter, QTextCharFormat, QFont, QShortcut,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel, QSettings
 
@@ -1060,6 +1060,12 @@ class StackupPreviewWindow(QWidget):
         if legend_widget is not None:
             layout.addWidget(legend_widget)
         self.setLayout(layout)
+
+        # Ctrl+C copies the stackup cross-section (not the legend) to the
+        # clipboard as an image - window-scoped (default QShortcut context) so
+        # it fires regardless of which child widget currently has focus
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(vector_widget.grab()))
 
     def closeEvent(self, event):
         event.ignore()
