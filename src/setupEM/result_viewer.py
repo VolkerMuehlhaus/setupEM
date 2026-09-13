@@ -55,7 +55,9 @@ from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QTreeWidget, QTreeWidgetItem, QPushButton,
     QRadioButton, QButtonGroup, QCheckBox, QSizePolicy, QStyleFactory,
+    QFileDialog, QMessageBox, QMenu,
 )
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QTimer, QProcess
 
 # __package__ is None/"" when this file is run directly rather than imported as part
@@ -300,7 +302,8 @@ def pick_final_result_file(paths):
 class ResultViewerWindow(QDialog):
     """Own top-level window (no Qt parent, WA_DeleteOnClose - same lifecycle as
     StackupEditorWindow in stackupEditor.py) that lists Touchstone files under
-    MainWindow.saved_values['sim_path'] and plots the ones checked."""
+    MainWindow.saved_values['sim_path'], plus any externally added via the
+    "Add..." button, and plots the ones checked."""
 
     def __init__(self, MainWindow):
         super().__init__()
@@ -309,6 +312,7 @@ class ResultViewerWindow(QDialog):
 
         self._target_dir = ''
         self._master_files = []          # sorted absolute paths, last scan
+        self._external_paths = []        # paths added via "Add...", session-only, kept across rescans
         self._checked_paths = set()      # subset of _master_files currently checked
         self._checked_params = {(1, 1)}  # set of (m, n) S-parameters to plot
         self._network_cache = {}         # path -> (mtime, network-like object | None)
@@ -355,10 +359,20 @@ class ResultViewerWindow(QDialog):
         self.include_deembedded_cb.toggled.connect(self._rescan_files)
         filter_layout.addWidget(self.include_deembedded_cb)
         filter_layout.addStretch()
+        self.add_external_btn = QPushButton("Add...")
+        self.add_external_btn.setToolTip(
+            "Add an external Touchstone (.sNp) file, e.g. measured data, for comparison")
+        # match the row's checkbox height rather than the taller Qt default push
+        # button height, so it sits visually level with the filter checkboxes
+        self.add_external_btn.setFixedHeight(self.include_dc_cb.sizeHint().height())
+        self.add_external_btn.clicked.connect(self._on_add_external_clicked)
+        filter_layout.addWidget(self.add_external_btn)
         files_layout.addLayout(filter_layout)
         self.file_list = QTreeWidget()
         self.file_list.setHeaderHidden(True)
         self.file_list.itemChanged.connect(self._on_file_item_changed)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._on_file_context_menu)
         files_layout.addWidget(self.file_list)
         files_group.setLayout(files_layout)
         controls_layout.addWidget(files_group, 2)
@@ -413,6 +427,12 @@ class ResultViewerWindow(QDialog):
         main_layout.addWidget(self.nav_toolbar)
         main_layout.addWidget(self.canvas, 1)
 
+        # Ctrl+C copies the plot itself (not the toolbar/file list/controls) to
+        # the clipboard as an image - window-scoped (default QShortcut context)
+        # so it fires regardless of which child widget currently has focus
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(self.canvas.grab()))
+
     # ---------- Qt event hooks ----------
 
     def showEvent(self, event):
@@ -450,6 +470,10 @@ class ResultViewerWindow(QDialog):
     def _relpath_for_path(self, path):
         """Full relative-to-target-dir path, untruncated - used for the file list,
         which has room to show it in full (or scroll) rather than shortening it."""
+        if path in self._external_paths:
+            # usually lives nowhere near target_dir - a relpath() would just be an
+            # ugly, long "../../.." string, so show the plain filename instead
+            return os.path.basename(path)
         rel = os.path.relpath(path, self._target_dir) if self._target_dir else path
         return rel.replace('\\', '/')
 
@@ -499,16 +523,18 @@ class ResultViewerWindow(QDialog):
         self.file_list.clear()
         self._live_paths = set()
 
+        # target_dir_error is only a fallback message for when there's nothing else
+        # to show - it does NOT stop externally-added files from being offered
+        # below, so comparing two "Add..."-ed files works even with no target
+        # directory set at all (e.g. a fresh/standalone viewer).
+        target_dir_error = None
+        all_files = []
+        self._master_files = []
+
         if not target_dir:
-            self._master_files = []
-            item = QTreeWidgetItem(["No Target Directory set (see Create Model tab)."])
-            item.setFlags(Qt.NoItemFlags)
-            self.file_list.addTopLevelItem(item)
+            target_dir_error = "No Target Directory set (see Create Model tab)."
         elif not os.path.isdir(target_dir):
-            self._master_files = []
-            item = QTreeWidgetItem([f"Target Directory does not exist: {target_dir}"])
-            item.setFlags(Qt.NoItemFlags)
-            self.file_list.addTopLevelItem(item)
+            target_dir_error = f"Target Directory does not exist: {target_dir}"
         else:
             all_files = find_touchstone_files(target_dir)
             self._master_files = self._filtered_files(all_files)
@@ -534,49 +560,70 @@ class ResultViewerWindow(QDialog):
                     if self._live_paths:
                         self._master_files = sorted(set(self._master_files) | self._live_paths)
 
-            if not self._master_files:
-                if all_files:
-                    message = "No files match the current _dc/_deembedded/model filters " \
-                               f"under {target_dir}"
-                else:
-                    message = f"No Touchstone (.sNp) files found under {target_dir}"
-                item = QTreeWidgetItem([message])
-                item.setFlags(Qt.NoItemFlags)
-                self.file_list.addTopLevelItem(item)
+        # Externally-added files ("Add..." button) are folded in regardless of
+        # target_dir - they don't come from the directory scan at all, and aren't
+        # subject to the _dc/_deembedded/model-name filters above either, since the
+        # user explicitly picked them.
+        if self._external_paths:
+            self._master_files = sorted(set(self._master_files) | set(self._external_paths))
+
+        if not self._master_files:
+            if target_dir_error:
+                message = target_dir_error
+            elif all_files:
+                message = "No files match the current _dc/_deembedded/model filters " \
+                           f"under {target_dir}"
             else:
-                # drop checked paths that no longer exist; auto-check the final
-                # result (preferring it over any AMR per-iteration snapshot) if
-                # nothing is checked (e.g. first open), so the window isn't blank
-                self._checked_paths &= set(self._master_files)
-                if not self._checked_paths:
-                    self._checked_paths = {pick_final_result_file(self._master_files)}
+                message = f"No Touchstone (.sNp) files found under {target_dir}"
+            item = QTreeWidgetItem([message])
+            item.setFlags(Qt.NoItemFlags)
+            self.file_list.addTopLevelItem(item)
+        else:
+            # drop checked paths that no longer exist; auto-check the final
+            # result (preferring it over any AMR per-iteration snapshot) if
+            # nothing is checked (e.g. first open), so the window isn't blank
+            self._checked_paths &= set(self._master_files)
+            if not self._checked_paths:
+                self._checked_paths = {pick_final_result_file(self._master_files)}
 
-                # group by each file's immediate parent directory (relative to
-                # target_dir), not a Palace/Elmer-specific convention like
-                # <model>_data, so this stays correct for either output layout.
-                # Files sitting directly in target_dir (parent == "") get no
-                # wrapper group node - they're added straight to the tree.
-                groups = {}
-                for path in self._master_files:
-                    parent = os.path.dirname(self._relpath_for_path(path))
-                    groups.setdefault(parent, []).append(path)
+            # group by each file's immediate parent directory (relative to
+            # target_dir), not a Palace/Elmer-specific convention like
+            # <model>_data, so this stays correct for either output layout.
+            # Files sitting directly in target_dir (parent == "") get no
+            # wrapper group node - they're added straight to the tree. Externally
+            # added files are excluded here (they typically don't live under
+            # target_dir at all) and rendered as their own group below instead.
+            groups = {}
+            for path in self._master_files:
+                if path in self._external_paths:
+                    continue
+                parent = os.path.dirname(self._relpath_for_path(path))
+                groups.setdefault(parent, []).append(path)
 
-                for path in groups.pop("", []):
-                    self.file_list.addTopLevelItem(self._make_file_item(path))
-                for parent in sorted(groups):
-                    group_item = QTreeWidgetItem([parent])
-                    # checkable so the whole group can be checked/unchecked at once
-                    # (propagated to/from its children in _on_file_item_changed);
-                    # not given Qt.ItemIsAutoTristate - propagation is done manually
-                    # below so exactly one _on_control_changed()/redraw happens per
-                    # user action, not one per child
-                    group_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-                    self.file_list.addTopLevelItem(group_item)
-                    for path in groups[parent]:
-                        group_item.addChild(self._make_file_item(path))
-                    self._refresh_group_checkstate(group_item)
+            for path in groups.pop("", []):
+                self.file_list.addTopLevelItem(self._make_file_item(path))
+            for parent in sorted(groups):
+                group_item = QTreeWidgetItem([parent])
+                # checkable so the whole group can be checked/unchecked at once
+                # (propagated to/from its children in _on_file_item_changed);
+                # not given Qt.ItemIsAutoTristate - propagation is done manually
+                # below so exactly one _on_control_changed()/redraw happens per
+                # user action, not one per child
+                group_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                self.file_list.addTopLevelItem(group_item)
+                for path in groups[parent]:
+                    group_item.addChild(self._make_file_item(path))
+                self._refresh_group_checkstate(group_item)
 
-                self.file_list.expandAll()
+            if self._external_paths:
+                external_group = QTreeWidgetItem(["External files (for comparison)"])
+                external_group.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                self.file_list.addTopLevelItem(external_group)
+                for path in self._external_paths:
+                    external_group.addChild(self._make_file_item(path))
+                self._refresh_group_checkstate(external_group)
+
+            self.file_list.expandAll()
 
         self.file_list.blockSignals(False)
         self._on_control_changed()
@@ -585,6 +632,8 @@ class ResultViewerWindow(QDialog):
     def _make_file_item(self, path):
         if path in self._live_paths:
             text = f"⚡ {os.path.basename(os.path.dirname(path))} (live preview, not yet combined)"
+        elif path in self._external_paths:
+            text = f"📄 {os.path.basename(path)} (external)"
         else:
             text = os.path.basename(path)
         item = QTreeWidgetItem([text])
@@ -636,6 +685,49 @@ class ResultViewerWindow(QDialog):
             group_item.setCheckState(0, Qt.Unchecked)
         else:
             group_item.setCheckState(0, Qt.PartiallyChecked)
+
+    # ---------- External files ("Add..." button, for comparing to measured data) ----------
+
+    def _on_add_external_clicked(self):
+        """Browse for and add an arbitrary Touchstone file, e.g. lab-measured data,
+        for overlay comparison against the current model's results. No port-count
+        matching is enforced - _current_common_nports()/_rebuild_parameter_grid()
+        already tolerate mixed port counts among checked files today (they just use
+        the smallest one), and that's the desired behavior here too."""
+        start_dir = self._target_dir if os.path.isdir(self._target_dir) else ""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Add External Touchstone File", start_dir, "Touchstone files (*.s*p);;*.*")
+        if not filename:
+            return
+        filename = filename.replace('\\', '/')
+        try:
+            rf.Network(filename)  # sanity check it's actually a loadable Touchstone file
+        except Exception as exc:
+            QMessageBox.warning(self, "Failed to load file",
+                                 f"Could not read Touchstone file:\n{filename}\n\n{exc}")
+            return
+        if filename not in self._external_paths:
+            self._external_paths.append(filename)
+        self._checked_paths.add(filename)  # auto-check on add, like a freshly-picked final result
+        self._rescan_files()
+
+    def _on_file_context_menu(self, pos):
+        """Right-click menu on the file list - only externally-added rows get a
+        "Remove from list" action; generated results, live-preview rows and group
+        headers aren't removable this way."""
+        item = self.file_list.itemAt(pos)
+        if item is None:
+            return
+        path = item.data(0, Qt.UserRole)
+        if path is None or path not in self._external_paths:
+            return
+        menu = QMenu(self)
+        remove_action = menu.addAction("Remove from list")
+        if menu.exec(self.file_list.viewport().mapToGlobal(pos)) == remove_action:
+            self._external_paths.remove(path)
+            self._checked_paths.discard(path)
+            self._network_cache.pop(path, None)
+            self._rescan_files()
 
     # ---------- Network loading ----------
 

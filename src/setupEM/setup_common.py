@@ -40,14 +40,17 @@ import requests
 import gdspy
 from scipy.interpolate import interp1d
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QLabel, QLineEdit, QComboBox,
     QPushButton, QFileDialog, QMessageBox, QGroupBox,
     QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsRectItem, QToolTip,
     )
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen, QTextDocument
+from PySide6.QtGui import (
+    QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter,
+    QPainter, QPen, QTextDocument, QShortcut, QKeySequence,
+    )
 from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QRectF, QTimer, QSettings, Signal
 
 # we expect gds2palace in the same directory as this code, or installed as module
@@ -1696,6 +1699,12 @@ class PopUpWindow(QDialog):
         layout.addWidget(close_button)
 
         self.setLayout(layout)
+
+        # Ctrl+C copies the stackup cross-section (not the legend/Close button) to
+        # the clipboard as an image - window-scoped (default QShortcut context) so
+        # it fires regardless of which child widget currently has focus
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(self.vector_widget.grab()))
 
 
 # ---------- CREATE MODEL TAB (shared base) ----------
