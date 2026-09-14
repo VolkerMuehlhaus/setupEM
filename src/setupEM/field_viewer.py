@@ -62,7 +62,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
     QSlider, QComboBox, QLineEdit, QStyleFactory,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 
 # __package__ is None/"" when this file is run directly rather than imported as part
 # of the setupEM package, so relative import fails - same dual-mode pattern used
@@ -197,6 +197,56 @@ def _attach_complex_e_magnitude(mesh, source):
     mesh["E_magnitude"] = np.linalg.norm(per_component, axis=1)
 
 
+def _exact_clip_by_axis(mesh, axis, position, sign):
+    """Exact geometric clip on an axis-aligned plane (pv.DataSet.clip()) - cuts
+    every cell straddling the plane and interpolates new points to build a
+    perfectly flat cut face. Precise, but expensive on a large mesh: ~22s on a
+    real 5.3M-point/530K-cell Palace field dump, long enough to freeze the Qt
+    event loop and trigger the OS's "not responding" warning (reported on
+    Ubuntu) on every slider move or axis switch with clipping enabled -
+    that's why FieldViewerWindow always runs this via _ClipWorker on a
+    background thread rather than calling it directly from _redraw().
+
+    A cheaper point-mask + extract_points() alternative (keep/drop whole
+    boundary cells instead of cutting them, ~70x faster on the same dataset)
+    was tried and rejected - it produced a visibly jagged/faceted cut face on
+    this mesh's coarser regions instead of a clean flat one, which matters
+    more here than raw speed for an inspection tool actually being looked at.
+    """
+    base_normal = _AXIS_NORMAL[axis]
+    origin = tuple(position if i == list(base_normal).index(1.0) else 0.0 for i in range(3))
+    normal = tuple(n * sign for n in base_normal)
+    return mesh.clip(normal=normal, origin=origin)
+
+
+class _ClipWorker(QThread):
+    """Runs _exact_clip_by_axis() on a background thread - see that function's
+    docstring for why this can't just run inline in _redraw(). Emits exactly
+    one of succeeded/failed, tagged with the generation number of the
+    _redraw() call that requested it, so a result that's no longer relevant
+    (superseded by a newer request before this one finished) can be told
+    apart from the current one - see FieldViewerWindow._on_clip_succeeded().
+    """
+    succeeded = Signal(object, int)  # (clipped_mesh, generation)
+    failed = Signal(str, int)        # (error_message, generation)
+
+    def __init__(self, mesh, axis, position, sign, generation):
+        super().__init__()
+        self._mesh = mesh
+        self._axis = axis
+        self._position = position
+        self._sign = sign
+        self._generation = generation
+
+    def run(self):
+        try:
+            result = _exact_clip_by_axis(self._mesh, self._axis, self._position, self._sign)
+        except Exception as exc:
+            self.failed.emit(str(exc), self._generation)
+            return
+        self.succeeded.emit(result, self._generation)
+
+
 def _array_magnitudes(values):
     """Reduce a point-data array to per-node magnitude: the vector norm across
     components for a multi-component array (matches VTK's own default coloring
@@ -272,6 +322,17 @@ class FieldViewerWindow(QDialog):
         # this looks like the first mesh" heuristic was firing on every redraw.
         self._camera_needs_reset = True
 
+        # Background clip computation state - see _exact_clip_by_axis()/
+        # _ClipWorker's docstrings for why the clip itself always runs off the
+        # GUI thread. At most one _ClipWorker runs at a time: a _redraw() call
+        # that arrives while one is already running just replaces
+        # _pending_clip_request instead of starting a second thread, and
+        # _redraw_generation lets a completion handler tell whether its result
+        # is still the one currently wanted (see _on_clip_succeeded()).
+        self._clip_thread = None
+        self._pending_clip_request = None
+        self._redraw_generation = 0
+
         self._build_ui()
         self._load_mesh()
         # Same generic starting view for every source: full mesh, no clip - the
@@ -282,6 +343,17 @@ class FieldViewerWindow(QDialog):
         self._on_axis_changed()  # sets slider range for the default axis, then redraws
 
     def closeEvent(self, event):
+        # A running _ClipWorker must not outlive this window - deleting a
+        # running QThread is undefined behavior in Qt. Disconnect first so its
+        # result (arriving after this window is gone) doesn't try to touch
+        # already-torn-down widgets, then wait for it to actually finish -
+        # bounded (a clip does eventually complete) but can briefly delay
+        # closing if the window is closed mid-computation on a large mesh;
+        # still far better than a crash.
+        if self._clip_thread is not None:
+            self._clip_thread.succeeded.disconnect(self._on_clip_succeeded)
+            self._clip_thread.failed.disconnect(self._on_clip_failed)
+            self._clip_thread.wait()
         # VTK render windows need explicit teardown, not just Qt's normal widget
         # cleanup - the PyVista-specific analog of ResultViewerWindow stopping its
         # live-preview timer in closeEvent().
@@ -764,23 +836,68 @@ class FieldViewerWindow(QDialog):
         position_um = position * _POSITION_SCALE_TO_UM.get(self.source, 1.0)
         self.clip_position_label.setText(f"Position: {position_um:.4g} um ({self._current_axis})")
 
-        if self.clip_enabled_cb.isChecked():
-            base_normal = _AXIS_NORMAL[self._current_axis]
-            origin = tuple(position if i == list(base_normal).index(1.0) else 0.0 for i in range(3))
-            # Sign follows the last axis-view button clicked for this axis (see
-            # _set_view()/_clip_sign) - same cut location either way (origin is
-            # unaffected), but flips which side is kept so the cut face faces
-            # whichever side the camera was last pointed at.
-            sign = self._clip_sign.get(self._current_axis, 1)
-            normal = tuple(n * sign for n in base_normal)
-            try:
-                display_mesh = self._full_mesh.clip(normal=normal, origin=origin)
-            except Exception as exc:
-                self.warning_label.setText(f"Clip failed: {exc}")
-                display_mesh = self._full_mesh
-        else:
-            display_mesh = self._full_mesh
+        self._redraw_generation += 1
+        generation = self._redraw_generation
 
+        if self.clip_enabled_cb.isChecked():
+            # Sign follows the last axis-view button clicked for this axis (see
+            # _set_view()/_clip_sign) - same cut location either way, but flips
+            # which side is kept so the cut face faces whichever side the
+            # camera was last pointed at.
+            sign = self._clip_sign.get(self._current_axis, 1)
+            self._request_clip(self._current_axis, position, sign, generation)
+        else:
+            # A clip that's still computing in the background (if any) is now
+            # moot - nothing to hand its result to once it arrives.
+            self._pending_clip_request = None
+            self._apply_display_mesh(self._full_mesh)
+
+    def _request_clip(self, axis, position, sign, generation):
+        """Kick off a background clip for this axis/position/sign, unless one
+        is already running - in that case just remember these as the latest
+        desired parameters (_pending_clip_request) instead of starting a
+        second _ClipWorker. _on_clip_succeeded()/_on_clip_failed() start the
+        pending one, if any, right after the current one finishes - so at most
+        one clip computation is ever in flight, and rapid slider drags/axis
+        switches collapse into "compute the latest state" rather than queuing
+        up every intermediate one.
+        """
+        if self._clip_thread is not None and self._clip_thread.isRunning():
+            self._pending_clip_request = (axis, position, sign, generation)
+            return
+        self._start_clip_thread(axis, position, sign, generation)
+
+    def _start_clip_thread(self, axis, position, sign, generation):
+        self._pending_clip_request = None
+        thread = _ClipWorker(self._full_mesh, axis, position, sign, generation)
+        thread.succeeded.connect(self._on_clip_succeeded)
+        thread.failed.connect(self._on_clip_failed)
+        self._clip_thread = thread
+        thread.start()
+
+    def _on_clip_succeeded(self, clipped_mesh, generation):
+        self._clip_thread = None
+        if generation == self._redraw_generation:
+            self.warning_label.setText("")
+            self._apply_display_mesh(clipped_mesh)
+        self._maybe_start_pending_clip()
+
+    def _on_clip_failed(self, message, generation):
+        self._clip_thread = None
+        if generation == self._redraw_generation:
+            self.warning_label.setText(f"Clip failed: {message}")
+            self._apply_display_mesh(self._full_mesh)
+        self._maybe_start_pending_clip()
+
+    def _maybe_start_pending_clip(self):
+        if self._pending_clip_request is not None:
+            self._start_clip_thread(*self._pending_clip_request)
+
+    def _apply_display_mesh(self, display_mesh):
+        """Color/render display_mesh (the full mesh, or a background thread's
+        clip result) - the part of a redraw that's cheap enough to always run
+        directly on the GUI thread (see _redraw()/_ClipWorker for the parts
+        that aren't)."""
         array_name = self.array_combo.currentText() or None
 
         if self._mesh_actor is not None:
