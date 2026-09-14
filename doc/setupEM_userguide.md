@@ -1,6 +1,6 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-09-01
+Document version: 2026-09-14
 
 ## Contents
 [Result Viewer and Model Fit](#result-viewer-and-model-fit)  
@@ -22,6 +22,7 @@ Document version: 2026-09-01
 [Create Model tab](#create-model-tab)  
 [Result Viewer](#result-viewer)  
 [Model Fit](#model-fit)  
+[3D Field Viewer](#3d-field-viewer)  
 [Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
@@ -56,6 +57,7 @@ setupEM includes two built-in tools for working with simulation results directly
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
+- **A built-in 3D field viewer**, an in-app alternative to external ParaView, with a clip plane, vector-arrow overlay, and per-solver color presets — see chapter "[3D Field Viewer](#3d-field-viewer)".
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
@@ -270,6 +272,16 @@ Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded
 <img src="./png/modelfit2.png" alt="snp2le starting" width="700">
 
 If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
+
+## 3D Field Viewer
+
+Once field-dump results are available, click **View fields (...)...** on the Create Model tab to open them. The label shows which viewer it opens, Built-in or ParaView, matching the setting in Preferences > Viewer.
+
+<img src="./png/fieldviewer2.png" alt="3D field viewer" width="750">
+
+The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
+
+Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If ParaView is selected but not found on your system, setupEM falls back to the built-in viewer automatically.
 
 ## Code tab
 

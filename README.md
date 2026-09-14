@@ -245,13 +245,17 @@ Once field-dump results are available (Palace: set `fdump`; Elmer: enable field 
 
 The built-in viewer has a single, axis-aligned clip plane (X/Y/Z + a position slider, shown in µm) to see a cross-section through the model, rather than a free-orientation drag-widget - **Find max.** jumps the plane straight to the largest value of the currently selected field along that axis. Standard CAD/ParaView-style **+X/-X/+Y/-Y/+Z/-Z** buttons snap the camera to look straight down each axis; the clip plane's kept side follows whichever of these you last used for its axis, so the exposed cut face always faces the camera instead of occasionally showing the model's untouched exterior surface.
 
-The **Field** panel picks which array to color by, defaulting to E-field magnitude (log color scale) for Palace or temperature (linear) for Elmer thermal - the Min/Max fields let you override the color range manually, with a button to reset back to the data's own range. **Display** controls opacity (to see a hotspot through the surrounding material without losing the outer shape as context) and a mesh-edge overlay. If more than one equally-valid result file exists (e.g. Palace's main "driven" field dump and its separate "driven_boundary" one), a **Result File** picker lets you choose between them instead of guessing.
+The **Field** panel picks which array to color by, defaulting to E-field magnitude (log color scale) for Palace and Elmer-as-EM-solver mode, or temperature (linear) for Elmer thermal - the Min/Max fields let you override the color range manually, with a button to reset back to the data's own range. **Display** controls opacity (to see a hotspot through the surrounding material without losing the outer shape as context) and a mesh-edge overlay. If more than one equally-valid result file exists (e.g. Palace's main "driven" field dump and its separate "driven_boundary" one), a **Result File** picker lets you choose between them instead of guessing.
+
+For a vector array (E/B-field, Poynting vector `S`, ...), **Show arrows** overlays direction arrows on top of the color, auto-scaled from the field's own magnitude on a log scale so both weak and strong regions stay visible instead of only the single hottest point - the **Arrow size** slider (0.5% steps) scales them to taste, and also controls how densely they're packed in, since smaller arrows can sit closer together than large ones without turning into a solid block.
+
+<img src="./doc/png/fieldviewer2.png" alt="3D field viewer, vector arrows on the Poynting vector S" width="750">
 
 Choose which viewer **View fields (...)...** opens - **Built-in** (default, needs nothing else installed) or **ParaView** - on **Preferences > Viewer**. If ParaView is selected but not found on your system, setupEM/setupThermal fall back to the built-in viewer automatically, with a message in the Log panel.
 
 <img src="./doc/png/preferences_viewer1.png" alt="3D field viewer preference" width="500">
 
-Also runnable standalone, without the full setupEM/setupThermal GUI, either directly (`python field_viewer.py <file_path> [--source palace|elmer_thermal]`) or via the `fieldViewer` console script installed with the package.
+Also runnable standalone, without the full setupEM/setupThermal GUI, either directly (`python field_viewer.py <file_path> [--source palace|elmer_em|elmer_thermal]`) or via the `fieldViewer` console script installed with the package.
 
 ## Code 
 Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
