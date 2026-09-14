@@ -612,7 +612,17 @@ class LayoutPreviewWindow(QDialog):
                         gds_boundary_layers=dielectrics_list.get_boundary_layers(),
                         mirror=False, offset_x=0, offset_y=0, layernumber_offset=0)
             except (Exception, SystemExit) as e:
-                details = captured_stdout.getvalue().strip() or str(e)
+                # SystemExit carries no useful message of its own (old-style
+                # print(...); exit(...) failures put the real reason only in
+                # what was printed) - but a genuinely raised exception has a
+                # real message that must not be silently dropped just because
+                # something was also printed first (e.g. "Reading GDSII input
+                # file: ...").
+                printed = captured_stdout.getvalue().strip()
+                if isinstance(e, SystemExit):
+                    details = printed or str(e)
+                else:
+                    details = (printed + "\n\n" + str(e)) if printed else str(e)
                 QMessageBox.critical(self, "Error", f"Could not read GDSII layout:\n\n{details}")
                 return
 
