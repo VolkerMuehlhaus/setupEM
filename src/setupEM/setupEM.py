@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, pathlib, ast, webbrowser, argparse, shutil, re, glob, subprocess
+import sys, json, os, ast, webbrowser, argparse, shutil, re, glob, subprocess
 import numpy as np
 import importlib.metadata
 import importlib.util
@@ -58,6 +58,7 @@ if __package__ in (None, ""):
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
+        eval_simple_python_expression, collect_module_level_constants,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -69,6 +70,7 @@ else:
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
+        eval_simple_python_expression, collect_module_level_constants,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -1992,9 +1994,45 @@ class CreateModelTab(CreateModelTabBase):
 
             # Write code to Python file
             pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
+
+            # Refuse to overwrite an imported openEMS model script - setupEM can only
+            # generate Palace/Elmer code and has no way to regenerate an openEMS model.
+            # Normally load_configuration_from_file() already steers the output
+            # elsewhere for such an import (see protected_source_model_path), so this
+            # is a second-layer guard for the case where the user manually re-picks
+            # the same name/directory on the Create Model(s) tab afterwards.
+            protected_path = getattr(self.MainWindow, 'protected_source_model_path', None)
+            if protected_path and os.path.normcase(pymodel_filename) == os.path.normcase(protected_path):
+                QMessageBox.warning(
+                    self, "Create Model",
+                    "This would overwrite the imported openEMS model script:\n\n"
+                    f"{pymodel_filename}\n\n"
+                    "setupEM cannot regenerate an openEMS model, so this write was "
+                    "blocked. Choose a different model name or output directory on "
+                    "the Create Model(s) tab.")
+                return
+
+            # General overwrite protection: ask once per session before clobbering a
+            # pre-existing file we haven't already confirmed/written ourselves. Always
+            # on (not a preference) - once confirmed (or written), later Create Model
+            # clicks to the same path in this session don't ask again, so normal
+            # iterative tuning (tweak -> Create Model -> tweak -> Create Model ...)
+            # isn't interrupted every time.
+            normalized_path = os.path.normcase(pymodel_filename)
+            confirmed_paths = self.MainWindow.confirmed_overwrite_paths
+            if normalized_path not in confirmed_paths and os.path.exists(pymodel_filename):
+                overwrite = QMessageBox.question(
+                    self, "Create Model",
+                    f"This will overwrite the existing file:\n\n{pymodel_filename}\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) == QMessageBox.Yes
+                if not overwrite:
+                    return
+
             with open(pymodel_filename, "w", encoding="utf-8") as f:
                 f.write(code)
                 f.close()
+            confirmed_paths.add(normalized_path)
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
@@ -2990,6 +3028,14 @@ def parse_python_ports_definitions (file_path):
     # 'from_layername': 'Metal3', 'to_layername': 'TopMetal2', 'direction': 'z'},
     # {'portnumber': 2, 'voltage': 0, 'port_Z0': 50, 'source_layernum': 202,
     # 'from_layername': 'Metal3', 'to_layername': 'TopMetal2', 'direction': 'z'}, ... ]
+    #
+    # Simple module-level constants referenced inside simulation_port(...) (e.g.
+    # port_Z0=2*Z0 where "Z0 = 50" is assigned earlier at module top level) are also
+    # resolved - see collect_module_level_constants(). Anything more complex (function
+    # calls, values from loops/conditionals, imports) still falls through to the
+    # "skipped" path below.
+
+    known_constants = collect_module_level_constants(file_path)
 
     # Function to parse the arguments inside simulation_port(...)
     def parse_port_args(arg_str):
@@ -2997,7 +3043,7 @@ def parse_python_ports_definitions (file_path):
         # Wrap the arguments into a fake function call so AST can parse it
         expr = ast.parse(f"f({arg_str})", mode='eval')
         for kw in expr.body.keywords:
-            args[kw.arg] = ast.literal_eval(kw.value)  # safely evaluate literals
+            args[kw.arg] = eval_simple_python_expression(kw.value, known_constants)
         return args
 
     # List to store parsed ports
@@ -3019,21 +3065,24 @@ def parse_python_ports_definitions (file_path):
                 inside = line[start:].rstrip(") \n")  # remove trailing ')'
                 try:
                     ports.append(parse_port_args(inside))
-                except (SyntaxError, ValueError, TypeError):
+                except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
                     # this is a best-effort static text parser, not a real
                     # interpreter - a port built from a variable or computed
-                    # expression (e.g. portnumber=portnumber inside a loop, as
-                    # in some GDS/inductor synthesis scripts) can't be resolved
-                    # by ast.literal_eval. Skip it so the rest of the import
-                    # still succeeds, rather than crashing the whole model load.
+                    # expression that eval_simple_python_expression() can't
+                    # resolve (e.g. portnumber=portnumber inside a loop, as in
+                    # some GDS/inductor synthesis scripts, or a function call)
+                    # is skipped so the rest of the import still succeeds,
+                    # rather than crashing the whole model load.
                     skipped_count += 1
 
     if skipped_count:
         QMessageBox.warning(
             None, "Import Model",
-            f"{skipped_count} port definition(s) use variables or computed "
-            "expressions instead of plain values and could not be imported "
-            "automatically.\n\nAdd them manually on the Ports tab.")
+            f"{skipped_count} port definition(s) use variables, function calls, "
+            "or computed expressions that could not be resolved automatically "
+            "(only simple module-level constants and basic arithmetic like "
+            "2*Z0 are supported) and could not be imported.\n\n"
+            "Add them manually on the Ports tab.")
 
     return ports
 

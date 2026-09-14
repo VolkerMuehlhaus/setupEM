@@ -760,9 +760,45 @@ class CreateModelTab(CreateModelTabBase):
 
             # Write code to Python file
             pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
+
+            # Refuse to overwrite an imported openEMS model script - setupThermal can
+            # only generate Palace/Elmer code and has no way to regenerate an openEMS
+            # model. Normally load_configuration_from_file() already steers the output
+            # elsewhere for such an import (see protected_source_model_path), so this
+            # is a second-layer guard for the case where the user manually re-picks
+            # the same name/directory on the Create Model(s) tab afterwards.
+            protected_path = getattr(self.MainWindow, 'protected_source_model_path', None)
+            if protected_path and os.path.normcase(pymodel_filename) == os.path.normcase(protected_path):
+                QMessageBox.warning(
+                    self, "Create Model",
+                    "This would overwrite the imported openEMS model script:\n\n"
+                    f"{pymodel_filename}\n\n"
+                    "setupThermal cannot regenerate an openEMS model, so this write was "
+                    "blocked. Choose a different model name or output directory on "
+                    "the Create Model(s) tab.")
+                return
+
+            # General overwrite protection: ask once per session before clobbering a
+            # pre-existing file we haven't already confirmed/written ourselves. Always
+            # on (not a preference) - once confirmed (or written), later Create Model
+            # clicks to the same path in this session don't ask again, so normal
+            # iterative tuning (tweak -> Create Model -> tweak -> Create Model ...)
+            # isn't interrupted every time.
+            normalized_path = os.path.normcase(pymodel_filename)
+            confirmed_paths = self.MainWindow.confirmed_overwrite_paths
+            if normalized_path not in confirmed_paths and os.path.exists(pymodel_filename):
+                overwrite = QMessageBox.question(
+                    self, "Create Model",
+                    f"This will overwrite the existing file:\n\n{pymodel_filename}\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) == QMessageBox.Yes
+                if not overwrite:
+                    return
+
             with open(pymodel_filename, "w", encoding="utf-8") as f:
                 f.write(code)
                 f.close()
+            confirmed_paths.add(normalized_path)
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
