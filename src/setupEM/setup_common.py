@@ -149,6 +149,24 @@ def clear_preferences(app_name):
         settings.endGroup()
 
 
+def find_paraview_exe():
+    """Locate a ParaView executable: PATH first, then (Windows only) the usual
+    install locations under Program Files, newest version first. Returns None
+    if not found. Read-only lookup - does not launch anything - so this is safe
+    to call just to check availability (e.g. for the "3D viewer" preference's
+    ParaView-not-installed fallback), not just from _open_in_paraview().
+    """
+    paraview_exe = shutil.which("paraview")
+    if paraview_exe is None and os.name == "nt":
+        candidates = (
+            glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
+            + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
+        )
+        if candidates:
+            paraview_exe = max(candidates, key=os.path.getmtime)
+    return paraview_exe
+
+
 def _read_substrate_variables(filename):
     """Parse a stackup XML file's <Variables> block (if any) into a resolved
        stackup_reader.variables_list, independent of the full read_substrate()/
@@ -2040,16 +2058,7 @@ class CreateModelTabBase(QWidget):
             self.log_area.appendPlainText(not_found_message)
             return
 
-        paraview_exe = shutil.which("paraview")
-        if paraview_exe is None and os.name == "nt":
-            # Not on PATH: fall back to searching the usual install locations, newest first.
-            candidates = (
-                glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
-                + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
-            )
-            if candidates:
-                paraview_exe = max(candidates, key=os.path.getmtime)
-
+        paraview_exe = find_paraview_exe()
         if paraview_exe is None:
             self.log_area.appendPlainText(
                 "⚠️ ParaView not found on PATH. Install it, or add it to PATH, "

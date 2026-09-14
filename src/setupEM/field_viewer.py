@@ -1,0 +1,745 @@
+########################################################################
+#
+# Copyright 2025-2026 Volker Muehlhaus and IHP PDK Authors
+#
+# Licensed under the GNU General Public License, Version 3.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.gnu.org/licenses/gpl-3.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+########################################################################
+
+"""
+field_viewer.py
+
+In-app 3D field result viewer, built on PyVista/pyvistaqt, embedded in one
+window - an alternative to launching external ParaView
+(setup_common.py's _open_in_paraview(), still available unchanged via the
+"View fields in Paraview..."/"View in ParaView" buttons). Reads the same
+.pvd/.pvtu/.vtu files those buttons already locate
+(palace_results.find_paraview_files() / thermal_results.find_thermal_paraview_file()),
+and adds a single axis-aligned clip plane (X/Y/Z + a position slider - not
+PyVista's free-orientation drag-widget, a deliberate UX choice) plus a
+field/array picker defaulting to a per-solver preset (E-field magnitude for
+Palace, temperature for Elmer thermal).
+
+Normally opened from setupEM's/setupThermal's Create Model tab ("View fields
+(3D viewer)..." button, see CreateModelTab.open_field_viewer() in
+setupEM.py/setupThermal.py) - but also runnable standalone, either directly
+(`python field_viewer.py <file_path> [--source palace|elmer_thermal]`) or via
+the `fieldViewer` console script installed with this package (see main()
+below and pyproject.toml).
+
+v1 scope: Palace (setupEM Palace mode) and Elmer thermal (setupThermal) only.
+setupEM's Elmer-as-EM-solver mode is not wired to this viewer yet - its
+field-dump array names have never been verified against a real run.
+"""
+
+import argparse
+import os
+import sys
+
+import numpy as np
+import pyvista as pv
+from pyvistaqt import QtInteractor
+
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
+    QSlider, QComboBox, QLineEdit, QStyleFactory,
+)
+from PySide6.QtCore import Qt
+
+# __package__ is None/"" when this file is run directly rather than imported as part
+# of the setupEM package, so relative import fails - same dual-mode pattern used
+# throughout setupEM.py/setup_common.py/result_viewer.py for sibling imports.
+if __package__ in (None, ""):
+    from palace_results import find_paraview_files
+    from thermal_results import find_thermal_paraview_file
+else:
+    from .palace_results import find_paraview_files
+    from .thermal_results import find_thermal_paraview_file
+
+
+# Axis name -> unit normal vector, for both the clip plane and the slider's bounds lookup.
+_AXIS_NORMAL = {"X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0), "Z": (0.0, 0.0, 1.0)}
+_AXIS_BOUNDS_INDEX = {"X": (0, 1), "Y": (2, 3), "Z": (4, 5)}  # into mesh.bounds
+_AXIS_POINT_INDEX = {"X": 0, "Y": 1, "Z": 2}  # into a mesh.points row
+
+# "Up" vector for the axis-view buttons (_set_view()) - X/Y views use +Z as up
+# (the natural choice when Z is still on-screen), Z views use +Y as up instead
+# (since +Z can't be its own up vector when looking straight down/up the Z axis)
+# - the same convention CAD tools/ParaView use for their standard axis views.
+_VIEW_UP = {"X": (0.0, 0.0, 1.0), "Y": (0.0, 0.0, 1.0), "Z": (0.0, 1.0, 0.0)}
+
+# Slider is an integer widget - this many steps across the mesh's extent on the
+# selected axis gives smooth-feeling dragging without needing float-valued Qt
+# sliders. High resolution matters beyond just "smooth dragging": _move_slider_
+# to_max() sets the slider to the nearest step to a computed position, and that
+# quantization is visible - e.g. a small Elmer thermal domain (~2.3 mm) only got
+# ~2.3 um per step at 1000 steps, enough to visibly miss the actual hotspot by
+# up to half a step. A million steps keeps that error under a nanometer even
+# for a millimeter-scale domain; doesn't affect mouse-drag feel either way,
+# since Qt interpolates a slider continuously with the pointer regardless of
+# its integer step count.
+_SLIDER_STEPS = 1_000_000
+
+# Sources this viewer knows a tailored default array/colormap for. Anything else
+# (not currently reachable from the app, but kept open for standalone use) falls
+# back to the generic "first available array" behavior in _pick_default_array().
+_PALACE = "palace"
+_ELMER_THERMAL = "elmer_thermal"
+
+# Multiplier to convert a mesh's native point coordinates to um, for DISPLAY only
+# (the clip plane's own math stays in native coordinates - only the position
+# label shown to the user is rescaled). The two solvers' field-dump VTUs are NOT
+# in the same native unit:
+#  - Palace: config.json's Model.L0 (e.g. 1e-06) is the factor Palace itself
+#    multiplies its raw mesh coordinates by to get real SI meters for the
+#    physics - i.e. the raw exported coordinates are already in um (confirmed:
+#    a real Palace field dump's bounds, e.g. x in [-134, 50], are exactly
+#    chip-scale um numbers, not 134-meter ones), so no rescale is needed.
+#  - Elmer: writes real SI meters (same convention thermal_results.py's own
+#    _METERS_TO_UM constant already documents and corrects for elsewhere in
+#    this package), so this needs the 1e6 m->um factor.
+_POSITION_SCALE_TO_UM = {_PALACE: 1.0, _ELMER_THERMAL: 1e6}
+
+
+def _load_full_mesh(file_path):
+    """Read file_path (.pvd/.pvtu/.vtu) into one pv.UnstructuredGrid/PolyData.
+
+    pv.read() on a .pvtu/.vtu returns the dataset directly. On a .pvd (Palace's
+    field-dump time/cycle collection), it returns a pv.MultiBlock instead - one
+    block per cycle it decided to expose (confirmed empirically: Palace's own
+    .pvd only ever carries the most recent solved cycle, so this is a 1-block
+    MultiBlock in practice, not a true spatial multi-block split). Take the last
+    block (most recent cycle) rather than combining blocks, since different
+    cycles are different solve states, not spatial partitions - combining them
+    would be physically meaningless.
+    """
+    data = pv.read(file_path)
+    if isinstance(data, pv.MultiBlock):
+        for block in reversed(data):
+            if block is not None:
+                return block
+        raise ValueError(f"No readable block found in {file_path}")
+    return data
+
+
+def _attach_palace_e_magnitude(mesh):
+    """Compute and attach the complex E-field magnitude as point_data['E_magnitude'],
+    if E_real/E_imag are present (Palace's driven-frequency field dump - a phasor,
+    not a literal time-domain field, hence real+imag rather than one vector).
+    Per-component magnitude first (sqrt(real^2+imag^2)), then the vector norm across
+    the 3 components - this is the RMS/peak magnitude of the complex phasor, not
+    just |E_real|. No-op if the arrays aren't present (e.g. an Elmer file, or a
+    Palace file where B/E happen to be missing for some reason) - caller falls
+    back to the generic "first available array" picker in that case.
+    """
+    if "E_real" not in mesh.point_data or "E_imag" not in mesh.point_data:
+        return
+    per_component = np.sqrt(mesh["E_real"] ** 2 + mesh["E_imag"] ** 2)
+    mesh["E_magnitude"] = np.linalg.norm(per_component, axis=1)
+
+
+def _array_magnitudes(values):
+    """Reduce a point-data array to per-node magnitude: the vector norm across
+    components for a multi-component array (matches VTK's own default coloring
+    of e.g. a 3-component field), or the values themselves for a scalar one."""
+    return np.linalg.norm(values, axis=1) if values.ndim > 1 else values
+
+
+def _pick_default_array(mesh, source):
+    """Return (array_name, colormap, log_scale) for the initial view, per source.
+    Falls back to the first available point-data array (any source, including an
+    unrecognized one) if the tailored preset array isn't actually present - same
+    graceful-degradation spirit as the rest of this viewer's array handling.
+
+    E-field magnitude gets a log color scale: near-field magnitude routinely spans
+    many orders of magnitude between a source/sharp-edge hotspot and the rest of
+    the domain (confirmed on a real Palace field dump: 0.23 to 1.1e7, i.e. ~8
+    decades) - a linear scale renders as almost entirely one color, with only the
+    single hottest point visibly distinct. Temperature has no such convention
+    (and Elmer thermal data doesn't show this kind of extreme spread), so it
+    stays linear.
+    """
+    available = list(mesh.point_data.keys())
+    if source == _PALACE and "E_magnitude" in available:
+        return "E_magnitude", "turbo", True
+    if source == _ELMER_THERMAL:
+        temp_key = next((k for k in available if "temp" in k.lower()), None)
+        if temp_key is not None:
+            return temp_key, "coolwarm", False
+    return (available[0], "viridis", False) if available else (None, "viridis", False)
+
+
+# ------------------------------------------------------------------
+# Field Viewer window
+# ------------------------------------------------------------------
+
+class FieldViewerWindow(QDialog):
+    """Own top-level window (no Qt parent, WA_DeleteOnClose - same lifecycle as
+    ResultViewerWindow), showing one field-result file - picked from file_paths,
+    which may hold more than one equally-valid result (e.g. Palace can write both
+    a main "driven" field dump and a separate "driven_boundary" one; neither is
+    inherently the "right" one to default to, so the user picks) - with a single
+    axis-aligned clip plane and a field/array picker."""
+
+    def __init__(self, MainWindow, file_paths, source):
+        super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.MainWindow = MainWindow
+        self.file_paths = list(file_paths)
+        self.file_path = self.file_paths[0]
+        self.source = source
+
+        self._full_mesh = None
+        self._mesh_actor = None
+        self._current_axis = "Z"
+        self._load_error = None
+        # Which side of the clip plane is kept, per axis - +1 (default, matches
+        # the original behavior) keeps the negative side; -1 keeps the positive
+        # side instead. Updated by _set_view() to match whichever axis-view
+        # button was last clicked for that axis, so the exposed cut face always
+        # faces the camera: without this, the "-Z" (etc.) view button showed the
+        # mesh's untouched exterior surface facing the camera instead of the cut
+        # cross-section, since a fixed-direction clip's cut face pointed away
+        # from a below-positioned camera (confirmed visually - "-Z" rendered as
+        # a flat, featureless surface where "+Z" showed the real cross-section).
+        self._clip_sign = {"X": 1, "Y": 1, "Z": 1}
+        # Only the first successful render (or the first one after switching to a
+        # different result file) auto-fits the camera to the mesh - every other
+        # redraw (clip slider/axis, array, opacity, log scale, clim, mesh overlay
+        # toggle, ...) keeps whatever pan/zoom/rotation the user currently has.
+        # Without this, _redraw()'s remove_actor()-then-add_mesh() sequence
+        # leaves the scene briefly actor-less, and PyVista's own "reset camera if
+        # this looks like the first mesh" heuristic was firing on every redraw.
+        self._camera_needs_reset = True
+
+        self._build_ui()
+        self._load_mesh()
+        # Same generic starting view for every source: full mesh, no clip - the
+        # "Find max." button (see _move_slider_to_max()) is one click away for
+        # jumping straight to the hotspot along whichever axis, so there's no
+        # need to preset/guess that at open time, for Elmer thermal or anything
+        # else.
+        self._on_axis_changed()  # sets slider range for the default axis, then redraws
+
+    def closeEvent(self, event):
+        # VTK render windows need explicit teardown, not just Qt's normal widget
+        # cleanup - the PyVista-specific analog of ResultViewerWindow stopping its
+        # live-preview timer in closeEvent().
+        self.plotter.close()
+        super().closeEvent(event)
+
+    # ---------- UI construction ----------
+
+    def _build_ui(self):
+        self.setWindowTitle("Field Viewer")
+        self.resize(1300, 750)
+        main_layout = QVBoxLayout(self)
+
+        controls_layout = QHBoxLayout()
+
+        # Only shown when there's more than one candidate result file (e.g. Palace's
+        # main "driven" field dump vs. its separate "driven_boundary" one - both
+        # equally valid, neither an inherently better default) - see __init__.
+        if len(self.file_paths) > 1:
+            file_group = QGroupBox("Result File")
+            file_layout = QVBoxLayout()
+            self.file_combo = QComboBox()
+            self.file_combo.addItems([self._file_label(p) for p in self.file_paths])
+            self.file_combo.currentIndexChanged.connect(self._on_file_changed)
+            file_layout.addWidget(self.file_combo)
+            file_layout.addStretch()
+            file_group.setLayout(file_layout)
+            controls_layout.addWidget(file_group, 1)
+        else:
+            self.file_combo = None
+
+        # Clip Plane: purely "where/whether to cut" - rendering options that
+        # apply regardless of clipping (opacity, mesh overlay) live in their
+        # own Display group instead, rather than being bundled in here just
+        # because they were added around the same time.
+        clip_group = QGroupBox("Clip Plane")
+        clip_layout = QVBoxLayout()
+        axis_layout = QHBoxLayout()
+        self.axis_radio_x = QRadioButton("X")
+        self.axis_radio_y = QRadioButton("Y")
+        self.axis_radio_z = QRadioButton("Z")
+        self.axis_radio_z.setChecked(True)
+        self.axis_button_group = QButtonGroup(self)
+        for rb in (self.axis_radio_x, self.axis_radio_y, self.axis_radio_z):
+            self.axis_button_group.addButton(rb)
+            axis_layout.addWidget(rb)
+            rb.toggled.connect(self._on_axis_radio_toggled)
+        axis_layout.addStretch()
+        self.find_max_btn = QPushButton("Find max.")
+        self.find_max_btn.setToolTip(
+            "Move the clip plane, along the currently selected axis, to the "
+            "position of the largest value of the currently selected field."
+        )
+        # Compact height (matches the row's checkbox/radio height) rather than
+        # the taller Qt default push button height - see result_viewer.py's
+        # add_external_btn for the same convention.
+        self.find_max_btn.setFixedHeight(self.axis_radio_z.sizeHint().height())
+        self.find_max_btn.setAutoDefault(False)
+        self.find_max_btn.setDefault(False)
+        self.find_max_btn.clicked.connect(self._move_slider_to_max)
+        axis_layout.addWidget(self.find_max_btn)
+        clip_layout.addLayout(axis_layout)
+
+        self.clip_enabled_cb = QCheckBox("Clip enabled")
+        self.clip_enabled_cb.setChecked(False)  # start showing the full, unclipped mesh
+        self.clip_enabled_cb.toggled.connect(self._on_redraw_needed)
+        clip_layout.addWidget(self.clip_enabled_cb)
+
+        self.clip_position_label = QLabel("Position: -")
+        clip_layout.addWidget(self.clip_position_label)
+        self.clip_slider = QSlider(Qt.Horizontal)
+        self.clip_slider.setRange(0, _SLIDER_STEPS)
+        self.clip_slider.setValue(_SLIDER_STEPS // 2)
+        self.clip_slider.valueChanged.connect(self._on_redraw_needed)
+        clip_layout.addWidget(self.clip_slider)
+
+        clip_layout.addStretch()
+        clip_group.setLayout(clip_layout)
+        controls_layout.addWidget(clip_group, 1)
+
+        # Display: general rendering options, independent of clipping - opacity
+        # complements clipping rather than duplicating it (clipping cuts away
+        # geometry to reveal a cross-section, translucency instead lets you see
+        # a hotspot/feature through the surrounding material without losing the
+        # outer shape as context, e.g. a thermal hotspot glowing through the
+        # substrate above it). Same slider+label pattern as layout_preview.py's
+        # opacity control.
+        display_group = QGroupBox("Display")
+        display_layout = QVBoxLayout()
+        self.opacity_label = QLabel("Opacity: 100%")
+        display_layout.addWidget(self.opacity_label)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        display_layout.addWidget(self.opacity_slider)
+        self.show_edges_cb = QCheckBox("Overlay mesh")
+        self.show_edges_cb.setChecked(False)
+        self.show_edges_cb.toggled.connect(self._on_redraw_needed)
+        display_layout.addWidget(self.show_edges_cb)
+        display_layout.addStretch()
+        display_group.setLayout(display_layout)
+        controls_layout.addWidget(display_group, 1)
+
+        field_group = QGroupBox("Field")
+        field_layout = QVBoxLayout()
+        self.array_combo = QComboBox()
+        self.array_combo.currentTextChanged.connect(self._on_array_changed)
+        field_layout.addWidget(self.array_combo)
+        self.log_scale_cb = QCheckBox("Log color scale")
+        self.log_scale_cb.toggled.connect(self._on_redraw_needed)
+        field_layout.addWidget(self.log_scale_cb)
+
+        clim_layout = QHBoxLayout()
+        clim_layout.addWidget(QLabel("Min:"))
+        self.clim_min_edit = QLineEdit()
+        self.clim_min_edit.editingFinished.connect(self._on_redraw_needed)
+        clim_layout.addWidget(self.clim_min_edit)
+        clim_layout.addWidget(QLabel("Max:"))
+        self.clim_max_edit = QLineEdit()
+        self.clim_max_edit.editingFinished.connect(self._on_redraw_needed)
+        clim_layout.addWidget(self.clim_max_edit)
+        field_layout.addLayout(clim_layout)
+        self.clim_reset_btn = QPushButton("Reset range to data")
+        # Without this, Qt treats this as the dialog's default button (the only
+        # QPushButton in the window) and fires it on Enter from *any* focused
+        # widget - including clim_min_edit/clim_max_edit, so confirming a typed
+        # value with Enter was immediately undoing it via an unwanted reset.
+        self.clim_reset_btn.setAutoDefault(False)
+        self.clim_reset_btn.setDefault(False)
+        self.clim_reset_btn.clicked.connect(self._on_clim_reset_clicked)
+        field_layout.addWidget(self.clim_reset_btn)
+
+        field_layout.addStretch()
+        field_group.setLayout(field_layout)
+        controls_layout.addWidget(field_group, 1)
+
+        # Standard CAD/ParaView-style axis views - jump the camera to look
+        # straight down +/-X/Y/Z, rather than needing to drag-rotate to a
+        # specific orientation by hand. Rightmost group in this row, so it
+        # reads as the top-right pane of the window.
+        view_group = QGroupBox("View")
+        view_grid = QGridLayout()
+        for col, axis in enumerate(("X", "Y", "Z")):
+            for row, sign in enumerate((1, -1)):
+                label = f"{'+' if sign > 0 else '-'}{axis}"
+                btn = QPushButton(label)
+                btn.setToolTip(f"Look along the {axis} axis from the {'positive' if sign > 0 else 'negative'} side")
+                btn.setFixedHeight(self.axis_radio_z.sizeHint().height())
+                btn.setAutoDefault(False)
+                btn.setDefault(False)
+                btn.clicked.connect(lambda checked=False, a=axis, s=sign: self._set_view(a, s))
+                view_grid.addWidget(btn, row, col)
+        view_layout = QVBoxLayout()
+        view_layout.addLayout(view_grid)
+        view_layout.addStretch()
+        view_group.setLayout(view_layout)
+        controls_layout.addWidget(view_group, 1)
+
+        main_layout.addLayout(controls_layout)
+
+        # Full-width banner below the control groups (not squeezed into one of
+        # their columns) - load errors/clip failures/etc. aren't tied to any one
+        # group, and a fixed-width column mostly sitting empty wasted space.
+        self.warning_label = QLabel("")
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet("color: #b00000;")
+        main_layout.addWidget(self.warning_label)
+
+        self.plotter = QtInteractor(self)
+        main_layout.addWidget(self.plotter, 1)
+
+    # ---------- Result file picker ----------
+
+    @staticmethod
+    def _file_label(path):
+        """<parent folder>/<filename> - enough to tell e.g. Palace's "driven" and
+        "driven_boundary" collections apart at a glance, without the full path."""
+        return f"{os.path.basename(os.path.dirname(path))}/{os.path.basename(path)}"
+
+    def _on_file_changed(self, index):
+        if index < 0 or index >= len(self.file_paths):
+            return
+        self.file_path = self.file_paths[index]
+        self._load_error = None
+        self.warning_label.setText("")
+        # A different result file can have entirely different geometry/bounds
+        # (e.g. Palace's "driven" vs. "driven_boundary") - unlike every other
+        # control in this window, this is a good reason to re-fit the camera
+        # rather than keep the previous file's pan/zoom/rotation.
+        self._camera_needs_reset = True
+        self._load_mesh()
+        self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
+
+    # ---------- Mesh loading ----------
+
+    def _load_mesh(self):
+        self.setWindowTitle(f"Field Viewer - {self._file_label(self.file_path)}")
+        try:
+            self._full_mesh = _load_full_mesh(self.file_path)
+        except Exception as exc:
+            self._load_error = str(exc)
+            self.warning_label.setText(f"Failed to load {self.file_path}:\n{exc}")
+            self._full_mesh = None
+            return
+
+        if self.source == _PALACE:
+            _attach_palace_e_magnitude(self._full_mesh)
+
+        available = list(self._full_mesh.point_data.keys())
+        self.array_combo.blockSignals(True)
+        self.array_combo.clear()
+        self.array_combo.addItems(available)
+        self.array_combo.blockSignals(False)
+
+        default_array, default_cmap, default_log_scale = _pick_default_array(self._full_mesh, self.source)
+        self._current_cmap = default_cmap
+        self.log_scale_cb.blockSignals(True)
+        self.log_scale_cb.setChecked(default_log_scale)
+        self.log_scale_cb.blockSignals(False)
+        if default_array is not None:
+            self.array_combo.setCurrentText(default_array)
+            # Explicit call, not just relying on currentTextChanged above: that
+            # signal doesn't fire if default_array happens to already be the
+            # combo's current text (e.g. only one array available), so this
+            # can't be the only place _reset_clim_range() gets called.
+            self._reset_clim_range()
+        elif not available:
+            self.warning_label.setText(
+                f"No point-data arrays found in {self.file_path} - nothing to color by."
+            )
+
+    # ---------- Axis / clip plane ----------
+
+    def _on_axis_radio_toggled(self, checked):
+        if not checked:
+            return  # QButtonGroup fires toggled(False) for the button losing selection too
+        self._on_axis_changed()
+
+    def _current_axis_name(self):
+        if self.axis_radio_x.isChecked():
+            return "X"
+        if self.axis_radio_y.isChecked():
+            return "Y"
+        return "Z"
+
+    def _on_axis_changed(self):
+        self._current_axis = self._current_axis_name()
+        # Recenter the slider on the mesh's midpoint for the new axis, then redraw -
+        # each axis has its own real-world extent, so the previous axis's slider
+        # position has no meaningful equivalent on the new one.
+        self.clip_slider.blockSignals(True)
+        self.clip_slider.setValue(_SLIDER_STEPS // 2)
+        self.clip_slider.blockSignals(False)
+        self._redraw()
+
+    def _slider_value_to_position(self):
+        """Map the slider's integer [0, _SLIDER_STEPS] range to a real coordinate
+        on the current axis, from the loaded mesh's own bounding box."""
+        if self._full_mesh is None:
+            return 0.0
+        lo_idx, hi_idx = _AXIS_BOUNDS_INDEX[self._current_axis]
+        lo, hi = self._full_mesh.bounds[lo_idx], self._full_mesh.bounds[hi_idx]
+        fraction = self.clip_slider.value() / _SLIDER_STEPS
+        return lo + fraction * (hi - lo)
+
+    def _on_redraw_needed(self, _value=None):
+        self._redraw()
+
+    def _on_opacity_changed(self, value):
+        self.opacity_label.setText(f"Opacity: {value}%")
+        self._redraw()
+
+    # ---------- Axis views ----------
+
+    def _set_view(self, axis, sign):
+        """Point the camera straight down (sign=-1) or up (sign=+1) the given
+        axis at the mesh's center - e.g. "+X" looks from the positive-X side
+        toward the origin. Deliberately re-fits the camera (unlike every other
+        control in this window, which preserves pan/zoom/rotation - see
+        _camera_needs_reset) since jumping to a named axis view is itself a
+        deliberate "look at it this way instead" action, not an incidental
+        side effect of changing an unrelated setting.
+
+        Also remembers this as the clip plane's preferred "kept side" for this
+        axis (see _clip_sign) and re-clips accordingly if clipping is active on
+        the same axis, so the exposed cut face faces the camera you just
+        switched to, rather than the clip's cut face pointing away from a
+        newly-viewed side and showing the mesh's untouched exterior instead.
+        """
+        if self._full_mesh is None:
+            return
+        self._clip_sign[axis] = sign
+        center = np.array(self._full_mesh.center)
+        direction = np.array(_AXIS_NORMAL[axis]) * sign
+        # Arbitrary distance along the view direction - reset_camera() right
+        # after corrects it to whatever actually fits the mesh, while keeping
+        # this direction/up vector (confirmed: reset_camera() preserves the
+        # camera's current viewing direction, it only refits the distance).
+        distance = max(self._full_mesh.length, 1.0) * 3.0
+        camera_position = tuple(center + direction * distance)
+        self.plotter.camera_position = [camera_position, tuple(center), _VIEW_UP[axis]]
+        self.plotter.reset_camera()
+        self._redraw()  # re-clips using the (possibly just-changed) sign for this axis, then renders
+
+    def _move_slider_to_max(self):
+        """Move the clip slider, along the currently selected axis, to the
+        position of the largest value of the currently selected field array,
+        and enable clipping if it isn't already - so the resulting
+        cross-section is immediately visible. Always searches the full
+        (unclipped) mesh, not just whatever's currently displayed, so this
+        finds the true global max regardless of the current clip state - e.g.
+        clicking "Find max." again after clipping doesn't just find the max of
+        what's left on the visible side. Used both for "Find max." (any axis,
+        any array, on demand) and, from __init__, to preset the Elmer thermal
+        view at the hotspot on open (Z axis, at that point). A no-op (leaves
+        the view as-is) if the array/data needed isn't there for some reason,
+        rather than leaving the view in a half-set state.
+        """
+        array_name = self.array_combo.currentText()
+        if self._full_mesh is None or not array_name or array_name not in self._full_mesh.point_data:
+            return
+        magnitudes = _array_magnitudes(self._full_mesh[array_name])
+        if magnitudes.size == 0:
+            return
+
+        point_index = _AXIS_POINT_INDEX[self._current_axis]
+        max_position = self._full_mesh.points[int(np.argmax(magnitudes)), point_index]
+        lo_idx, hi_idx = _AXIS_BOUNDS_INDEX[self._current_axis]
+        lo, hi = self._full_mesh.bounds[lo_idx], self._full_mesh.bounds[hi_idx]
+        fraction = (max_position - lo) / (hi - lo) if hi > lo else 0.5
+        fraction = min(max(fraction, 0.0), 1.0)
+
+        self.clip_slider.blockSignals(True)
+        self.clip_slider.setValue(round(fraction * _SLIDER_STEPS))
+        self.clip_slider.blockSignals(False)
+        self.clip_enabled_cb.blockSignals(True)
+        self.clip_enabled_cb.setChecked(True)
+        self.clip_enabled_cb.blockSignals(False)
+        self._redraw()
+
+    # ---------- Field/array picker ----------
+
+    def _on_array_changed(self, _text=None):
+        self._reset_clim_range()
+        self._redraw()
+
+    def _reset_clim_range(self):
+        """(Re-)populate the Min/Max fields from the currently selected array's
+        actual data range - always from the full, unclipped mesh (not whatever's
+        currently displayed under an active clip), so the range stays a stable
+        reference independent of where the clip plane happens to sit, and doesn't
+        silently narrow just because the clip cropped out the array's extremes.
+        Called on load and whenever the array selection changes (a different
+        array has a different natural range); NOT called on every redraw, so
+        manually-entered min/max values are left alone across clip/axis changes.
+        """
+        array_name = self.array_combo.currentText()
+        if self._full_mesh is None or not array_name or array_name not in self._full_mesh.point_data:
+            self.clim_min_edit.setText("")
+            self.clim_max_edit.setText("")
+            return
+        magnitudes = _array_magnitudes(self._full_mesh[array_name])
+        if magnitudes.size == 0:
+            self.clim_min_edit.setText("")
+            self.clim_max_edit.setText("")
+            return
+        self.clim_min_edit.setText(f"{magnitudes.min():.6g}")
+        self.clim_max_edit.setText(f"{magnitudes.max():.6g}")
+
+    def _on_clim_reset_clicked(self):
+        self._reset_clim_range()
+        self._redraw()
+
+    def _get_clim(self):
+        """(min, max) parsed from the Min/Max fields, or None to let PyVista
+        auto-scale from the currently displayed mesh (matches the behavior before
+        this control existed). Invalid/empty text, or min >= max, both fall back
+        to None rather than raising or blocking the redraw - VTK's own clim
+        requires min < max, and a typo here shouldn't break the view."""
+        try:
+            clim_min = float(self.clim_min_edit.text())
+            clim_max = float(self.clim_max_edit.text())
+        except ValueError:
+            return None
+        if clim_min >= clim_max:
+            return None
+        return (clim_min, clim_max)
+
+    # ---------- Redraw ----------
+
+    def _redraw(self):
+        if self._full_mesh is None:
+            return
+
+        position = self._slider_value_to_position()
+        position_um = position * _POSITION_SCALE_TO_UM.get(self.source, 1.0)
+        self.clip_position_label.setText(f"Position: {position_um:.4g} um ({self._current_axis})")
+
+        if self.clip_enabled_cb.isChecked():
+            base_normal = _AXIS_NORMAL[self._current_axis]
+            origin = tuple(position if i == list(base_normal).index(1.0) else 0.0 for i in range(3))
+            # Sign follows the last axis-view button clicked for this axis (see
+            # _set_view()/_clip_sign) - same cut location either way (origin is
+            # unaffected), but flips which side is kept so the cut face faces
+            # whichever side the camera was last pointed at.
+            sign = self._clip_sign.get(self._current_axis, 1)
+            normal = tuple(n * sign for n in base_normal)
+            try:
+                display_mesh = self._full_mesh.clip(normal=normal, origin=origin)
+            except Exception as exc:
+                self.warning_label.setText(f"Clip failed: {exc}")
+                display_mesh = self._full_mesh
+        else:
+            display_mesh = self._full_mesh
+
+        array_name = self.array_combo.currentText() or None
+
+        if self._mesh_actor is not None:
+            self.plotter.remove_actor(self._mesh_actor, render=False)
+            self._mesh_actor = None
+
+        if array_name and array_name in display_mesh.point_data:
+            magnitudes = _array_magnitudes(display_mesh[array_name])
+            clim = self._get_clim()
+            # log_scale needs strictly-positive data (log of <=0 is undefined) - a
+            # multi-component array (e.g. E_real) gets VTK-default-magnitude
+            # colored, which is >=0, but guard the effective lower bound anyway
+            # (the manual clim min if set, else the displayed data's own min)
+            # rather than trust the checkbox blindly, avoiding a VTK error/blank
+            # render from a manually-entered clim that includes zero/negative.
+            lower_bound = clim[0] if clim is not None else (magnitudes.min() if magnitudes.size else 0)
+            use_log = bool(self.log_scale_cb.isChecked() and lower_bound > 0)
+            opacity = self.opacity_slider.value() / 100.0
+            show_edges = self.show_edges_cb.isChecked()
+            self._mesh_actor = self.plotter.add_mesh(
+                display_mesh, scalars=array_name, cmap=self._current_cmap,
+                show_edges=show_edges, log_scale=use_log, clim=clim, opacity=opacity,
+                scalar_bar_args={"title": array_name}, reset_camera=False,
+            )
+        else:
+            opacity = self.opacity_slider.value() / 100.0
+            show_edges = self.show_edges_cb.isChecked()
+            self._mesh_actor = self.plotter.add_mesh(
+                display_mesh, color="lightgrey", opacity=opacity, show_edges=show_edges,
+                reset_camera=False)
+
+        # add_mesh(..., reset_camera=False) above means PyVista never auto-fits the
+        # camera on its own (it otherwise would, since remove_actor() just left the
+        # scene momentarily empty) - so do it ourselves, but only once per mesh
+        # (first load, or after switching to a different result file), not on every
+        # redraw, so the user's pan/zoom/rotation survives toggling clip/opacity/
+        # mesh-overlay/array/etc.
+        if self._camera_needs_reset:
+            self.plotter.reset_camera()
+            self._camera_needs_reset = False
+
+        self.plotter.render()
+
+
+# ------------------------------------------------------------------
+# Standalone launch (python field_viewer.py <file_path> [--source ...], or
+# the fieldViewer console script - see pyproject.toml)
+# ------------------------------------------------------------------
+
+class _StandaloneMainWindow:
+    """Minimal stand-in for the real setupEM/setupThermal MainWindow, used only
+    when this module is run on its own. FieldViewerWindow only needs a MainWindow
+    argument for parity with ResultViewerWindow's constructor shape - it doesn't
+    actually read anything off it today."""
+    APP_NAME = "Field Viewer"
+
+
+def main():
+    app = QApplication(sys.argv)
+    if sys.platform.startswith("win"):
+        # matches setupEM.py's/setupThermal.py's/result_viewer.py's main() - without
+        # this, Qt's default style on Windows looks visibly different from the full app
+        app.setStyle(QStyleFactory.create("Windows"))
+
+    parser = argparse.ArgumentParser(description="Standalone 3D field result viewer")
+    parser.add_argument("file_path", nargs="?",
+                         help="path to a .pvd/.pvtu/.vtu field-result file. If omitted, "
+                              "use --run-path with --source to resolve one automatically.")
+    parser.add_argument("--run-path",
+                         help="a *_data run directory to search for field-result files "
+                              "in, instead of passing file_path directly")
+    parser.add_argument("--source", choices=[_PALACE, _ELMER_THERMAL], default=_PALACE,
+                         help="which default array/colormap preset to use (default: palace)")
+    args = parser.parse_args()
+
+    file_paths = [args.file_path] if args.file_path else []
+    if not file_paths and args.run_path:
+        if args.source == _PALACE:
+            model_basename = os.path.basename(os.path.normpath(args.run_path)).removesuffix("_data")
+            candidates = find_paraview_files(args.run_path, model_basename)
+        else:
+            candidates = [find_thermal_paraview_file(args.run_path)]
+        file_paths = [c for c in candidates if c]
+
+    if not file_paths:
+        parser.error("no file_path given, and none could be resolved from --run-path")
+
+    window = FieldViewerWindow(_StandaloneMainWindow(), file_paths, args.source)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

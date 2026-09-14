@@ -59,6 +59,7 @@ if __package__ in (None, ""):
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
+        find_paraview_exe,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -71,6 +72,7 @@ else:
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
+        find_paraview_exe,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -280,8 +282,8 @@ class FrequenciesTab(QWidget):
             else:
                 saved_values.pop("fdump",None)
             # don't touch saved_values["fdump_enabled"] here either, same reasoning
-        # "View fields in Paraview" is only relevant once fdump is set
-        self.MainWindow.create_model_tab._update_paraview_button_visibility()
+        # "View fields ..." is only relevant once fdump is set
+        self.MainWindow.create_model_tab._update_viewer_button()
 
         # if fstart == fstop == fdump or fstart == fstop == fstep, then remove fstart, fstop
         if fstart is not None and fstop is not None and fstart == fstop:
@@ -1520,18 +1522,22 @@ class CreateModelTab(CreateModelTabBase):
         self.model_fit_btn.clicked.connect(self.open_model_fit)
         self.buttons_grid.addWidget(self.model_fit_btn, row, 1)
 
-        # "View fields in Paraview" opens field-dump data (Palace fdump / Elmer EM
-        # fields*.vtu), a separate row since it's independent of the S-parameter
-        # viewer/model fit above. Only meaningful when fdump is set (otherwise there's
-        # never any field data to open), so it's hidden rather than shown greyed-out -
-        # kept in sync with saved_values['fdump'] via _update_paraview_button_visibility(),
-        # called from here, from load_values() (project/model import), and from
-        # FrequenciesTab.save_values() (live edits to the fdump field).
+        # "View fields ..." opens field-dump data (Palace fdump / Elmer EM
+        # fields*.vtu) in whichever viewer Preferences > Create Model > "3D field
+        # viewer" selects - built-in (embedded PyVista) or external ParaView, see
+        # open_viewer(). A separate row since it's independent of the S-parameter
+        # viewer/model fit above. Only meaningful when fdump is set (otherwise
+        # there's never any field data to open), so it's hidden rather than shown
+        # greyed-out - kept in sync with saved_values['fdump'] via
+        # _update_viewer_button(), called from here, from load_values() (project/
+        # model import), and from FrequenciesTab.save_values() (live edits to the
+        # fdump field). Its label is also kept in sync there and in
+        # apply_preference_visibility() (Preferences dialog live-update).
         row = self.buttons_grid.rowCount()
-        self.paraview_btn = QPushButton("🖼️ View fields in Paraview...")
-        self.paraview_btn.clicked.connect(self.launch_paraview)
-        self.buttons_grid.addWidget(self.paraview_btn, row, 0)
-        self._update_paraview_button_visibility()
+        self.viewer_btn = QPushButton()
+        self.viewer_btn.clicked.connect(self.open_viewer)
+        self.buttons_grid.addWidget(self.viewer_btn, row, 0)
+        self._update_viewer_button()
 
         # Live solver-progress status line, below the log area. Palace-only: visibility is
         # driven by MainWindow.setPalaceMode()/setElmerMode() combined with the
@@ -1550,6 +1556,7 @@ class CreateModelTab(CreateModelTabBase):
         self.model_fit_btn.setVisible(enable_fit)
         enable_status = get_preference_bool(self.MainWindow.APP_NAME, "enable_status_bar", True)
         self.status_line.setVisible(enable_status and self.MainWindow.PalaceMode)
+        self._update_viewer_button_label()
 
     # --- Live Palace solver status line ------------------------------------------------
     #
@@ -1896,26 +1903,68 @@ class CreateModelTab(CreateModelTabBase):
         summary = build_results_summary(run_path, saved_values['model_basename'])
         self.log_area.appendPlainText("\n" + summary + "\n")
 
-    def _update_paraview_button_visibility(self):
+    def _update_viewer_button(self):
         if self.MainWindow.ElmerMode:
             visible = bool(saved_values.get('fdump_enabled'))
         else:
             visible = bool(saved_values.get('fdump'))
-        self.paraview_btn.setVisible(visible)
+        self.viewer_btn.setVisible(visible)
+        self._update_viewer_button_label()
+
+    def _update_viewer_button_label(self):
+        # Elmer-as-EM-solver mode has no built-in-viewer support (see
+        # open_field_viewer()'s docstring), so it always means ParaView there,
+        # regardless of the Preferences > Create Model > "3D field viewer"
+        # setting - no point labeling a choice that isn't actually offered.
+        if self.MainWindow.ElmerMode:
+            self.viewer_btn.setText("🖼️ View fields in ParaView...")
+            return
+        viewer_label = "ParaView" if self._viewer_preference() == "paraview" else "Built-in"
+        self.viewer_btn.setText(f"🖼️ View fields ({viewer_label})...")
+
+    def _viewer_preference(self):
+        return get_preference(self.MainWindow.APP_NAME, "viewer_3d", "builtin")
 
     def load_values(self):
         super().load_values()
-        self._update_paraview_button_visibility()
+        self._update_viewer_button()
+
+    def _resolve_palace_field_files(self):
+        """(file_paths, not_found_message) for Palace's field-dump output - shared
+        by launch_paraview() (external ParaView) and open_field_viewer() (in-app
+        PyVista viewer), so both use the exact same file resolution."""
+        run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+        file_paths = find_paraview_files(run_path, saved_values['model_basename'])
+        not_found = (
+            f"⚠️ No Palace field-dump output found under "
+            f"{find_output_dir(run_path, saved_values['model_basename'])}\n"
+            "(set fdump to specific frequencies before running the simulation)\n"
+        )
+        return file_paths, not_found
+
+    def open_viewer(self):
+        """Dispatch "View fields ..." to whichever viewer applies - the single
+        entry point the merged button calls (see _update_viewer_button_label()
+        for how its text is kept in sync with this same logic)."""
+        if self.MainWindow.ElmerMode:
+            self.launch_paraview()  # only option for this source, see that label logic
+            return
+        if self._viewer_preference() == "paraview":
+            if find_paraview_exe() is not None:
+                self.launch_paraview()
+                return
+            self.log_area.appendPlainText(
+                "⚠️ ParaView is selected as the 3D viewer in Preferences, but wasn't "
+                "found on this system (checked PATH and the usual install locations). "
+                "Falling back to the built-in viewer. Install ParaView, add it to "
+                "PATH, or switch back to \"Built-in\" under Preferences > Create "
+                "Model > 3D field viewer to avoid this message.\n"
+            )
+        self.open_field_viewer()
 
     def launch_paraview(self):
         if self.MainWindow.PalaceMode:
-            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
-            file_paths = find_paraview_files(run_path, saved_values['model_basename'])
-            not_found = (
-                f"⚠️ No Palace field-dump output found under "
-                f"{find_output_dir(run_path, saved_values['model_basename'])}\n"
-                "(set fdump to specific frequencies before running the simulation)\n"
-            )
+            file_paths, not_found = self._resolve_palace_field_files()
         else:
             run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
             # Output File Name = File "fields" has no path prefix, so Elmer resolves it
@@ -1936,6 +1985,39 @@ class CreateModelTab(CreateModelTabBase):
                 "(enable field dump before running the simulation)\n"
             )
         self._open_in_paraview(file_paths, not_found)
+
+    def open_field_viewer(self):
+        """Open the in-app PyVista 3D field viewer on Palace's field-dump output.
+
+        Palace mode only for v1 - Elmer-as-EM-solver mode's field-dump array
+        names have never been verified against a real run, so this button stays
+        hidden there (see _update_paraview_button_visibility()) rather than risk
+        a tailored preset silently picking the wrong/nonexistent array.
+        """
+        if __package__ in (None, ""):
+            from field_viewer import FieldViewerWindow
+        else:
+            from .field_viewer import FieldViewerWindow
+
+        if self.MainWindow.field_viewer_window is not None:
+            self.MainWindow.field_viewer_window.raise_()
+            self.MainWindow.field_viewer_window.activateWindow()
+            return
+
+        file_paths, not_found = self._resolve_palace_field_files()
+        if not file_paths:
+            self.log_area.appendPlainText(not_found)
+            return
+
+        # find_paraview_files() can return more than one .pvd - e.g. Palace also
+        # writes a separate "driven_boundary" collection alongside the main "driven"
+        # one. Both are equally valid results to look at (boundary-only vs. full
+        # volumetric field), so hand the whole list to the viewer and let it offer
+        # a picker rather than silently guessing which one the user wants.
+        self.MainWindow.field_viewer_window = FieldViewerWindow(self.MainWindow, file_paths, "palace")
+        self.MainWindow.field_viewer_window.destroyed.connect(
+            lambda: setattr(self.MainWindow, "field_viewer_window", None))
+        self.MainWindow.field_viewer_window.show()
 
     def on_finished(self, exit_code, exit_status):
         super().on_finished(exit_code, exit_status)
@@ -2596,7 +2678,7 @@ class PreferencesDialog(QDialog):
         palace_form.addStretch()
         self.tabs.addTab(palace_widget, "Palace")
 
-        # ---------- Create Model tab ----------
+        # ---------- Viewer tab ----------
         create_widget = QWidget()
         create_form = QVBoxLayout(create_widget)
         create_form.setAlignment(Qt.AlignTop)
@@ -2608,8 +2690,29 @@ class PreferencesDialog(QDialog):
         self.enable_status_bar_checkbox.setChecked(get_preference_bool(self.app_name, "enable_status_bar", True))
         create_form.addWidget(self.enable_status_bar_checkbox)
         self._reset_targets.append((self.enable_status_bar_checkbox, "enable_status_bar", True, "bool"))
+
+        # Which viewer "View fields ..." opens - built-in (embedded PyVista, Palace
+        # mode only for now) or external ParaView (works for both Palace and Elmer-
+        # as-EM-solver field dumps). Falls back to the built-in viewer, with a
+        # message, if ParaView is set here but isn't actually found on this system
+        # (see CreateModelTab.open_viewer()) - not enforced here, since ParaView
+        # availability can change without reopening Preferences.
+        viewer_row = QHBoxLayout()
+        viewer_label = QLabel("3D field viewer")
+        viewer_label.setFixedWidth(label_width)
+        viewer_row.addWidget(viewer_label)
+        self.viewer_3d_combo = QComboBox()
+        self.viewer_3d_combo.addItem("Built-in", "builtin")
+        self.viewer_3d_combo.addItem("ParaView", "paraview")
+        current_viewer = get_preference(self.app_name, "viewer_3d", "builtin")
+        combo_index = self.viewer_3d_combo.findData(current_viewer)
+        self.viewer_3d_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+        viewer_row.addWidget(self.viewer_3d_combo)
+        create_form.addLayout(viewer_row)
+        self._reset_targets.append((self.viewer_3d_combo, "viewer_3d", "builtin", "combo"))
+
         create_form.addStretch()
-        self.tabs.addTab(create_widget, "Create Model")
+        self.tabs.addTab(create_widget, "Viewer")
 
         # ---------- Simplify GDS tab ----------
         simplify_widget = QWidget()
@@ -2672,6 +2775,9 @@ class PreferencesDialog(QDialog):
                 widget.setText(str(default))
             elif kind == "bool":
                 widget.setChecked(bool(default))
+            elif kind == "combo":
+                combo_index = widget.findData(default)
+                widget.setCurrentIndex(combo_index if combo_index >= 0 else 0)
         # live-apply immediately (matches what accept() does), so the running
         # app reflects the reset right away rather than needing OK afterward
         self.MainWindow.create_model_tab.apply_preference_visibility()
@@ -2737,6 +2843,7 @@ class PreferencesDialog(QDialog):
         set_preference(self.app_name, "palace_max_ram_gb", self.palace_max_ram_edit.text())
         set_preference(self.app_name, "enable_model_fit_button", self.enable_model_fit_checkbox.isChecked())
         set_preference(self.app_name, "enable_status_bar", self.enable_status_bar_checkbox.isChecked())
+        set_preference(self.app_name, "viewer_3d", self.viewer_3d_combo.currentData())
         set_preference(self.app_name, "simplify_max_hole_area", self.simplify_max_hole_area_edit.text())
         set_preference(self.app_name, "simplify_fill_maxsize", self.simplify_fill_maxsize_edit.text())
         set_preference(self.app_name, "simplify_excluded_layers", self.simplify_excluded_layers_edit.text())
@@ -2816,6 +2923,11 @@ class MainWindow(MainWindowBase):
 
         # S-parameter Result Viewer window, lazily created - see open_result_viewer()
         self.result_viewer_window = None
+
+        # 3D Field Result Viewer window (PyVista), lazily created - see
+        # CreateModelTab.open_field_viewer(). Palace mode only for now - see that
+        # method's docstring.
+        self.field_viewer_window = None
 
         # Do not auto-load default values at this early startup stage,
         # instead this is done from File menu
