@@ -22,7 +22,9 @@ dependencies = [
     "matplotlib",
     "numpy",
     "gdspy",
-    "meshio"
+    "meshio",
+    "pyvista",
+    "pyvistaqt"
 ]
 requires-python = ">=3.9"
 
@@ -36,6 +38,7 @@ setupEM = "setupEM.setupEM:main"
 setupThermal = "setupEM.setupThermal:main"
 stackupEditor = "setupEM.stackupEditor:main"
 resultViewer = "setupEM.result_viewer:main"
+fieldViewer = "setupEM.field_viewer:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "setupEM.__version__"}

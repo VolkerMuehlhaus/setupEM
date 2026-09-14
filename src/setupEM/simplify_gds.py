@@ -145,6 +145,7 @@ def run_simplify(gds_path, metal_layers, output_path, cellname="",
         merge_polygons_by_layer,
         find_isolated_same_size_polygons_by_layer,
     )
+    from gds_geometry_utils import validate_and_repair_polygons
 
     # merge_polygons_by_layer()/find_isolated_same_size_polygons_by_layer()
     # create cells via the bare gdspy.Cell(...) constructor, which
@@ -184,6 +185,25 @@ def run_simplify(gds_path, metal_layers, output_path, cellname="",
     if do_merge and not already_merged_flat:
         lib, top_cell = _flatten_cell(lib, cellname)
         lib = merge_polygons_by_layer(top_cell, layers_list=metal_layers)
+
+    # Final polygon validity check/repair - always runs, regardless of which
+    # operations above were selected. Catches any polygon still geometrically
+    # invalid (self-intersecting) no matter the reason - e.g. a cutout
+    # deliberately left alone by remove_cutout_keep_hierarchy() for being
+    # larger than max_hole_area, or a merge step re-introducing an invalid
+    # "bridge" hole encoding while fusing polygons back together. A
+    # solid-body mesher like gds2palace cannot handle this even though
+    # gdspy/GDSII themselves tolerate it.
+    repaired_count, unresolved = validate_and_repair_polygons(lib, metal_layers)
+    if repaired_count:
+        print(f'Final validity check: repaired {repaired_count} invalid polygon(s)')
+    if unresolved:
+        print(f'Final validity check: WARNING - {len(unresolved)} polygon(s) could not be '
+              f'auto-repaired, still geometrically invalid in the output file:')
+        for cell_name, n, layer, reason in unresolved:
+            print(f'  {cell_name} polygon #{n} layer {layer}: {reason}')
+    if not repaired_count and not unresolved:
+        print('Final validity check: no invalid polygons found')
 
     lib.write_gds(output_path)
 

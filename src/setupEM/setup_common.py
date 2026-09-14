@@ -32,7 +32,7 @@ mesh fields, the Python model code generator bodies) is intentionally left
 in setupEM.py / setupThermal.py, not here.
 """
 
-import sys, os, json, pathlib, ast, webbrowser, io, contextlib, subprocess, shutil, glob
+import sys, os, json, pathlib, ast, webbrowser, io, contextlib, subprocess, shutil, glob, re
 import importlib.metadata
 import xml.etree.ElementTree as ET
 import numpy as np
@@ -147,6 +147,24 @@ def clear_preferences(app_name):
         settings.remove("")
     finally:
         settings.endGroup()
+
+
+def find_paraview_exe():
+    """Locate a ParaView executable: PATH first, then (Windows only) the usual
+    install locations under Program Files, newest version first. Returns None
+    if not found. Read-only lookup - does not launch anything - so this is safe
+    to call just to check availability (e.g. for the "3D viewer" preference's
+    ParaView-not-installed fallback), not just from _open_in_paraview().
+    """
+    paraview_exe = shutil.which("paraview")
+    if paraview_exe is None and os.name == "nt":
+        candidates = (
+            glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
+            + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
+        )
+        if candidates:
+            paraview_exe = max(candidates, key=os.path.getmtime)
+    return paraview_exe
 
 
 def _read_substrate_variables(filename):
@@ -305,6 +323,134 @@ def resolve_missing_file_paths(saved_values, reference_dir, keys=("GdsFile", "Su
                 f"using {shorten_path_for_display(candidate)} instead"
             )
     return messages
+
+
+def eval_simple_python_expression(node, known_constants):
+    # Evaluate a single AST expression node against a symbol table of already-known
+    # module-level constants. This is intentionally NOT a general interpreter - it only
+    # understands literals (delegated to ast.literal_eval for plain Constant nodes, the
+    # same grammar callers used before this function existed, so anything that already
+    # worked keeps working unchanged), bare Name lookups against known_constants, simple
+    # arithmetic (BinOp/UnaryOp) combining those, and literal-ish List/Tuple/Set/Dict
+    # containers whose elements may themselves reference known constants (e.g.
+    # "[ftarget]"). Anything else (calls, attributes, subscripts, comprehensions, ...)
+    # raises so the caller can fall back to its own "could not resolve this" handling.
+    if isinstance(node, ast.Name):
+        if node.id in known_constants:
+            return known_constants[node.id]
+        raise ValueError(f"unknown name '{node.id}'")
+
+    if isinstance(node, ast.BinOp):
+        left = eval_simple_python_expression(node.left, known_constants)
+        right = eval_simple_python_expression(node.right, known_constants)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Div):
+            return left / right
+        if isinstance(node.op, ast.FloorDiv):
+            return left // right
+        if isinstance(node.op, ast.Mod):
+            return left % right
+        if isinstance(node.op, ast.Pow):
+            return left ** right
+        raise ValueError(f"unsupported operator {type(node.op).__name__}")
+
+    if isinstance(node, ast.UnaryOp):
+        operand = eval_simple_python_expression(node.operand, known_constants)
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        if isinstance(node.op, ast.USub):
+            return -operand
+        raise ValueError(f"unsupported unary operator {type(node.op).__name__}")
+
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        values = [eval_simple_python_expression(elt, known_constants) for elt in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(values)
+        if isinstance(node, ast.Set):
+            return set(values)
+        return values
+
+    if isinstance(node, ast.Dict):
+        return {
+            eval_simple_python_expression(k, known_constants): eval_simple_python_expression(v, known_constants)
+            for k, v in zip(node.keys, node.values)
+        }
+
+    # plain literals: numbers, strings, etc. - same code path used before
+    # Name/BinOp/UnaryOp/container support was added above
+    return ast.literal_eval(node)
+
+
+def collect_module_level_constants(file_path):
+    # Build a symbol table of simple module-level constants (e.g. "Z0 = 50" or
+    # "ftarget = 30e9"), so that references to them elsewhere in the same script (e.g.
+    # simulation_port(port_Z0=2*Z0) or settings['fstart'] = ftarget) can be resolved
+    # instead of skipped/mis-parsed. Only true top-level (module-body) "NAME = <expr>"
+    # assignments count - anything inside a function/loop/if/class body is deliberately
+    # excluded (iterating only tree.body, not ast.walk(tree), does this for free, since
+    # those bodies are children of that node rather than of Module.body directly). This
+    # matters because a name reassigned inside a loop (common in this codebase's own
+    # inductor-synthesis-style scripts) must never be treated as one fixed constant.
+    known_constants = {}
+    try:
+        source = pathlib.Path(file_path).read_text()
+        tree = ast.parse(source)
+    except (SyntaxError, OSError, UnicodeDecodeError):
+        return known_constants
+
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+            continue  # skip tuple/multi-target/attribute assignments - out of scope
+        name = stmt.targets[0].id
+        try:
+            # evaluated against the symbol table built so far, so later constants can
+            # reference earlier ones in source order (e.g. "B = 2*A" after "A = 1")
+            known_constants[name] = eval_simple_python_expression(stmt.value, known_constants)
+        except (ValueError, TypeError, ZeroDivisionError, SyntaxError):
+            # not resolvable with what we know so far - silently skip; a later
+            # reference to this name will just fail to resolve on its own
+            continue
+
+    return known_constants
+
+
+def is_openems_model_script(file_path):
+    # Detect whether an imported .py model script is an openEMS model rather than a
+    # gds2palace/Palace/Elmer one. setupEM/setupThermal can only ever GENERATE
+    # Palace/Elmer model scripts via "Create Model" - there is no way to write an
+    # openEMS model back out. If "Create Model" were allowed to reuse an imported
+    # openEMS script's own file path as its output (see the "reuse" logic in
+    # load_configuration_from_file() below), the next "Create Model" click would
+    # silently overwrite the user's real openEMS solver script with generated Palace
+    # code, which setupEM has no way to regenerate.
+    #
+    # openEMS models import the openEMS/CSXCAD Python bindings directly
+    # ("from openEMS import openEMS", "import CSXCAD") - markers that never appear in
+    # a gds2palace-based script (which does "from gds2palace import *" instead), so
+    # this is a reliable, low-false-positive textual check, in the same spirit as the
+    # existing Elmer-vs-Palace source-text detection in apply_python_import_data().
+    try:
+        text = pathlib.Path(file_path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
+
+
+def resolve_value_text(value_text, known_constants):
+    # Parse a raw right-hand-side text (as captured by parse_assignments() below, e.g.
+    # "50", "ftarget", "2*Z0", "[ftarget]") as a Python expression and evaluate it
+    # against known_constants via eval_simple_python_expression(). Raises the same way
+    # ast.literal_eval()/float()/int() already did on unparseable input - callers that
+    # relied on that failure mode (to fall back or skip) keep working unchanged.
+    node = ast.parse(value_text, mode='eval').body
+    return eval_simple_python_expression(node, known_constants)
 
 
 def parse_assignments(file_path):
@@ -1912,16 +2058,7 @@ class CreateModelTabBase(QWidget):
             self.log_area.appendPlainText(not_found_message)
             return
 
-        paraview_exe = shutil.which("paraview")
-        if paraview_exe is None and os.name == "nt":
-            # Not on PATH: fall back to searching the usual install locations, newest first.
-            candidates = (
-                glob.glob(r"C:\Program Files\ParaView*\bin\paraview.exe")
-                + glob.glob(r"C:\Program Files (x86)\ParaView*\bin\paraview.exe")
-            )
-            if candidates:
-                paraview_exe = max(candidates, key=os.path.getmtime)
-
+        paraview_exe = find_paraview_exe()
         if paraview_exe is None:
             self.log_area.appendPlainText(
                 "⚠️ ParaView not found on PATH. Install it, or add it to PATH, "
@@ -2214,6 +2351,18 @@ class MainWindowBase(QMainWindow):
         # let the whole window accept a dropped *.simcfg / *.tsimcfg file,
         # not just the individual file-path fields (see FileDropLineEdit)
         self.setAcceptDrops(True)
+        # set by load_configuration_from_file() when the imported *.py model script
+        # is detected as an openEMS model (see is_openems_model_script()) - create_model()
+        # in setupEM.py/setupThermal.py refuses to write its generated Palace/Elmer
+        # code to this exact path, since setupEM can never regenerate an openEMS
+        # script. Cleared/reset on every import (of either kind), not just set once.
+        self.protected_source_model_path = None
+        # normalized (os.path.normcase) output paths that create_model() has already
+        # either confirmed overwriting (always asked, see create_model()) or itself
+        # written to in this session - so the normal iterative workflow
+        # (tweak -> Create Model -> tweak -> Create Model ...) against the same output
+        # file only prompts once, not on every click. Session-only, not persisted.
+        self.confirmed_overwrite_paths = set()
 
     # ---------- Drag & drop native config (*.simcfg/*.tsimcfg) or *.py model file
     # onto the window. Restricted to the "Input Files" tab so it doesn't fire while
@@ -2566,6 +2715,11 @@ class MainWindowBase(QMainWindow):
                 modelcode_path = os.path.dirname(file_path)
 
                 # variable assignments
+                # resolve simple module-level variables/expressions (e.g.
+                # settings['fstart'] = ftarget, or settings['fpoint'] = [ftarget]) to
+                # their literal value before the per-key type coercion below - see
+                # collect_module_level_constants() / resolve_value_text()
+                known_constants = collect_module_level_constants(file_path)
                 imported_parameters = parse_assignments(file_path)
                 for import_key, import_value in imported_parameters.items():
                         if import_key in import_mapping.keys():
@@ -2574,10 +2728,15 @@ class MainWindowBase(QMainWindow):
                                 varname = import_mapping.get(import_key, '')
                                 if varname in ("fpoint", "fdump"):
                                     # same Hz-in-code / GHz-in-GUI unit split as fstart/fstop/fstep below,
-                                    # just per-element since these are lists
-                                    saved_values[varname] = [f / 1e9 for f in ast.literal_eval(import_value)]
+                                    # just per-element since these are lists - but a script may also
+                                    # assign a bare scalar here (e.g. "settings['fpoint'] = faked_dc"
+                                    # instead of "[faked_dc]"), so normalize to a list first
+                                    values = resolve_value_text(import_value, known_constants)
+                                    if not isinstance(values, (list, tuple)):
+                                        values = [values]
+                                    saved_values[varname] = [f / 1e9 for f in values]
                                 elif varname in ("variable_overrides", "refined_cellsize_override"):
-                                    saved_values[varname] = ast.literal_eval(import_value)
+                                    saved_values[varname] = resolve_value_text(import_value, known_constants)
                                 elif varname in ["gds_filename", "XML_filename", "GdsFile", "SubstrateFile"]:
                                     # check if we have full path for files in imported Python script,
                                     # otherwise prefix from *.py path assuming that it was local to the *.py model script
@@ -2588,14 +2747,20 @@ class MainWindowBase(QMainWindow):
                                 elif varname != '':
                                     raw = import_value.strip("[]")
                                     if varname in ['fstart', 'fstop', 'fstep']:
-                                        saved_values[varname] = float(raw) / 1e9
+                                        saved_values[varname] = float(resolve_value_text(raw, known_constants)) / 1e9
                                     elif varname == 'ELMER_MPI_THREADS':
                                         # MeshTab.load_values() does numeric comparisons
                                         # on this value directly, so it must be an int,
                                         # not the raw string parsed from the .py file
-                                        saved_values[varname] = int(raw)
+                                        saved_values[varname] = int(resolve_value_text(raw, known_constants))
                                     else:
-                                        saved_values[varname] = raw
+                                        try:
+                                            saved_values[varname] = resolve_value_text(raw, known_constants)
+                                        except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
+                                            # not resolvable even with known module-level constants
+                                            # (e.g. a value computed by a function call) - fall back to
+                                            # the raw text exactly as before this resolution was added
+                                            saved_values[varname] = raw
 
                 # GdsFile/SubstrateFile paths saved on a different OS/network-drive mapping
                 # often don't resolve here even as a full absolute path (the bare-relative-
@@ -2603,11 +2768,23 @@ class MainWindowBase(QMainWindow):
                 # all) - fall back to a same-named file next to this model script instead
                 path_messages = resolve_missing_file_paths(saved_values, modelcode_path)
 
+                # openEMS models can never be reused as Create Model's output target -
+                # see is_openems_model_script() / protected_source_model_path above
+                is_openems_import = is_openems_model_script(file_path)
+                self.protected_source_model_path = os.path.abspath(file_path) if is_openems_import else None
+
                 # ask whether future "Create Model" output should overwrite this same
                 # file, or start a fresh model (today's GDS-derived default) - only if
                 # the user has turned this question on in Preferences > Files; by
-                # default, silently agree (reuse the imported file) without asking
-                if get_preference_bool(self.APP_NAME, "confirm_reuse_import_filename", False):
+                # default, silently agree (reuse the imported file) without asking.
+                # Never offered for an openEMS import - setupEM can only ever generate
+                # Palace/Elmer code, so reusing that path would silently destroy the
+                # user's real openEMS solver script the next time "Create Model" runs
+                # (create_model() also refuses the write directly, as a second layer,
+                # in case the user manually re-selects the same path later).
+                if is_openems_import:
+                    reuse = False
+                elif get_preference_bool(self.APP_NAME, "confirm_reuse_import_filename", False):
                     reuse = QMessageBox.question(
                         self, "Import Model",
                         f"Use '{os.path.basename(file_path)}' as the output file for this model too?\n\n"
@@ -2620,6 +2797,19 @@ class MainWindowBase(QMainWindow):
                 if reuse:
                     saved_values['sim_path'] = os.path.dirname(file_path).replace('\\', '/')
                     saved_values['model_basename'] = pathlib.Path(file_path).stem
+                    # the user has now explicitly designated this exact file as Create
+                    # Model's output target (either by answering "Yes" above, or via
+                    # the default silent-reuse when "Ask before reusing..." is off) -
+                    # trust it immediately, so the very next Create Model click doesn't
+                    # ALSO trigger the general "this will overwrite an existing file"
+                    # confirmation in create_model() for the very file we were just
+                    # told to use. Computed the same way create_model()
+                    # builds pymodel_filename, so the two match exactly. Only reachable
+                    # for non-openEMS imports (is_openems_import forces reuse=False
+                    # above) - a file the user never explicitly pointed Create Model at
+                    # this way still gets that confirmation.
+                    reused_output_path = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename'] + '.py'))
+                    self.confirmed_overwrite_paths.add(os.path.normcase(reused_output_path))
 
                 # read port/thermal assignments in workflow syntax for gds2palace Python code, and
                 # apply any app-specific post-import state (e.g. setupEM's simulator mode)
@@ -2628,6 +2818,13 @@ class MainWindowBase(QMainWindow):
                 self.load_all_tabs()
                 self._add_recent_file(RECENT_MODEL_KEY, file_path)
                 loaded_message = f"Config loaded from {shorten_path_for_display(file_path)}"
+                if is_openems_import:
+                    loaded_message += (
+                        "\n\nThis looks like an openEMS model script. Ports and settings "
+                        "were imported for editing, but setupEM can only generate Palace/"
+                        "Elmer models - Create Model will NOT overwrite this file. Pick a "
+                        "new model name/output directory on the Create Model(s) tab."
+                    )
                 if path_messages:
                     loaded_message += "\n\n" + "\n".join(path_messages)
                 QMessageBox.information(self, "Loaded", loaded_message)
@@ -2788,8 +2985,15 @@ class MainWindowBase(QMainWindow):
                 # Offset+Reference conflict, ...) via print(...); exit(1) instead of
                 # raising - see the same pattern in stackupEditor.py's _refresh_preview().
                 # Capture stdout so that printed ERROR text (otherwise invisible in a
-                # GUI with no attached console) can be shown to the user.
-                details = captured_stdout.getvalue().strip() or str(e)
+                # GUI with no attached console) can be shown to the user. SystemExit
+                # itself carries no useful message (that's only ever in what was
+                # printed), but a genuinely raised exception's own message must not
+                # be silently dropped just because something was also printed first.
+                printed = captured_stdout.getvalue().strip()
+                if isinstance(e, SystemExit):
+                    details = printed or str(e)
+                else:
+                    details = (printed + "\n\n" + str(e)) if printed else str(e)
                 QMessageBox.critical(self, "Error", f"Could not load stackup {filename}:\n\n{details}")
                 return  # keep last-known-good materials_list/dielectrics_list/metals_list
             self.materials_list, self.dielectrics_list, self.metals_list = materials_list, dielectrics_list, metals_list

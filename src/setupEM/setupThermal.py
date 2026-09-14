@@ -55,6 +55,7 @@ if __package__ in (None, ""):
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
+        find_paraview_exe,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 else:
@@ -64,6 +65,7 @@ else:
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
+        find_paraview_exe,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 
@@ -686,13 +688,19 @@ class CreateModelTab(CreateModelTabBase):
         # simulation run apart from a mesh-creation run (self.process is reused for both).
         self._process_purpose = None
 
-        # "View in ParaView" is thermal-only (Palace/EM results are S-parameters, not a 3D
-        # field to open directly), added as its own row of the base class's buttons_grid so
-        # it lines up with Preview/Create Mesh/Start Simulation above, in the same Actions group.
+        # "View fields ..." opens the thermal result in whichever viewer
+        # Preferences > Create Model > "3D field viewer" selects - built-in
+        # (embedded PyVista) or external ParaView, see open_viewer(). Always
+        # visible (Elmer thermal steady-state solves always produce a
+        # temperature field, unlike Palace's optional per-frequency fdump).
+        # Added as its own row of the base class's buttons_grid so it lines up
+        # with Preview/Create Mesh/Start Simulation above, in the same Actions
+        # group.
         row = self.buttons_grid.rowCount()
-        self.paraview_btn = QPushButton("🖼️ View in ParaView")
-        self.paraview_btn.clicked.connect(self.launch_paraview)
-        self.buttons_grid.addWidget(self.paraview_btn, row, 0)
+        self.viewer_btn = QPushButton()
+        self.viewer_btn.clicked.connect(self.open_viewer)
+        self.buttons_grid.addWidget(self.viewer_btn, row, 0)
+        self._update_viewer_button_label()
 
     def _append_thermal_results_summary(self):
         # Parse thermal_results.dat / thermal_results.vtu and append a results summary
@@ -721,6 +729,30 @@ class CreateModelTab(CreateModelTabBase):
         if self._process_purpose == "run_simulation":
             self._append_thermal_results_summary()
 
+    def _viewer_preference(self):
+        return get_preference(self.MainWindow.APP_NAME, "viewer_3d", "builtin")
+
+    def _update_viewer_button_label(self):
+        viewer_label = "ParaView" if self._viewer_preference() == "paraview" else "Built-in"
+        self.viewer_btn.setText(f"🖼️ View fields ({viewer_label})...")
+
+    def open_viewer(self):
+        """Dispatch "View fields ..." to whichever viewer applies - the single
+        entry point the merged button calls (see _update_viewer_button_label()
+        for how its text is kept in sync with this same logic)."""
+        if self._viewer_preference() == "paraview":
+            if find_paraview_exe() is not None:
+                self.launch_paraview()
+                return
+            self.log_area.appendPlainText(
+                "⚠️ ParaView is selected as the 3D viewer in Preferences, but wasn't "
+                "found on this system (checked PATH and the usual install locations). "
+                "Falling back to the built-in viewer. Install ParaView, add it to "
+                "PATH, or switch back to \"Built-in\" under Preferences > Create "
+                "Model > 3D field viewer to avoid this message.\n"
+            )
+        self.open_field_viewer()
+
     def launch_paraview(self):
         run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
         vtu_path = find_thermal_paraview_file(run_path)
@@ -728,6 +760,29 @@ class CreateModelTab(CreateModelTabBase):
             [vtu_path] if vtu_path else [],
             f"⚠️ No thermal results .vtu found yet under {run_path}\n"
         )
+
+    def open_field_viewer(self):
+        """Open the in-app PyVista 3D field viewer on Elmer's thermal .vtu result."""
+        if __package__ in (None, ""):
+            from field_viewer import FieldViewerWindow
+        else:
+            from .field_viewer import FieldViewerWindow
+
+        if self.MainWindow.field_viewer_window is not None:
+            self.MainWindow.field_viewer_window.raise_()
+            self.MainWindow.field_viewer_window.activateWindow()
+            return
+
+        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        vtu_path = find_thermal_paraview_file(run_path)
+        if not vtu_path:
+            self.log_area.appendPlainText(f"⚠️ No thermal results .vtu found yet under {run_path}\n")
+            return
+
+        self.MainWindow.field_viewer_window = FieldViewerWindow(self.MainWindow, [vtu_path], "elmer_thermal")
+        self.MainWindow.field_viewer_window.destroyed.connect(
+            lambda: setattr(self.MainWindow, "field_viewer_window", None))
+        self.MainWindow.field_viewer_window.show()
 
     def create_model(self):
         # Request all tabs to save values again,
@@ -760,9 +815,45 @@ class CreateModelTab(CreateModelTabBase):
 
             # Write code to Python file
             pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
+
+            # Refuse to overwrite an imported openEMS model script - setupThermal can
+            # only generate Palace/Elmer code and has no way to regenerate an openEMS
+            # model. Normally load_configuration_from_file() already steers the output
+            # elsewhere for such an import (see protected_source_model_path), so this
+            # is a second-layer guard for the case where the user manually re-picks
+            # the same name/directory on the Create Model(s) tab afterwards.
+            protected_path = getattr(self.MainWindow, 'protected_source_model_path', None)
+            if protected_path and os.path.normcase(pymodel_filename) == os.path.normcase(protected_path):
+                QMessageBox.warning(
+                    self, "Create Model",
+                    "This would overwrite the imported openEMS model script:\n\n"
+                    f"{pymodel_filename}\n\n"
+                    "setupThermal cannot regenerate an openEMS model, so this write was "
+                    "blocked. Choose a different model name or output directory on "
+                    "the Create Model(s) tab.")
+                return
+
+            # General overwrite protection: ask once per session before clobbering a
+            # pre-existing file we haven't already confirmed/written ourselves. Always
+            # on (not a preference) - once confirmed (or written), later Create Model
+            # clicks to the same path in this session don't ask again, so normal
+            # iterative tuning (tweak -> Create Model -> tweak -> Create Model ...)
+            # isn't interrupted every time.
+            normalized_path = os.path.normcase(pymodel_filename)
+            confirmed_paths = self.MainWindow.confirmed_overwrite_paths
+            if normalized_path not in confirmed_paths and os.path.exists(pymodel_filename):
+                overwrite = QMessageBox.question(
+                    self, "Create Model",
+                    f"This will overwrite the existing file:\n\n{pymodel_filename}\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                ) == QMessageBox.Yes
+                if not overwrite:
+                    return
+
             with open(pymodel_filename, "w", encoding="utf-8") as f:
                 f.write(code)
                 f.close()
+            confirmed_paths.add(normalized_path)
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
@@ -996,9 +1087,10 @@ class PreferencesDialog(QDialog):
     project files and from "Save as Default Config". Editing a value here only
     changes what a brand-new/blank field starts out showing; it never touches
     the currently open project's saved_values. Smaller than setupEM's version
-    of this dialog - no Frequencies tab (thermal has no frequency sweep) and no
-    Create Model tab (thermal has neither the Model Fit button nor the Palace
-    solver status line).
+    of this dialog - no Frequencies tab (thermal has no frequency sweep), and
+    its own Viewer tab only has the 3D field viewer preference (no Model Fit
+    button or Palace solver status line here, unlike setupEM's fuller version
+    of that tab).
     """
 
     def __init__(self, MainWindow):
@@ -1085,6 +1177,29 @@ class PreferencesDialog(QDialog):
         mesh_form.addStretch()
         self.tabs.addTab(mesh_widget, "Mesh")
 
+        # ---------- Viewer tab ----------
+        # Just the one preference for now (unlike setupEM.py's fuller version of
+        # this tab, which also has Model Fit / solver status line toggles that
+        # don't apply here) - which viewer "View fields ..." opens.
+        create_widget = QWidget()
+        create_form = QVBoxLayout(create_widget)
+        create_form.setAlignment(Qt.AlignTop)
+        viewer_row = QHBoxLayout()
+        viewer_label = QLabel("3D field viewer")
+        viewer_label.setFixedWidth(label_width)
+        viewer_row.addWidget(viewer_label)
+        self.viewer_3d_combo = QComboBox()
+        self.viewer_3d_combo.addItem("Built-in", "builtin")
+        self.viewer_3d_combo.addItem("ParaView", "paraview")
+        current_viewer = get_preference(self.app_name, "viewer_3d", "builtin")
+        combo_index = self.viewer_3d_combo.findData(current_viewer)
+        self.viewer_3d_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+        viewer_row.addWidget(self.viewer_3d_combo)
+        create_form.addLayout(viewer_row)
+        self._reset_targets.append((self.viewer_3d_combo, "viewer_3d", "builtin", "combo"))
+        create_form.addStretch()
+        self.tabs.addTab(create_widget, "Viewer")
+
         # ---------- Simplify GDS tab ----------
         simplify_widget = QWidget()
         simplify_form = QVBoxLayout(simplify_widget)
@@ -1146,6 +1261,12 @@ class PreferencesDialog(QDialog):
                 widget.setText(str(default))
             elif kind == "bool":
                 widget.setChecked(bool(default))
+            elif kind == "combo":
+                combo_index = widget.findData(default)
+                widget.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+        # live-apply immediately (matches what accept() does), so the running
+        # app reflects the reset right away rather than needing OK afterward
+        self.MainWindow.create_model_tab._update_viewer_button_label()
 
     def accept(self):
         # via-merge distance and the two mesh sizes must parse as numbers; purpose is
@@ -1181,6 +1302,10 @@ class PreferencesDialog(QDialog):
         set_preference(self.app_name, "simplify_fill_maxsize", self.simplify_fill_maxsize_edit.text())
         set_preference(self.app_name, "simplify_excluded_layers", self.simplify_excluded_layers_edit.text())
         set_preference(self.app_name, "simplify_merge_per_layer", self.simplify_merge_per_layer_checkbox.isChecked())
+        set_preference(self.app_name, "viewer_3d", self.viewer_3d_combo.currentData())
+
+        # live update, no restart needed
+        self.MainWindow.create_model_tab._update_viewer_button_label()
 
         super().accept()
 
@@ -1381,6 +1506,10 @@ class MainWindow(MainWindowBase):
         self.materials_list = None
         self.dielectrics_list = None
         self.metals_list = None
+
+        # 3D Field Result Viewer window (PyVista), lazily created - see
+        # CreateModelTab.open_field_viewer()
+        self.field_viewer_window = None
 
         # Do not auto-load default values at this early startup stage,
         # instead this is done from File menu

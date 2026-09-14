@@ -1,4 +1,12 @@
 
+# What's New - September 14, 2026
+
+Added a built-in **3D field viewer**, an in-app alternative to launching external ParaView, for setupEM (Palace and Elmer-as-EM-solver) and setupThermal (Elmer thermal) field-dump results. It has a single, axis-aligned (X/Y/Z) clip plane with a **Find max.** button that jumps straight to the largest value of the current field along that axis, standard CAD/ParaView-style +/-X/Y/Z view buttons, plus opacity and mesh-edge overlay controls. For a vector array, **Show arrows** overlays direction arrows sized from an **Arrow size** slider, auto-scaled on a log magnitude scale so weak and strong regions both stay visible. When more than one equally-valid result file exists (e.g. Palace's "driven" field dump and its separate "driven_boundary" one), a picker lets you choose between them instead of guessing.
+
+**View fields in Paraview...** and the previous separate **View fields (3D viewer)...** button are now one **View fields (...)...** button, whose label shows which viewer it opens. Choose **Built-in** (new default) or **ParaView** on the new **Preferences > Viewer** tab (renamed from **Create Model** in setupEM, which also still has the Model Fit/status-line toggles there). If ParaView is selected but not found on your system, setupEM/setupThermal fall back to the built-in viewer automatically, with a message in the Log panel explaining why.
+
+Layout Preview now shows a via port's **effective centerline** when its drawn marker has finite size in both x and y: gds2palace's `add_ports()` collapses the shorter axis down to its minimum edge (not the true center, despite what the user guide says) when building the actual simulated port sheet, so this line makes that reduction visible before you run the simulation instead of it only showing up as a surprise in the results.
+
 # What's New - September 8-12, 2026
 
 Added two reserved stackup materials that need no `<Materials>` entry: `PEC` (ideal conductor, on conductor/via/sheet Layers) and `AIR` (built-in default dielectric, overridable).  
