@@ -2,7 +2,7 @@
 
 ## What's New
 
-Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, GDSII Layout Simplification, XML Stackup Editor, setupThermal for Elmer thermal simulation.
+Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, built-in 3D field viewer, GDSII Layout Simplification, XML Stackup Editor, setupThermal for Elmer thermal simulation.
 
 See [CHANGES.md](doc/CHANGES.md) for details.
 
@@ -18,7 +18,7 @@ An overview of the SetupEM user interface is given below in chapter "Using setup
 
 Two more external tools are used by parts of the workflow, and are not installed automatically:
 
-- [ParaView](https://www.paraview.org/) — to view field-dump output (Palace/Elmer EM) and Elmer thermal result files via the "View fields/results in Paraview" buttons.
+- [ParaView](https://www.paraview.org/) — optional, for viewing field-dump output (Palace/Elmer EM) and Elmer thermal result files with ParaView itself instead of the built-in 3D field viewer (see [3D Field Viewer](#3d-field-viewer) below). Not required: the built-in viewer needs nothing extra installed and is the default.
 - An MPI implementation — only needed for multi-process Elmer runs (the Elmer solver settings' multithreading option). Use OpenMPI or MPICH on Linux/macOS; on Windows, install [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi) (setupEM checks for this and shows a download link if it's missing).
 
 
@@ -86,6 +86,8 @@ The setupEM module also installs these dependencies:
 - numpy
 - gdspy
 - meshio
+- pyvista
+- pyvistaqt
     
 ---
 
@@ -234,6 +236,22 @@ Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded
 <img src="./doc/png/modelfit2.png" alt="snp2le starting" width="700">
 
 If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
+
+## 3D Field Viewer
+
+Once field-dump results are available (Palace: set `fdump`; Elmer: enable field dump), click **View fields (...)...** on the Create Model tab to open them - the "..." in the label shows which viewer it opens, **Built-in** or **ParaView**, per the setting described below.
+
+<img src="./doc/png/fieldviewer1.png" alt="3D field viewer" width="750">
+
+The built-in viewer has a single, axis-aligned clip plane (X/Y/Z + a position slider, shown in µm) to see a cross-section through the model, rather than a free-orientation drag-widget - **Find max.** jumps the plane straight to the largest value of the currently selected field along that axis. Standard CAD/ParaView-style **+X/-X/+Y/-Y/+Z/-Z** buttons snap the camera to look straight down each axis; the clip plane's kept side follows whichever of these you last used for its axis, so the exposed cut face always faces the camera instead of occasionally showing the model's untouched exterior surface.
+
+The **Field** panel picks which array to color by, defaulting to E-field magnitude (log color scale) for Palace or temperature (linear) for Elmer thermal - the Min/Max fields let you override the color range manually, with a button to reset back to the data's own range. **Display** controls opacity (to see a hotspot through the surrounding material without losing the outer shape as context) and a mesh-edge overlay. If more than one equally-valid result file exists (e.g. Palace's main "driven" field dump and its separate "driven_boundary" one), a **Result File** picker lets you choose between them instead of guessing.
+
+Choose which viewer **View fields (...)...** opens - **Built-in** (default, needs nothing else installed) or **ParaView** - on **Preferences > Viewer**. If ParaView is selected but not found on your system, setupEM/setupThermal fall back to the built-in viewer automatically, with a message in the Log panel.
+
+<img src="./doc/png/preferences_viewer1.png" alt="3D field viewer preference" width="500">
+
+Also runnable standalone, without the full setupEM/setupThermal GUI, either directly (`python field_viewer.py <file_path> [--source palace|elmer_thermal]`) or via the `fieldViewer` console script installed with the package.
 
 ## Code 
 Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
