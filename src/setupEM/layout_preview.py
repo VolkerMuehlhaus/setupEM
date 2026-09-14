@@ -33,13 +33,14 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel,
     QScrollArea, QCheckBox, QMessageBox, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsSimpleTextItem,
-    QGraphicsEllipseItem, QGraphicsPathItem, QSlider, QSplitter, QApplication,
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsLineItem, QSlider,
+    QSplitter, QApplication,
     )
 from PySide6.QtGui import (
     QColor, QBrush, QPen, QPolygonF, QPainter, QFont, QPainterPath, QTransform,
     QShortcut, QKeySequence,
     )
-from PySide6.QtCore import Qt, QPointF, Signal
+from PySide6.QtCore import Qt, QPointF, QLineF, Signal
 
 from gds2palace import gds_reader, stackup_reader
 
@@ -716,19 +717,31 @@ class LayoutPreviewWindow(QDialog):
                         tooltip = f"Port {portnumber} [{layernum}] {_signed_direction(marker.get('direction', ''))}"
                         if float(marker.get("voltage", 1)) == 0:
                             tooltip += " (inactive)"
+                        # a via port with finite xy area gets an extra effective-
+                        # centerline overlay further below (see is_via_port); an
+                        # in-plane port's drawn rectangle *is* the real geometry,
+                        # so it never gets one.
+                        is_via_port = marker.get("target_layername") is None
                     elif kind == "source":
                         label_text = _format_value(marker["power"], "W")
                         tooltip = f"Source [{layernum}] {label_text}"
+                        is_via_port = False
                     else:  # "boundary"
                         label_text = _format_value(marker["temp"], "K")
                         tooltip = f"Boundary [{layernum}] {label_text}"
+                        is_via_port = False
 
                     for poly in polys:
                         item = QGraphicsPolygonItem(self._polygon_points(poly))
                         item.setBrush(QBrush(fill_color))
                         # cosmetic pen: stroke stays MARKER_OUTLINE_WIDTH device
                         # pixels regardless of canvas zoom, instead of scaling
-                        # with it - what keeps a near-zero-width marker visible
+                        # with it - what keeps a near-zero-width marker visible.
+                        # Unchanged for every marker kind, including via ports
+                        # made from a genuine zero-width line - only a via port
+                        # with finite xy area also gets the extra, fatter dashed
+                        # centerline drawn further below to make the effective
+                        # line stand out, rather than this frame being altered.
                         marker_pen = QPen(QColor(outline_color), MARKER_OUTLINE_WIDTH)
                         marker_pen.setCosmetic(True)
                         item.setPen(marker_pen)
@@ -779,6 +792,41 @@ class LayoutPreviewWindow(QDialog):
                             marker_item.setToolTip(tooltip)
                             scene.addItem(marker_item)
                             group.add(marker_item)
+
+                        # A via port (from_layername/to_layername, not target_layername)
+                        # whose drawn marker polygon has finite size in BOTH x and y isn't
+                        # actually meshed as that full rectangle - gds2palace's add_ports()
+                        # (util_simulation_setup.py) collapses whichever axis is shorter
+                        # down to its minimum edge (not its true center, despite what the
+                        # user guide says) and keeps only the longer axis at full extent,
+                        # to get a single 2D sheet. Show that effective line so a
+                        # finite-area via port doesn't look like it becomes a full sheet.
+                        # Unlike the fixed-pixel-size markers above, this must scale/pan
+                        # with the real geometry, so it's added directly rather than
+                        # through the ItemIgnoresTransformations + setPos() path.
+                        if is_via_port:
+                            size_x = poly.xmax - poly.xmin
+                            size_y = poly.ymax - poly.ymin
+                            if size_x > 0 and size_y > 0:
+                                if size_y > size_x:
+                                    line = QLineF(QPointF(poly.xmin, -poly.ymin), QPointF(poly.xmin, -poly.ymax))
+                                else:
+                                    line = QLineF(QPointF(poly.xmin, -poly.ymin), QPointF(poly.xmax, -poly.ymin))
+                                centerline_item = QGraphicsLineItem(line)
+                                # fat and dashed, deliberately much bolder than the
+                                # input frame's own solid MARKER_OUTLINE_WIDTH
+                                # outline, so it reads as the actual simulated line
+                                # rather than getting lost inside the drawn rectangle
+                                centerline_pen = QPen(QColor(outline_color), MARKER_OUTLINE_WIDTH * 2)
+                                centerline_pen.setCosmetic(True)
+                                centerline_pen.setStyle(Qt.DashLine)
+                                centerline_item.setPen(centerline_pen)
+                                centerline_item.setToolTip(
+                                    tooltip + " - effective via port sheet "
+                                    "(gds2palace pins the shorter axis to its min edge)")
+                                centerline_item.setZValue(marker_zvalue + 1)
+                                scene.addItem(centerline_item)
+                                group.add(centerline_item)
 
                         text = QGraphicsSimpleTextItem(label_text)
                         font = QFont()
