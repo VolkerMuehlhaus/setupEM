@@ -33,16 +33,23 @@ Palace, temperature for Elmer thermal).
 Normally opened from setupEM's/setupThermal's Create Model tab ("View fields
 (3D viewer)..." button, see CreateModelTab.open_field_viewer() in
 setupEM.py/setupThermal.py) - but also runnable standalone, either directly
-(`python field_viewer.py <file_path> [--source palace|elmer_thermal]`) or via
-the `fieldViewer` console script installed with this package (see main()
-below and pyproject.toml).
+(`python field_viewer.py <file_path> [--source palace|elmer_em|elmer_thermal]`)
+or via the `fieldViewer` console script installed with this package (see
+main() below and pyproject.toml).
 
-v1 scope: Palace (setupEM Palace mode) and Elmer thermal (setupThermal) only.
-setupEM's Elmer-as-EM-solver mode is not wired to this viewer yet - its
-field-dump array names have never been verified against a real run.
+Three sources: Palace (setupEM Palace mode), Elmer-as-EM-solver (setupEM
+Elmer mode) and Elmer thermal (setupThermal). Palace and Elmer-EM both write
+field-dump VTU output in the same um-scale coordinates as the input GDSII
+(confirmed against real field dumps from both), but under different point-
+data array names (Palace: E_real/E_imag; Elmer EM: "electric field re"/
+"electric field im", with spaces - see _E_FIELD_COMPLEX_KEYS). Elmer thermal
+is the odd one out: its VTU is written in real SI meters, not um (see
+_POSITION_SCALE_TO_UM), and has no vector field arrays at all, only a scalar
+temperature one.
 """
 
 import argparse
+import glob
 import os
 import sys
 
@@ -95,6 +102,7 @@ _SLIDER_STEPS = 1_000_000
 # (not currently reachable from the app, but kept open for standalone use) falls
 # back to the generic "first available array" behavior in _pick_default_array().
 _PALACE = "palace"
+_ELMER_EM = "elmer_em"
 _ELMER_THERMAL = "elmer_thermal"
 
 # Multiplier to convert a mesh's native point coordinates to um, for DISPLAY only
@@ -106,10 +114,46 @@ _ELMER_THERMAL = "elmer_thermal"
 #    physics - i.e. the raw exported coordinates are already in um (confirmed:
 #    a real Palace field dump's bounds, e.g. x in [-134, 50], are exactly
 #    chip-scale um numbers, not 134-meter ones), so no rescale is needed.
-#  - Elmer: writes real SI meters (same convention thermal_results.py's own
-#    _METERS_TO_UM constant already documents and corrects for elsewhere in
-#    this package), so this needs the 1e6 m->um factor.
-_POSITION_SCALE_TO_UM = {_PALACE: 1.0, _ELMER_THERMAL: 1e6}
+#  - Elmer-as-EM-solver: also um already (confirmed against a real field dump:
+#    x in [-333, 543], same chip-scale magnitude as Palace's) - unlike Elmer
+#    thermal below, despite both being "Elmer" output.
+#  - Elmer thermal: writes real SI meters (same convention thermal_results.py's
+#    own _METERS_TO_UM constant already documents and corrects for elsewhere
+#    in this package), so this needs the 1e6 m->um factor.
+_POSITION_SCALE_TO_UM = {_PALACE: 1.0, _ELMER_EM: 1.0, _ELMER_THERMAL: 1e6}
+
+# Point-data array names for the complex E-field, per source - not a shared
+# convention between Palace and Elmer-as-EM-solver despite both being a
+# frequency-domain phasor E-field: Palace names them "E_real"/"E_imag",
+# Elmer's field-dump instead uses "electric field re"/"electric field im"
+# (with spaces - confirmed against a real Elmer-EM field dump). Elmer thermal
+# has no vector field arrays at all, so it's absent from this dict.
+_E_FIELD_COMPLEX_KEYS = {
+    _PALACE: ("E_real", "E_imag"),
+    _ELMER_EM: ("electric field re", "electric field im"),
+}
+
+# Vector-arrow (glyph) overlay auto-sizing: the largest arrow is scaled to span
+# this fraction of the mesh's own bounding-box diagonal, regardless of the
+# selected array's physical units/magnitude - E-field (V/m) and B-field (T)
+# values differ by many orders of magnitude, so a fixed/manual arrow length
+# would be either invisible or overwhelming depending on which array is
+# selected; this keeps arrows a sensible, consistent on-screen size no matter
+# which vector field or domain scale is loaded.
+_VECTOR_ARROW_TARGET_FRACTION = 0.08
+# Shortest arrow (smallest-magnitude point actually glyphed) is still drawn at
+# this fraction of the longest arrow's length, rather than shrinking toward
+# zero - see _add_vector_glyphs() for why a raw linear magnitude->length
+# mapping doesn't work here (confirmed empirically: real Palace E-field data
+# spans ~8 orders of magnitude, same dynamic range that already forces
+# _pick_default_array() to use a log color scale - a linear-scaled arrow
+# length made every arrow but the single hottest point invisibly short).
+_VECTOR_ARROW_MIN_LENGTH_RATIO = 0.15
+# Decimation tolerance (fraction of bounding box length) passed to
+# pv.DataSet.glyph() - without this, a dense field-dump mesh (tens/hundreds of
+# thousands of points) would get one arrow per point, unreadable and slow to
+# render.
+_VECTOR_ARROW_DECIMATION = 0.02
 
 
 def _load_full_mesh(file_path):
@@ -133,19 +177,23 @@ def _load_full_mesh(file_path):
     return data
 
 
-def _attach_palace_e_magnitude(mesh):
+def _attach_complex_e_magnitude(mesh, source):
     """Compute and attach the complex E-field magnitude as point_data['E_magnitude'],
-    if E_real/E_imag are present (Palace's driven-frequency field dump - a phasor,
-    not a literal time-domain field, hence real+imag rather than one vector).
-    Per-component magnitude first (sqrt(real^2+imag^2)), then the vector norm across
-    the 3 components - this is the RMS/peak magnitude of the complex phasor, not
-    just |E_real|. No-op if the arrays aren't present (e.g. an Elmer file, or a
-    Palace file where B/E happen to be missing for some reason) - caller falls
-    back to the generic "first available array" picker in that case.
+    for a source with a driven-frequency (phasor, not time-domain) E-field - see
+    _E_FIELD_COMPLEX_KEYS for the real/imag array names per source. Per-component
+    magnitude first (sqrt(real^2+imag^2)), then the vector norm across the 3
+    components - this is the RMS/peak magnitude of the complex phasor, not just
+    |E_real|. No-op if source isn't in _E_FIELD_COMPLEX_KEYS (e.g. Elmer thermal),
+    or the expected arrays aren't actually present in this particular file - caller
+    falls back to the generic "first available array" picker in that case.
     """
-    if "E_real" not in mesh.point_data or "E_imag" not in mesh.point_data:
+    keys = _E_FIELD_COMPLEX_KEYS.get(source)
+    if keys is None:
         return
-    per_component = np.sqrt(mesh["E_real"] ** 2 + mesh["E_imag"] ** 2)
+    real_key, imag_key = keys
+    if real_key not in mesh.point_data or imag_key not in mesh.point_data:
+        return
+    per_component = np.sqrt(mesh[real_key] ** 2 + mesh[imag_key] ** 2)
     mesh["E_magnitude"] = np.linalg.norm(per_component, axis=1)
 
 
@@ -171,7 +219,7 @@ def _pick_default_array(mesh, source):
     stays linear.
     """
     available = list(mesh.point_data.keys())
-    if source == _PALACE and "E_magnitude" in available:
+    if source in (_PALACE, _ELMER_EM) and "E_magnitude" in available:
         return "E_magnitude", "turbo", True
     if source == _ELMER_THERMAL:
         temp_key = next((k for k in available if "temp" in k.lower()), None)
@@ -202,6 +250,7 @@ class FieldViewerWindow(QDialog):
 
         self._full_mesh = None
         self._mesh_actor = None
+        self._vector_actor = None
         self._current_axis = "Z"
         self._load_error = None
         # Which side of the clip plane is kept, per axis - +1 (default, matches
@@ -346,6 +395,14 @@ class FieldViewerWindow(QDialog):
         self.log_scale_cb.toggled.connect(self._on_redraw_needed)
         field_layout.addWidget(self.log_scale_cb)
 
+        # Only meaningful (and enabled) when the selected Field array is itself
+        # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
+        # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
+        self.show_vectors_cb = QCheckBox("Show arrows")
+        self.show_vectors_cb.setEnabled(False)
+        self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
+        field_layout.addWidget(self.show_vectors_cb)
+
         clim_layout = QHBoxLayout()
         clim_layout.addWidget(QLabel("Min:"))
         self.clim_min_edit = QLineEdit()
@@ -439,8 +496,7 @@ class FieldViewerWindow(QDialog):
             self._full_mesh = None
             return
 
-        if self.source == _PALACE:
-            _attach_palace_e_magnitude(self._full_mesh)
+        _attach_complex_e_magnitude(self._full_mesh, self.source)
 
         available = list(self._full_mesh.point_data.keys())
         self.array_combo.blockSignals(True)
@@ -455,11 +511,13 @@ class FieldViewerWindow(QDialog):
         self.log_scale_cb.blockSignals(False)
         if default_array is not None:
             self.array_combo.setCurrentText(default_array)
-            # Explicit call, not just relying on currentTextChanged above: that
+            # Explicit calls, not just relying on currentTextChanged above: that
             # signal doesn't fire if default_array happens to already be the
             # combo's current text (e.g. only one array available), so this
-            # can't be the only place _reset_clim_range() gets called.
+            # can't be the only place _reset_clim_range()/_update_vector_
+            # checkbox_state() get called.
             self._reset_clim_range()
+            self._update_vector_checkbox_state()
         elif not available:
             self.warning_label.setText(
                 f"No point-data arrays found in {self.file_path} - nothing to color by."
@@ -578,7 +636,28 @@ class FieldViewerWindow(QDialog):
 
     def _on_array_changed(self, _text=None):
         self._reset_clim_range()
+        self._update_vector_checkbox_state()
         self._redraw()
+
+    def _update_vector_checkbox_state(self):
+        """Enable "Show arrows" only when the currently selected Field array is
+        a vector (point-data array with more than one component per point) -
+        arrows orient/scale from that same array, so there's nothing to draw
+        for a scalar one (E_magnitude, U_e, temperature, ...). Left checked
+        (just disabled) when switching to a scalar array, so switching back to
+        a vector array later doesn't lose the user's choice."""
+        array_name = self.array_combo.currentText()
+        is_vector = (
+            self._full_mesh is not None and bool(array_name)
+            and array_name in self._full_mesh.point_data
+            and self._full_mesh.point_data[array_name].ndim > 1
+        )
+        self.show_vectors_cb.setEnabled(is_vector)
+        self.show_vectors_cb.setToolTip(
+            "Overlay direction arrows for this vector field" if is_vector
+            else "Only available when the selected Field is a vector array "
+                 "(e.g. E_real, B_real, S)"
+        )
 
     def _reset_clim_range(self):
         """(Re-)populate the Min/Max fields from the currently selected array's
@@ -621,6 +700,59 @@ class FieldViewerWindow(QDialog):
         if clim_min >= clim_max:
             return None
         return (clim_min, clim_max)
+
+    # ---------- Vector arrows ----------
+
+    def _add_vector_glyphs(self, mesh, array_name):
+        """Build and add an arrow-glyph actor oriented from mesh's array_name
+        vector array, auto-scaled so the longest arrow spans
+        _VECTOR_ARROW_TARGET_FRACTION of the mesh's own bounding-box diagonal
+        regardless of the field's physical units/magnitude or the domain's
+        physical size (Palace um-scale vs. Elmer mm-scale) - see that
+        constant's comment.
+
+        Arrow length is mapped from log10(magnitude), not magnitude directly:
+        a linear mapping (length proportional to raw magnitude) leaves only
+        the single largest-magnitude point with a visible arrow when the
+        field spans many orders of magnitude - confirmed on real Palace
+        E-field data (0.07 to 1.1e7, ~8 decades), every other arrow rendered
+        at an indistinguishable-from-zero length. The log mapping is then
+        rescaled into [_VECTOR_ARROW_MIN_LENGTH_RATIO, 1.0] of the target
+        length so even the smallest-magnitude glyphed point stays visible,
+        while direction (not length) remains the primary signal for outliers.
+
+        Returns None (no actor added) if the array is all-zero or glyphing
+        fails, rather than raising - same graceful-degradation spirit as the
+        rest of this viewer's redraw path.
+        """
+        vectors = mesh.point_data[array_name]
+        magnitudes = np.linalg.norm(vectors, axis=1)
+        max_magnitude = magnitudes.max() if magnitudes.size else 0.0
+        if max_magnitude <= 0:
+            return None
+        diagonal = mesh.length or 1.0
+
+        floor = max_magnitude * 1e-6  # avoid log10(0) for exact-zero points
+        log_magnitude = np.log10(np.clip(magnitudes, floor, None))
+        lo, hi = log_magnitude.min(), log_magnitude.max()
+        normalized = (log_magnitude - lo) / (hi - lo) if hi > lo else np.ones_like(log_magnitude)
+        lengths = diagonal * _VECTOR_ARROW_TARGET_FRACTION * (
+            _VECTOR_ARROW_MIN_LENGTH_RATIO + (1.0 - _VECTOR_ARROW_MIN_LENGTH_RATIO) * normalized
+        )
+
+        scale_key = "_glyph_arrow_length"
+        mesh.point_data[scale_key] = lengths
+        try:
+            glyphs = mesh.glyph(orient=array_name, scale=scale_key, factor=1.0,
+                                 tolerance=_VECTOR_ARROW_DECIMATION)
+        except Exception as exc:
+            self.warning_label.setText(f"Vector arrows failed: {exc}")
+            return None
+        finally:
+            # Internal-only helper array - don't leave it in the mesh's array
+            # list (would otherwise show up in the Field dropdown's arrays).
+            del mesh.point_data[scale_key]
+        return self.plotter.add_mesh(glyphs, color="black", reset_camera=False)
 
     # ---------- Redraw ----------
 
@@ -680,6 +812,14 @@ class FieldViewerWindow(QDialog):
                 display_mesh, color="lightgrey", opacity=opacity, show_edges=show_edges,
                 reset_camera=False)
 
+        if self._vector_actor is not None:
+            self.plotter.remove_actor(self._vector_actor, render=False)
+            self._vector_actor = None
+        if (self.show_vectors_cb.isChecked() and self.show_vectors_cb.isEnabled()
+                and array_name and array_name in display_mesh.point_data
+                and display_mesh.point_data[array_name].ndim > 1):
+            self._vector_actor = self._add_vector_glyphs(display_mesh, array_name)
+
         # add_mesh(..., reset_camera=False) above means PyVista never auto-fits the
         # camera on its own (it otherwise would, since remove_actor() just left the
         # scene momentarily empty) - so do it ourselves, but only once per mesh
@@ -720,7 +860,7 @@ def main():
     parser.add_argument("--run-path",
                          help="a *_data run directory to search for field-result files "
                               "in, instead of passing file_path directly")
-    parser.add_argument("--source", choices=[_PALACE, _ELMER_THERMAL], default=_PALACE,
+    parser.add_argument("--source", choices=[_PALACE, _ELMER_EM, _ELMER_THERMAL], default=_PALACE,
                          help="which default array/colormap preset to use (default: palace)")
     args = parser.parse_args()
 
@@ -729,8 +869,21 @@ def main():
         if args.source == _PALACE:
             model_basename = os.path.basename(os.path.normpath(args.run_path)).removesuffix("_data")
             candidates = find_paraview_files(args.run_path, model_basename)
-        else:
+        elif args.source == _ELMER_THERMAL:
             candidates = [find_thermal_paraview_file(args.run_path)]
+        else:
+            # Elmer-as-EM-solver: no dedicated resolver module (setupEM.py's
+            # _resolve_elmer_field_files() glob-searches "fields*.pvd/pvtu/vtu"
+            # directly instead) - mirror that here for standalone use.
+            search_dirs = [os.path.join(args.run_path, "mesh"), args.run_path]
+            candidates = []
+            for pattern in ("fields*.pvd", "fields*.pvtu", "fields*.vtu"):
+                for d in search_dirs:
+                    candidates = sorted(glob.glob(os.path.join(d, pattern)))
+                    if candidates:
+                        break
+                if candidates:
+                    break
         file_paths = [c for c in candidates if c]
 
     if not file_paths:

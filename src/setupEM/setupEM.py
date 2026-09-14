@@ -1523,7 +1523,7 @@ class CreateModelTab(CreateModelTabBase):
         self.buttons_grid.addWidget(self.model_fit_btn, row, 1)
 
         # "View fields ..." opens field-dump data (Palace fdump / Elmer EM
-        # fields*.vtu) in whichever viewer Preferences > Create Model > "3D field
+        # fields*.vtu) in whichever viewer Preferences > Viewer > "3D field
         # viewer" selects - built-in (embedded PyVista) or external ParaView, see
         # open_viewer(). A separate row since it's independent of the S-parameter
         # viewer/model fit above. Only meaningful when fdump is set (otherwise
@@ -1912,13 +1912,6 @@ class CreateModelTab(CreateModelTabBase):
         self._update_viewer_button_label()
 
     def _update_viewer_button_label(self):
-        # Elmer-as-EM-solver mode has no built-in-viewer support (see
-        # open_field_viewer()'s docstring), so it always means ParaView there,
-        # regardless of the Preferences > Create Model > "3D field viewer"
-        # setting - no point labeling a choice that isn't actually offered.
-        if self.MainWindow.ElmerMode:
-            self.viewer_btn.setText("🖼️ View fields in ParaView...")
-            return
         viewer_label = "ParaView" if self._viewer_preference() == "paraview" else "Built-in"
         self.viewer_btn.setText(f"🖼️ View fields ({viewer_label})...")
 
@@ -1942,13 +1935,38 @@ class CreateModelTab(CreateModelTabBase):
         )
         return file_paths, not_found
 
+    def _resolve_elmer_field_files(self):
+        """(file_paths, not_found_message) for Elmer-as-EM-solver's field-dump
+        output - shared by launch_paraview() (external ParaView) and
+        open_field_viewer() (in-app PyVista viewer), same as
+        _resolve_palace_field_files() for Palace. Usually resolves to more than
+        one file: Elmer has no per-frequency .pvd collection like Palace, so
+        each solved frequency's fields_t000N.vtu/.pvtu is its own separate file -
+        the viewer's Result File picker lets the user choose between them."""
+        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        # Output File Name = File "fields" has no path prefix, so Elmer resolves it
+        # relative to the Mesh DB directory ("mesh" under run_path) rather than
+        # run_path itself - confirmed against a real run (same resolution mechanism
+        # found for thermal_results.vtu). Check run_path too, defensively.
+        search_dirs = [os.path.join(run_path, "mesh"), run_path]
+        file_paths = []
+        for pattern in ("fields*.pvd", "fields*.pvtu", "fields*.vtu"):
+            for d in search_dirs:
+                file_paths = sorted(glob.glob(os.path.join(d, pattern)))
+                if file_paths:
+                    break
+            if file_paths:
+                break
+        not_found = (
+            f"⚠️ No Elmer field-dump output found under {run_path}\n"
+            "(enable field dump before running the simulation)\n"
+        )
+        return file_paths, not_found
+
     def open_viewer(self):
         """Dispatch "View fields ..." to whichever viewer applies - the single
         entry point the merged button calls (see _update_viewer_button_label()
         for how its text is kept in sync with this same logic)."""
-        if self.MainWindow.ElmerMode:
-            self.launch_paraview()  # only option for this source, see that label logic
-            return
         if self._viewer_preference() == "paraview":
             if find_paraview_exe() is not None:
                 self.launch_paraview()
@@ -1957,8 +1975,8 @@ class CreateModelTab(CreateModelTabBase):
                 "⚠️ ParaView is selected as the 3D viewer in Preferences, but wasn't "
                 "found on this system (checked PATH and the usual install locations). "
                 "Falling back to the built-in viewer. Install ParaView, add it to "
-                "PATH, or switch back to \"Built-in\" under Preferences > Create "
-                "Model > 3D field viewer to avoid this message.\n"
+                "PATH, or switch back to \"Built-in\" under Preferences > Viewer > "
+                "3D field viewer to avoid this message.\n"
             )
         self.open_field_viewer()
 
@@ -1966,34 +1984,13 @@ class CreateModelTab(CreateModelTabBase):
         if self.MainWindow.PalaceMode:
             file_paths, not_found = self._resolve_palace_field_files()
         else:
-            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
-            # Output File Name = File "fields" has no path prefix, so Elmer resolves it
-            # relative to the Mesh DB directory ("mesh" under run_path) rather than
-            # run_path itself - confirmed against a real run (same resolution mechanism
-            # found for thermal_results.vtu). Check run_path too, defensively.
-            search_dirs = [os.path.join(run_path, "mesh"), run_path]
-            file_paths = []
-            for pattern in ("fields*.pvd", "fields*.pvtu", "fields*.vtu"):
-                for d in search_dirs:
-                    file_paths = sorted(glob.glob(os.path.join(d, pattern)))
-                    if file_paths:
-                        break
-                if file_paths:
-                    break
-            not_found = (
-                f"⚠️ No Elmer field-dump output found under {run_path}\n"
-                "(enable field dump before running the simulation)\n"
-            )
+            file_paths, not_found = self._resolve_elmer_field_files()
         self._open_in_paraview(file_paths, not_found)
 
     def open_field_viewer(self):
-        """Open the in-app PyVista 3D field viewer on Palace's field-dump output.
-
-        Palace mode only for v1 - Elmer-as-EM-solver mode's field-dump array
-        names have never been verified against a real run, so this button stays
-        hidden there (see _update_paraview_button_visibility()) rather than risk
-        a tailored preset silently picking the wrong/nonexistent array.
-        """
+        """Open the in-app PyVista 3D field viewer on the current mode's
+        field-dump output - Palace's fdump or Elmer-as-EM-solver's fields*.vtu,
+        see _resolve_palace_field_files()/_resolve_elmer_field_files()."""
         if __package__ in (None, ""):
             from field_viewer import FieldViewerWindow
         else:
@@ -2004,17 +2001,23 @@ class CreateModelTab(CreateModelTabBase):
             self.MainWindow.field_viewer_window.activateWindow()
             return
 
-        file_paths, not_found = self._resolve_palace_field_files()
+        if self.MainWindow.PalaceMode:
+            file_paths, not_found = self._resolve_palace_field_files()
+            source = "palace"
+        else:
+            file_paths, not_found = self._resolve_elmer_field_files()
+            source = "elmer_em"
         if not file_paths:
             self.log_area.appendPlainText(not_found)
             return
 
-        # find_paraview_files() can return more than one .pvd - e.g. Palace also
-        # writes a separate "driven_boundary" collection alongside the main "driven"
-        # one. Both are equally valid results to look at (boundary-only vs. full
-        # volumetric field), so hand the whole list to the viewer and let it offer
-        # a picker rather than silently guessing which one the user wants.
-        self.MainWindow.field_viewer_window = FieldViewerWindow(self.MainWindow, file_paths, "palace")
+        # More than one file is common here: Palace can write a separate
+        # "driven_boundary" collection alongside the main "driven" one, and Elmer
+        # has one file per solved frequency instead of Palace's single .pvd
+        # collection. Neither case has an inherently "right" default, so hand the
+        # whole list to the viewer and let it offer a picker rather than silently
+        # guessing which one the user wants.
+        self.MainWindow.field_viewer_window = FieldViewerWindow(self.MainWindow, file_paths, source)
         self.MainWindow.field_viewer_window.destroyed.connect(
             lambda: setattr(self.MainWindow, "field_viewer_window", None))
         self.MainWindow.field_viewer_window.show()
