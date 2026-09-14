@@ -134,13 +134,20 @@ _E_FIELD_COMPLEX_KEYS = {
 }
 
 # Vector-arrow (glyph) overlay auto-sizing: the largest arrow is scaled to span
-# this fraction of the mesh's own bounding-box diagonal, regardless of the
-# selected array's physical units/magnitude - E-field (V/m) and B-field (T)
-# values differ by many orders of magnitude, so a fixed/manual arrow length
-# would be either invisible or overwhelming depending on which array is
-# selected; this keeps arrows a sensible, consistent on-screen size no matter
-# which vector field or domain scale is loaded.
-_VECTOR_ARROW_TARGET_FRACTION = 0.08
+# a percentage of the mesh's own bounding-box diagonal (the "Arrow size"
+# slider, in percent - see _add_vector_glyphs()), regardless of the selected
+# array's physical units/magnitude - E-field (V/m) and B-field (T) values
+# differ by many orders of magnitude, so a fixed/manual arrow length would be
+# either invisible or overwhelming depending on which array is selected; the
+# bounding-box-relative scaling keeps arrows a sensible, consistent on-screen
+# size no matter which vector field or domain scale is loaded, and the slider
+# then lets the user scale that up or down to taste.
+_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT = 8
+# QSlider is integer-only, so a 0.5% step is represented as an integer count
+# of half-percent units internally (arrow_size_slider's range/value are in
+# these units) - see _on_arrow_size_changed()/_add_vector_glyphs() for the
+# conversion back to a plain percentage.
+_ARROW_SIZE_STEP_PERCENT = 0.5
 # Shortest arrow (smallest-magnitude point actually glyphed) is still drawn at
 # this fraction of the longest arrow's length, rather than shrinking toward
 # zero - see _add_vector_glyphs() for why a raw linear magnitude->length
@@ -150,10 +157,15 @@ _VECTOR_ARROW_TARGET_FRACTION = 0.08
 # length made every arrow but the single hottest point invisibly short).
 _VECTOR_ARROW_MIN_LENGTH_RATIO = 0.15
 # Decimation tolerance (fraction of bounding box length) passed to
-# pv.DataSet.glyph() - without this, a dense field-dump mesh (tens/hundreds of
+# pv.DataSet.glyph() as a multiple of the current arrow size, not a fixed
+# value - without any decimation, a dense field-dump mesh (tens/hundreds of
 # thousands of points) would get one arrow per point, unreadable and slow to
-# render.
-_VECTOR_ARROW_DECIMATION = 0.02
+# render. Tying it to arrow size (rather than a constant) means "Arrow size"
+# also controls arrow count: smaller arrows need less spacing to stay
+# readable, so shrinking them packs more in; bigger arrows need more room to
+# avoid overlapping, so enlarging them thins them out. At the default 8%
+# arrow size this reproduces the original fixed 0.02 tolerance exactly.
+_VECTOR_ARROW_DECIMATION_RATIO = 0.25
 
 
 def _load_full_mesh(file_path):
@@ -488,14 +500,9 @@ class FieldViewerWindow(QDialog):
         self.log_scale_cb.toggled.connect(self._on_redraw_needed)
         field_layout.addWidget(self.log_scale_cb)
 
-        # Only meaningful (and enabled) when the selected Field array is itself
-        # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
-        # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
-        self.show_vectors_cb = QCheckBox("Show arrows")
-        self.show_vectors_cb.setEnabled(False)
-        self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
-        field_layout.addWidget(self.show_vectors_cb)
-
+        # Color range (Min/Max/Reset) directly below the array/log-scale
+        # controls it applies to - vector-arrow controls (a separate concern)
+        # follow below, rather than interleaving the two.
         clim_layout = QHBoxLayout()
         clim_layout.addWidget(QLabel("Min:"))
         self.clim_min_edit = QLineEdit()
@@ -515,6 +522,24 @@ class FieldViewerWindow(QDialog):
         self.clim_reset_btn.setDefault(False)
         self.clim_reset_btn.clicked.connect(self._on_clim_reset_clicked)
         field_layout.addWidget(self.clim_reset_btn)
+
+        # Only meaningful (and enabled) when the selected Field array is itself
+        # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
+        # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
+        self.show_vectors_cb = QCheckBox("Show arrows")
+        self.show_vectors_cb.setEnabled(False)
+        self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
+        field_layout.addWidget(self.show_vectors_cb)
+
+        self.arrow_size_label = QLabel(f"Arrow size: {_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT}%")
+        self.arrow_size_label.setEnabled(False)
+        field_layout.addWidget(self.arrow_size_label)
+        self.arrow_size_slider = QSlider(Qt.Horizontal)
+        self.arrow_size_slider.setRange(round(1 / _ARROW_SIZE_STEP_PERCENT), round(10 / _ARROW_SIZE_STEP_PERCENT))
+        self.arrow_size_slider.setValue(round(_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT / _ARROW_SIZE_STEP_PERCENT))
+        self.arrow_size_slider.setEnabled(False)
+        self.arrow_size_slider.valueChanged.connect(self._on_arrow_size_changed)
+        field_layout.addWidget(self.arrow_size_slider)
 
         field_layout.addStretch()
         field_group.setLayout(field_layout)
@@ -662,6 +687,11 @@ class FieldViewerWindow(QDialog):
         self.opacity_label.setText(f"Opacity: {value}%")
         self._redraw()
 
+    def _on_arrow_size_changed(self, value):
+        percent = value * _ARROW_SIZE_STEP_PERCENT
+        self.arrow_size_label.setText(f"Arrow size: {percent:g}%")
+        self._redraw()
+
     # ---------- Axis views ----------
 
     def _set_view(self, axis, sign):
@@ -756,6 +786,8 @@ class FieldViewerWindow(QDialog):
             else "Only available when the selected Field is a vector array "
                  "(e.g. E_real, B_real, S)"
         )
+        self.arrow_size_label.setEnabled(is_vector)
+        self.arrow_size_slider.setEnabled(is_vector)
 
     def _reset_clim_range(self):
         """(Re-)populate the Min/Max fields from the currently selected array's
@@ -803,11 +835,13 @@ class FieldViewerWindow(QDialog):
 
     def _add_vector_glyphs(self, mesh, array_name):
         """Build and add an arrow-glyph actor oriented from mesh's array_name
-        vector array, auto-scaled so the longest arrow spans
-        _VECTOR_ARROW_TARGET_FRACTION of the mesh's own bounding-box diagonal
+        vector array, auto-scaled so the longest arrow spans the "Arrow size"
+        slider's percentage of the mesh's own bounding-box diagonal -
         regardless of the field's physical units/magnitude or the domain's
-        physical size (Palace um-scale vs. Elmer mm-scale) - see that
-        constant's comment.
+        physical size (Palace um-scale vs. Elmer mm-scale), so the slider
+        means the same thing (a fraction of what's on screen) no matter which
+        vector field or domain is loaded - see arrow_size_slider's creation
+        in _build_ui().
 
         Arrow length is mapped from log10(magnitude), not magnitude directly:
         a linear mapping (length proportional to raw magnitude) leaves only
@@ -819,6 +853,11 @@ class FieldViewerWindow(QDialog):
         length so even the smallest-magnitude glyphed point stays visible,
         while direction (not length) remains the primary signal for outliers.
 
+        Arrow count follows arrow size too, via the decimation tolerance
+        passed to mesh.glyph() - see _VECTOR_ARROW_DECIMATION_RATIO's comment.
+        Smaller arrows pack in more densely, larger ones thin out to avoid
+        overlapping, rather than count staying fixed while only size changes.
+
         Returns None (no actor added) if the array is all-zero or glyphing
         fails, rather than raising - same graceful-degradation spirit as the
         rest of this viewer's redraw path.
@@ -829,12 +868,14 @@ class FieldViewerWindow(QDialog):
         if max_magnitude <= 0:
             return None
         diagonal = mesh.length or 1.0
+        target_fraction = (self.arrow_size_slider.value() * _ARROW_SIZE_STEP_PERCENT) / 100.0
+        decimation = target_fraction * _VECTOR_ARROW_DECIMATION_RATIO
 
         floor = max_magnitude * 1e-6  # avoid log10(0) for exact-zero points
         log_magnitude = np.log10(np.clip(magnitudes, floor, None))
         lo, hi = log_magnitude.min(), log_magnitude.max()
         normalized = (log_magnitude - lo) / (hi - lo) if hi > lo else np.ones_like(log_magnitude)
-        lengths = diagonal * _VECTOR_ARROW_TARGET_FRACTION * (
+        lengths = diagonal * target_fraction * (
             _VECTOR_ARROW_MIN_LENGTH_RATIO + (1.0 - _VECTOR_ARROW_MIN_LENGTH_RATIO) * normalized
         )
 
@@ -842,7 +883,7 @@ class FieldViewerWindow(QDialog):
         mesh.point_data[scale_key] = lengths
         try:
             glyphs = mesh.glyph(orient=array_name, scale=scale_key, factor=1.0,
-                                 tolerance=_VECTOR_ARROW_DECIMATION)
+                                 tolerance=decimation)
         except Exception as exc:
             self.warning_label.setText(f"Vector arrows failed: {exc}")
             return None
@@ -850,7 +891,7 @@ class FieldViewerWindow(QDialog):
             # Internal-only helper array - don't leave it in the mesh's array
             # list (would otherwise show up in the Field dropdown's arrays).
             del mesh.point_data[scale_key]
-        return self.plotter.add_mesh(glyphs, color="black", reset_camera=False)
+        return self.plotter.add_mesh(glyphs, color="dimgray", reset_camera=False)
 
     # ---------- Redraw ----------
 
