@@ -1584,8 +1584,16 @@ class StackupEditorWindow(QDialog):
               the cascaded values) only if the user accepts the cascade
         """
         old_name = element.get("Name")
-        element.set("Name", new_value)
-        if not old_name or old_name == new_value:
+        # mirror ElementTableEditor._set_attr()'s own normal-path handling of an
+        # empty value (delete the attribute, don't store Name="") - that path is
+        # skipped entirely once this hook returns True, so it's this hook's job
+        if new_value:
+            element.set("Name", new_value)
+        elif "Name" in element.attrib:
+            del element.attrib["Name"]
+        # an empty new_value can't be a valid reference target - never offer to
+        # point existing References/Materials at "", that would just corrupt them
+        if not old_name or not new_value or old_name == new_value:
             return
 
         referrers = [(ref_attr, candidate)
@@ -1605,8 +1613,14 @@ class StackupEditorWindow(QDialog):
         if reply == QMessageBox.Yes:
             for ref_attr, referring_el in referrers:
                 referring_el.set(ref_attr, new_value)
-            for editor in editors_to_reload:
-                editor.reload()
+            # deferred, same reasoning/pattern as ElementTableEditor._set_attr()'s own
+            # reload_on_attr_change branch: this may still be firing from inside the
+            # very cell/item whose own itemChanged signal triggered this rename ("Name"
+            # isn't in reload_on_attr_change, so that existing deferral doesn't cover
+            # this path) - reload() tearing down the table synchronously here would
+            # destroy that item while its signal is still dispatching.
+            QTimer.singleShot(0, self._guarded(
+                lambda editors=editors_to_reload: [editor.reload() for editor in editors]))
 
     def _handle_material_name_change(self, element, attr, new_value):
         """pre_set_attr_fn for the Materials editor: renaming a material that's still

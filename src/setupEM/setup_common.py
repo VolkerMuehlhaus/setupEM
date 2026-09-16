@@ -2032,20 +2032,40 @@ class ChipletSwitcher(QWidget):
         """Call whenever the stackup is (re)loaded - groups is a stackup's
         dielectrics_list.chiplet_groups (may be None, or have zero/one chiplets, in which
         case this stays/becomes hidden and does nothing else).
+
+        In the Stackup Editor this runs after every single edit (see _refresh_preview()),
+        not just an actual file (re)load - so it keeps showing whichever chiplet was
+        already active, by id, if that id still exists in the new grouping, rather than
+        always snapping back to the first one and disorienting the user mid-edit. Falls
+        back to the first chiplet only when there was no previous selection or it no
+        longer exists (e.g. that chiplet was just renamed or removed).
         """
         chiplets = groups.chiplets if groups is not None else []
-        self._chiplet_ids = [chiplet.id for chiplet in chiplets]
+        new_ids = [chiplet.id for chiplet in chiplets]
 
+        previous_id = (self._chiplet_ids[self.combo.currentIndex()]
+                       if self._chiplet_ids and 0 <= self.combo.currentIndex() < len(self._chiplet_ids)
+                       else None)
+        self._chiplet_ids = new_ids
+        index = self._chiplet_ids.index(previous_id) if previous_id in self._chiplet_ids else 0
+
+        # setCurrentIndex() is also kept inside the signals-blocked region (not just
+        # clear()/addItems()) - whether it actually changes anything is unpredictable
+        # (Qt only emits when the resulting index differs from whatever clear()/
+        # addItems() already left it at), so relying on it to reach _on_index_changed()
+        # would sometimes fire the update and sometimes silently not; the explicit calls
+        # below every time this method runs are the one reliable path instead.
         self.combo.blockSignals(True)
         self.combo.clear()
         self.combo.addItems(self._chiplet_ids)
+        if self._chiplet_ids:
+            self.combo.setCurrentIndex(index)
         self.combo.blockSignals(False)
 
         self.setVisible(len(chiplets) > 1)
         if chiplets:
-            self.combo.setCurrentIndex(0)
-            self._update_label(0, len(chiplets))
-            self._on_chiplet_changed(self._chiplet_ids[0])
+            self._update_label(index, len(chiplets))
+            self._on_chiplet_changed(self._chiplet_ids[index])
 
     def _on_index_changed(self, index):
         if index < 0 or index >= len(self._chiplet_ids):
