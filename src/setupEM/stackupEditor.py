@@ -72,11 +72,13 @@ else:
 # as part of the setupEM package, so relative import fails.
 if __package__ in (None, ""):
     from setup_common import (
-        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+        VectorWidget, ChipletSwitcher, epsilon_to_color,
+        default_stackup_dielectric_label, default_stackup_metal_label,
     )
 else:
     from .setup_common import (
-        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+        VectorWidget, ChipletSwitcher, epsilon_to_color,
+        default_stackup_dielectric_label, default_stackup_metal_label,
     )
 
 # QSettings scope for the "Open Recent" file list - shared across setupEM/setupThermal/
@@ -1048,7 +1050,7 @@ class StackupPreviewWindow(QWidget):
     deleteLater() on this window instead of relying on Qt object-tree cleanup.
     """
 
-    def __init__(self, vector_widget, parent=None, legend_widget=None):
+    def __init__(self, vector_widget, parent=None, legend_widget=None, chiplet_switcher=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Stackup Preview")
         self.resize(700, 900)
@@ -1056,6 +1058,8 @@ class StackupPreviewWindow(QWidget):
         # vector_widget is a QGraphicsView, already self-scrolling - no QScrollArea
         # wrapper needed (or wanted: it would nest a second set of scrollbars).
         layout = QVBoxLayout()
+        if chiplet_switcher is not None:
+            layout.addWidget(chiplet_switcher)
         layout.addWidget(vector_widget)
         if legend_widget is not None:
             layout.addWidget(legend_widget)
@@ -1454,6 +1458,8 @@ class StackupEditorWindow(QDialog):
             metal_color_fn=self.MainWindow.stackup_metal_color,
         )
         self.vector_widget.setMinimumSize(600, 800)
+        self.chiplet_switcher = ChipletSwitcher(self.vector_widget.set_active_chiplet)
+        self.vector_widget.set_chiplet_switcher(self.chiplet_switcher)
 
         # two-way sync between the preview graphics and the Dielectric Stack/Layers
         # tables: clicking a shape in the preview selects its row (and switches to
@@ -1479,7 +1485,8 @@ class StackupEditorWindow(QDialog):
         # in closeEvent() below rather than via Qt's parent-child auto-delete
         legend_fn = getattr(self.MainWindow, "stackup_color_legend", None)
         legend_widget = legend_fn() if legend_fn is not None else None
-        self.preview_window = StackupPreviewWindow(self.vector_widget, legend_widget=legend_widget)
+        self.preview_window = StackupPreviewWindow(self.vector_widget, legend_widget=legend_widget,
+                                                    chiplet_switcher=self.chiplet_switcher)
         self.preview_window.move(self.x() + self.width() + 20, self.y())
 
         if initial_filename and os.path.isfile(initial_filename):
@@ -2900,6 +2907,7 @@ class StackupEditorWindow(QDialog):
             # preview refresh.
             return
         self.vector_widget.refresh(materials_list, dielectrics_list, metals_list)
+        self.chiplet_switcher.set_groups(dielectrics_list.chiplet_groups)
 
     def _on_preview_element_selected(self, kind, name):
         """Preview -> table: a shape was clicked in the cross-section preview -
