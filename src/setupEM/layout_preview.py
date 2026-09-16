@@ -44,6 +44,11 @@ from PySide6.QtCore import Qt, QPointF, QLineF, Signal
 
 from gds2palace import gds_reader, stackup_reader
 
+if __package__ in (None, ""):
+    import gds_hierarchy_scan
+else:
+    from . import gds_hierarchy_scan
+
 DEFAULT_LAYER_COLOR = "#a0a0a0"   # stackup_material.color has no default (None) if XML omits Color=
 PEC_LAYER_COLOR = "#b4dcff"       # matches setup_common.PEC_MATERIAL_COLOR's soft blue
 PORT_OUTLINE_COLOR = "#ff33ff"
@@ -60,6 +65,23 @@ BOUNDARY_FILL_COLOR = QColor(51, 204, 255, 100)
 MARKER_OUTLINE_WIDTH = 3
 # initial layer-opacity slider position
 DEFAULT_LAYER_OPACITY_PERCENT = 70
+
+# above this many polygons on the selected layers/purpose, refresh() warns
+# before actually reading the GDS - gds_reader.read_gds() flattens the whole
+# cell hierarchy (expanding every array/reference into real geometry) and
+# then this window builds one QGraphicsPolygonItem per polygon, either of
+# which can take a very long time (or exhaust memory) for a layout with
+# dense fill/via arrays, long before the window becomes responsive again
+POLYGON_COUNT_WARNING_THRESHOLD = 50000
+
+
+def _estimate_polygon_count(gds_path, cellname, layernumbers, purposelist):
+    """Thin wrapper around gds_hierarchy_scan.estimate_polygon_count() - see
+    that function's docstring for the "walk the hierarchy, don't flatten it"
+    approach. Kept as a module-level name here since refresh() below already
+    calls it that way.
+    """
+    return gds_hierarchy_scan.estimate_polygon_count(gds_path, cellname, layernumbers, purposelist)
 
 # cross-window highlight (see set_highlighted_layer()): a layer selected in the
 # Stackup Preview/Editor gets this outline + hatch fill, above every regular
@@ -590,6 +612,26 @@ class LayoutPreviewWindow(QDialog):
         layernumbers.extend(marker_by_layernum.keys())
 
         gds_path_to_read = self._gds_override_path or saved_values["GdsFile"]
+
+        # cheap (no flattening) pre-check before committing to the potentially
+        # very slow read_gds() + scene-building work below - see
+        # _estimate_polygon_count()'s docstring for why this doesn't just
+        # flatten and count directly
+        estimated_count = _estimate_polygon_count(
+            gds_path_to_read, saved_values["cellname"], layernumbers, saved_values["purpose"])
+        if estimated_count is not None and estimated_count > POLYGON_COUNT_WARNING_THRESHOLD:
+            reply = QMessageBox.warning(
+                self, "Large layout",
+                f"This layout has an estimated {estimated_count:,} polygons on the "
+                "selected layers/purpose. Loading it here can make this window very "
+                "slow or unresponsive for a long time.\n\nContinue anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                self._info_base_text = (
+                    f"Not loaded: estimated {estimated_count:,} polygons "
+                    f"exceeds the {POLYGON_COUNT_WARNING_THRESHOLD:,}-polygon warning threshold")
+                self._update_info_label()
+                return
 
         # reading/preprocessing the GDS and building every polygon item below
         # can take a while for a large layout - show a wait cursor for the

@@ -52,6 +52,7 @@ import argparse
 import glob
 import os
 import sys
+import time
 
 import numpy as np
 import pyvista as pv
@@ -63,6 +64,7 @@ from PySide6.QtWidgets import (
     QSlider, QComboBox, QLineEdit, QStyleFactory,
 )
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QShortcut, QKeySequence
 
 # __package__ is None/"" when this file is run directly rather than imported as part
 # of the setupEM package, so relative import fails - same dual-mode pattern used
@@ -97,6 +99,10 @@ _VIEW_UP = {"X": (0.0, 0.0, 1.0), "Y": (0.0, 0.0, 1.0), "Z": (0.0, 1.0, 0.0)}
 # since Qt interpolates a slider continuously with the pointer regardless of
 # its integer step count.
 _SLIDER_STEPS = 1_000_000
+
+# Pixel size for the plain pv.Plotter used in --screenshot/headless mode (see
+# FieldViewerWindow._build_ui()) - no GUI window to inherit a size from there.
+_SCREENSHOT_WINDOW_SIZE = (1280, 960)
 
 # Sources this viewer knows a tailored default array/colormap for. Anything else
 # (not currently reachable from the app, but kept open for standalone use) falls
@@ -133,6 +139,31 @@ _E_FIELD_COMPLEX_KEYS = {
     _ELMER_EM: ("electric field re", "electric field im"),
 }
 
+# Real-part array name per source, for the CLI's --field e/b/s shorthand (see
+# _resolve_field_shorthand()) - same naming mismatch as _E_FIELD_COMPLEX_KEYS
+# above, just for the real-only part plus B-field and the Poynting vector.
+# "s" has no Elmer-EM entry: that field dump has no Poynting-vector array
+# (confirmed against a real Elmer-EM field dump - only E/B field re/im).
+# "temp" isn't here at all - Elmer thermal's temperature array has no fixed
+# name, resolved via the same substring match _pick_default_array() uses.
+_FIELD_REAL_KEY = {
+    "e": {_PALACE: "E_real", _ELMER_EM: "electric field re"},
+    "b": {_PALACE: "B_real", _ELMER_EM: "magnetic flux density re"},
+    "s": {_PALACE: "S"},
+}
+
+# Arrays where a dB range means 20*log10(ratio) (field/amplitude convention)
+# rather than 10*log10(ratio) (power/intensity convention) - see
+# _db_range_to_clim(). Built from _FIELD_REAL_KEY's E/B entries plus their
+# imaginary-part/magnitude counterparts; anything not in this set (S, U_e,
+# U_m, an unrecognized --array value) uses the power convention instead.
+_FIELD_AMPLITUDE_ARRAYS = {
+    "E_real", "E_imag", "E_magnitude", "B_real", "B_imag",
+    "electric field re", "electric field im",
+    "magnetic flux density re", "magnetic flux density im",
+    "magnetic field strength re", "magnetic field strength im",
+}
+
 # Vector-arrow (glyph) overlay auto-sizing: the largest arrow is scaled to span
 # a percentage of the mesh's own bounding-box diagonal (the "Arrow size"
 # slider, in percent - see _add_vector_glyphs()), regardless of the selected
@@ -143,11 +174,13 @@ _E_FIELD_COMPLEX_KEYS = {
 # size no matter which vector field or domain scale is loaded, and the slider
 # then lets the user scale that up or down to taste.
 _VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT = 8
-# QSlider is integer-only, so a 0.5% step is represented as an integer count
-# of half-percent units internally (arrow_size_slider's range/value are in
+# QSlider is integer-only, so a 0.2% step is represented as an integer count
+# of fifth-percent units internally (arrow_size_slider's range/value are in
 # these units) - see _on_arrow_size_changed()/_add_vector_glyphs() for the
 # conversion back to a plain percentage.
-_ARROW_SIZE_STEP_PERCENT = 0.5
+_ARROW_SIZE_STEP_PERCENT = 0.2
+_ARROW_SIZE_MIN_PERCENT = 0.2
+_ARROW_SIZE_MAX_PERCENT = 10
 # Shortest arrow (smallest-magnitude point actually glyphed) is still drawn at
 # this fraction of the longest arrow's length, rather than shrinking toward
 # zero - see _add_vector_glyphs() for why a raw linear magnitude->length
@@ -293,6 +326,47 @@ def _pick_default_array(mesh, source):
     return (available[0], "viridis", False) if available else (None, "viridis", False)
 
 
+def _resolve_field_shorthand(shorthand, mesh, source):
+    """Map a CLI --field shorthand ("e"/"b"/"s"/"temp") to an actual
+    point-data array name present in mesh, for this source. Returns None if
+    the shorthand doesn't apply to this source (e.g. "s" for Elmer-EM, which
+    has no Poynting-vector array) or the expected array isn't actually in
+    this particular file - the caller turns that into a clear CLI error
+    rather than silently keeping whatever array was already selected.
+    "temp" has no fixed name (same as _pick_default_array()'s own handling),
+    so it's resolved via substring match instead of _FIELD_REAL_KEY.
+    """
+    if shorthand == "temp":
+        key = next((k for k in mesh.point_data.keys() if "temp" in k.lower()), None)
+    else:
+        key = _FIELD_REAL_KEY.get(shorthand, {}).get(source)
+    return key if key is not None and key in mesh.point_data else None
+
+
+def _is_field_amplitude_array(array_name):
+    """True for an E/B-field array (dB range uses 20*log10 - see
+    _db_range_to_clim()), False for anything else (S, U_e, U_m, an
+    unrecognized --array value), which uses 10*log10 instead."""
+    return array_name in _FIELD_AMPLITUDE_ARRAYS
+
+
+def _db_range_to_clim(mesh, array_name, db_range):
+    """(floor, data_max) for a log color scale spanning db_range dB below
+    array_name's own maximum in mesh, using the field-amplitude convention
+    (20*log10) for E/B-field arrays and the power/intensity convention
+    (10*log10) for everything else - see _is_field_amplitude_array(). Returns
+    None if the array has no positive values to scale from (nothing sensible
+    to show on a log scale)."""
+    magnitudes = _array_magnitudes(mesh[array_name])
+    positive = magnitudes[magnitudes > 0]
+    if positive.size == 0:
+        return None
+    data_max = positive.max()
+    db_per_decade = 20.0 if _is_field_amplitude_array(array_name) else 10.0
+    floor = data_max / 10.0 ** (db_range / db_per_decade)
+    return floor, data_max
+
+
 # ------------------------------------------------------------------
 # Field Viewer window
 # ------------------------------------------------------------------
@@ -305,13 +379,19 @@ class FieldViewerWindow(QDialog):
     inherently the "right" one to default to, so the user picks) - with a single
     axis-aligned clip plane and a field/array picker."""
 
-    def __init__(self, MainWindow, file_paths, source):
+    def __init__(self, MainWindow, file_paths, source, off_screen=False):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.MainWindow = MainWindow
         self.file_paths = list(file_paths)
         self.file_path = self.file_paths[0]
         self.source = source
+        # CLI-only (see main()'s --screenshot): render off-screen instead of
+        # in a real, visible window - lets field_viewer.py run headless, e.g.
+        # in an agent/script context with no display. The GUI (setupEM.py/
+        # setupThermal.py's open_field_viewer()) never passes this, so it
+        # defaults to the normal on-screen behavior there.
+        self._off_screen = off_screen
 
         self._full_mesh = None
         self._mesh_actor = None
@@ -483,10 +563,31 @@ class FieldViewerWindow(QDialog):
         self.opacity_slider.setValue(100)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         display_layout.addWidget(self.opacity_slider)
+
+        self.arrow_size_label = QLabel(f"Arrow size: {_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT}%")
+        self.arrow_size_label.setEnabled(False)
+        display_layout.addWidget(self.arrow_size_label)
+        self.arrow_size_slider = QSlider(Qt.Horizontal)
+        self.arrow_size_slider.setRange(round(_ARROW_SIZE_MIN_PERCENT / _ARROW_SIZE_STEP_PERCENT),
+                                         round(_ARROW_SIZE_MAX_PERCENT / _ARROW_SIZE_STEP_PERCENT))
+        self.arrow_size_slider.setValue(round(_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT / _ARROW_SIZE_STEP_PERCENT))
+        self.arrow_size_slider.setEnabled(False)
+        self.arrow_size_slider.valueChanged.connect(self._on_arrow_size_changed)
+        display_layout.addWidget(self.arrow_size_slider)
+
+        # Only meaningful (and enabled) when the selected Field array is itself
+        # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
+        # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
+        self.show_vectors_cb = QCheckBox("Show arrows")
+        self.show_vectors_cb.setEnabled(False)
+        self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
+        display_layout.addWidget(self.show_vectors_cb)
+
         self.show_edges_cb = QCheckBox("Overlay mesh")
         self.show_edges_cb.setChecked(False)
         self.show_edges_cb.toggled.connect(self._on_redraw_needed)
         display_layout.addWidget(self.show_edges_cb)
+
         display_layout.addStretch()
         display_group.setLayout(display_layout)
         controls_layout.addWidget(display_group, 1)
@@ -503,16 +604,22 @@ class FieldViewerWindow(QDialog):
         # Color range (Min/Max/Reset) directly below the array/log-scale
         # controls it applies to - vector-arrow controls (a separate concern)
         # follow below, rather than interleaving the two.
-        clim_layout = QHBoxLayout()
-        clim_layout.addWidget(QLabel("Min:"))
+        # Min/Max stacked one per row (not side by side) - two QLineEdits
+        # sharing one row left each too narrow to read its own value
+        # comfortably, given the whole Field group's fixed column width.
+        min_layout = QHBoxLayout()
+        min_layout.addWidget(QLabel("Min:"))
         self.clim_min_edit = QLineEdit()
         self.clim_min_edit.editingFinished.connect(self._on_redraw_needed)
-        clim_layout.addWidget(self.clim_min_edit)
-        clim_layout.addWidget(QLabel("Max:"))
+        min_layout.addWidget(self.clim_min_edit)
+        field_layout.addLayout(min_layout)
+
+        max_layout = QHBoxLayout()
+        max_layout.addWidget(QLabel("Max:"))
         self.clim_max_edit = QLineEdit()
         self.clim_max_edit.editingFinished.connect(self._on_redraw_needed)
-        clim_layout.addWidget(self.clim_max_edit)
-        field_layout.addLayout(clim_layout)
+        max_layout.addWidget(self.clim_max_edit)
+        field_layout.addLayout(max_layout)
         self.clim_reset_btn = QPushButton("Reset range to data")
         # Without this, Qt treats this as the dialog's default button (the only
         # QPushButton in the window) and fires it on Enter from *any* focused
@@ -522,24 +629,6 @@ class FieldViewerWindow(QDialog):
         self.clim_reset_btn.setDefault(False)
         self.clim_reset_btn.clicked.connect(self._on_clim_reset_clicked)
         field_layout.addWidget(self.clim_reset_btn)
-
-        # Only meaningful (and enabled) when the selected Field array is itself
-        # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
-        # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
-        self.show_vectors_cb = QCheckBox("Show arrows")
-        self.show_vectors_cb.setEnabled(False)
-        self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
-        field_layout.addWidget(self.show_vectors_cb)
-
-        self.arrow_size_label = QLabel(f"Arrow size: {_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT}%")
-        self.arrow_size_label.setEnabled(False)
-        field_layout.addWidget(self.arrow_size_label)
-        self.arrow_size_slider = QSlider(Qt.Horizontal)
-        self.arrow_size_slider.setRange(round(1 / _ARROW_SIZE_STEP_PERCENT), round(10 / _ARROW_SIZE_STEP_PERCENT))
-        self.arrow_size_slider.setValue(round(_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT / _ARROW_SIZE_STEP_PERCENT))
-        self.arrow_size_slider.setEnabled(False)
-        self.arrow_size_slider.valueChanged.connect(self._on_arrow_size_changed)
-        field_layout.addWidget(self.arrow_size_slider)
 
         field_layout.addStretch()
         field_group.setLayout(field_layout)
@@ -577,8 +666,32 @@ class FieldViewerWindow(QDialog):
         self.warning_label.setStyleSheet("color: #b00000;")
         main_layout.addWidget(self.warning_label)
 
-        self.plotter = QtInteractor(self)
-        main_layout.addWidget(self.plotter, 1)
+        if self._off_screen:
+            # QtInteractor's off_screen mode still needs a real OpenGL context,
+            # which Qt only creates via a widget's paint/show machinery - never
+            # firing for a widget that's added to a layout but never actually
+            # shown (confirmed empirically: the render window gets its
+            # requested size but stays solid black, nothing ever drawn into
+            # it). A plain pv.Plotter(off_screen=True) has no such dependency
+            # on Qt's window system at all - real off-screen VTK rendering,
+            # confirmed working - so use that instead for CLI/headless use
+            # (--screenshot). It exposes the same add_mesh()/remove_actor()/
+            # render()/reset_camera()/camera_position/view_isometric()/
+            # screenshot()/close() API the rest of this class already calls
+            # generically on self.plotter, so no other method needs to
+            # branch on which one it is - it's just never added to
+            # main_layout since it isn't a QWidget.
+            self.plotter = pv.Plotter(off_screen=True, window_size=_SCREENSHOT_WINDOW_SIZE)
+        else:
+            self.plotter = QtInteractor(self)
+            main_layout.addWidget(self.plotter, 1)
+
+        # Ctrl+C copies the 3D view itself (not the control panels) to the
+        # clipboard as an image - window-scoped (default QShortcut context) so
+        # it fires regardless of which child widget currently has focus, same
+        # convention as layout_preview.py/result_viewer.py/stackupEditor.py.
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(self.plotter.grab()))
 
     # ---------- Result file picker ----------
 
@@ -679,6 +792,23 @@ class FieldViewerWindow(QDialog):
         lo, hi = self._full_mesh.bounds[lo_idx], self._full_mesh.bounds[hi_idx]
         fraction = self.clip_slider.value() / _SLIDER_STEPS
         return lo + fraction * (hi - lo)
+
+    def _position_um_to_slider_value(self, axis, position_um):
+        """Exact inverse of _slider_value_to_position(), for the given axis -
+        convert a desired position in um (matching the GUI's own display
+        units, see _POSITION_SCALE_TO_UM) into the clip_slider's integer step
+        value. Used by the CLI's --clip-position; clamped to [0, 1] the same
+        way _move_slider_to_max() already clamps its own fraction, so an
+        out-of-bounds position lands at the nearest edge instead of erroring.
+        """
+        if self._full_mesh is None:
+            return _SLIDER_STEPS // 2
+        position_native = position_um / _POSITION_SCALE_TO_UM.get(self.source, 1.0)
+        lo_idx, hi_idx = _AXIS_BOUNDS_INDEX[axis]
+        lo, hi = self._full_mesh.bounds[lo_idx], self._full_mesh.bounds[hi_idx]
+        fraction = (position_native - lo) / (hi - lo) if hi > lo else 0.5
+        fraction = min(max(fraction, 0.0), 1.0)
+        return round(fraction * _SLIDER_STEPS)
 
     def _on_redraw_needed(self, _value=None):
         self._redraw()
@@ -1123,7 +1253,57 @@ def main():
                               "in, instead of passing file_path directly")
     parser.add_argument("--source", choices=[_PALACE, _ELMER_EM, _ELMER_THERMAL], default=_PALACE,
                          help="which default array/colormap preset to use (default: palace)")
+
+    # --- Scripted/agentic use: everything below sets up the view without a
+    # human touching the GUI, by driving the same widgets a click would - see
+    # _redraw()'s docstring for why that's safe/correct to do programmatically.
+    parser.add_argument("--field", choices=["e", "b", "s", "temp"],
+                         help="shorthand array selection: e=E-field real, b=B-field real, "
+                              "s=Poynting vector (Palace only), temp=temperature (Elmer "
+                              "thermal only). Ignored if --array is also given.")
+    parser.add_argument("--array", help="exact point-data array name to color by "
+                                         "(e.g. E_imag, U_e, B_imag) - overrides --field")
+    parser.add_argument("--log-scale", action="store_true", help="use a log color scale")
+    parser.add_argument("--log-range-db", type=float,
+                         help="set the color range's minimum this many dB below the "
+                              "data's own maximum (implies --log-scale) instead of using "
+                              "the data's own minimum - 20*log10 for E/B-field arrays, "
+                              "10*log10 for everything else (S, energy density, ...)")
+    parser.add_argument("--clip-axis", choices=["X", "Y", "Z"],
+                         help="enable the clip plane on this axis")
+    parser.add_argument("--clip-position", type=float,
+                         help="clip plane position in um along --clip-axis (requires it)")
+    parser.add_argument("--clip-max", action="store_true",
+                         help="move the clip plane to the hotspot (largest value of the "
+                              "selected field) along --clip-axis, like Find max. (requires it)")
+    parser.add_argument("--arrows", action="store_true",
+                         help="overlay vector-field direction arrows (only takes effect "
+                              "when the selected array is a vector)")
+    parser.add_argument("--arrow-size", type=float,
+                         help=f"arrow size as a percent of the mesh's bounding-box diagonal "
+                              f"({_ARROW_SIZE_MIN_PERCENT}-{_ARROW_SIZE_MAX_PERCENT}, default "
+                              f"{_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT})")
+    parser.add_argument("--opacity", type=float, help="mesh opacity percent, 0-100 (default 100)")
+    parser.add_argument("--overlay-mesh", action="store_true",
+                         help="draw mesh cell edges on top of the colored surface")
+    parser.add_argument("--view-axis", choices=["X+", "X-", "Y+", "Y-", "Z+", "Z-", "ISO"],
+                         help="camera direction: look down +/-X/Y/Z, or ISO for a default "
+                              "isometric view. Not the same as --clip-axis.")
+    parser.add_argument("--screenshot",
+                         help="render off-screen and save a PNG here instead of opening an "
+                              "interactive window, then exit - works with no display")
     args = parser.parse_args()
+
+    if (args.clip_position is not None or args.clip_max) and not args.clip_axis:
+        parser.error("--clip-position/--clip-max require --clip-axis")
+    if args.clip_position is not None and args.clip_max:
+        parser.error("--clip-position and --clip-max are mutually exclusive")
+    if args.opacity is not None and not (0 <= args.opacity <= 100):
+        parser.error("--opacity must be between 0 and 100")
+    if args.arrow_size is not None and not (_ARROW_SIZE_MIN_PERCENT <= args.arrow_size <= _ARROW_SIZE_MAX_PERCENT):
+        parser.error(f"--arrow-size must be between {_ARROW_SIZE_MIN_PERCENT} and {_ARROW_SIZE_MAX_PERCENT}")
+    if args.log_range_db is not None and args.log_range_db <= 0:
+        parser.error("--log-range-db must be positive")
 
     file_paths = [args.file_path] if args.file_path else []
     if not file_paths and args.run_path:
@@ -1150,7 +1330,101 @@ def main():
     if not file_paths:
         parser.error("no file_path given, and none could be resolved from --run-path")
 
-    window = FieldViewerWindow(_StandaloneMainWindow(), file_paths, args.source)
+    def die(message):
+        print(f"Error: {message}", file=sys.stderr)
+        sys.exit(1)
+
+    window = FieldViewerWindow(_StandaloneMainWindow(), file_paths, args.source,
+                                off_screen=bool(args.screenshot))
+    if window._full_mesh is None:
+        die(window._load_error or "failed to load the field-result file")
+
+    if args.array:
+        if args.array not in window._full_mesh.point_data:
+            available = ", ".join(window._full_mesh.point_data.keys())
+            die(f"--array {args.array!r} not found in this file. Available arrays: {available}")
+        window.array_combo.setCurrentText(args.array)
+    elif args.field:
+        resolved = _resolve_field_shorthand(args.field, window._full_mesh, args.source)
+        if resolved is None:
+            die(f"--field {args.field!r} is not available for --source {args.source} in this "
+                f"file (e.g. 's' has no Elmer-EM equivalent, 'temp' needs a temperature-named "
+                f"array actually present)")
+        window.array_combo.setCurrentText(resolved)
+
+    if args.log_scale or args.log_range_db is not None:
+        window.log_scale_cb.setChecked(True)
+    if args.log_range_db is not None:
+        array_name = window.array_combo.currentText()
+        result = _db_range_to_clim(window._full_mesh, array_name, args.log_range_db)
+        if result is None:
+            die(f"--log-range-db: array {array_name!r} has no positive values to scale from")
+        floor, data_max = result
+        window.clim_min_edit.setText(f"{floor:.6g}")
+        window.clim_max_edit.setText(f"{data_max:.6g}")
+        window._redraw()
+
+    if args.opacity is not None:
+        window.opacity_slider.setValue(round(args.opacity))
+    if args.overlay_mesh:
+        window.show_edges_cb.setChecked(True)
+    if args.arrows:
+        window.show_vectors_cb.setChecked(True)
+        if not window.show_vectors_cb.isEnabled():
+            print("Warning: --arrows requested but the selected array is not a vector "
+                  "field; no arrows will be drawn.", file=sys.stderr)
+    if args.arrow_size is not None:
+        window.arrow_size_slider.setValue(round(args.arrow_size / _ARROW_SIZE_STEP_PERCENT))
+
+    if args.view_axis:
+        if args.view_axis == "ISO":
+            window.plotter.view_isometric()
+        else:
+            window._set_view(args.view_axis[0], 1 if args.view_axis[1] == "+" else -1)
+
+    if args.clip_axis:
+        axis_radio = {"X": window.axis_radio_x, "Y": window.axis_radio_y,
+                      "Z": window.axis_radio_z}[args.clip_axis]
+        axis_radio.setChecked(True)
+        if args.clip_max:
+            window._move_slider_to_max()
+        elif args.clip_position is not None:
+            window.clip_slider.setValue(
+                window._position_um_to_slider_value(args.clip_axis, args.clip_position))
+            window.clip_enabled_cb.setChecked(True)
+
+    if args.screenshot:
+        # _ClipWorker's succeeded/failed signals only get delivered while the
+        # event loop is pumped (see field_viewer.py's async-clip design) - and
+        # merely checking _clip_thread.isRunning() isn't enough proof the
+        # result was actually applied: on a small/fast mesh the background
+        # thread can finish (isRunning() -> False) before this loop ever
+        # calls processEvents() even once, leaving its queued succeeded
+        # signal undelivered and _apply_display_mesh() never called for it
+        # (confirmed - a first pass at this loop shipped a screenshot of the
+        # unclipped mesh because of exactly this race). Call processEvents()
+        # unconditionally every iteration, and only stop once the cache
+        # actually reflects the currently-desired clip state (or clipping
+        # isn't enabled at all).
+        deadline = time.monotonic() + 300
+        while True:
+            app.processEvents()
+            still_running = window._clip_thread is not None and window._clip_thread.isRunning()
+            current_key = window._current_clip_key()
+            settled = current_key is None or window._clipped_mesh_cache_key == current_key
+            if not still_running and settled:
+                break
+            time.sleep(0.02)
+            if time.monotonic() > deadline:
+                print("Warning: timed out waiting for the clip plane to finish computing - "
+                      "the screenshot may not reflect the requested clip position.",
+                      file=sys.stderr)
+                break
+        window.plotter.screenshot(args.screenshot)
+        print(f"Saved screenshot to {args.screenshot}")
+        window.close()
+        sys.exit(0)
+
     window.show()
     sys.exit(app.exec())
 

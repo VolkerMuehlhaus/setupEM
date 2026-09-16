@@ -57,6 +57,11 @@ from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QRectF, QTim
 import gds2palace
 from gds2palace import *
 
+if __package__ in (None, ""):
+    import gds_hierarchy_scan
+else:
+    from . import gds_hierarchy_scan
+
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
 # bundled copy, or an outdated pip install) may be missing modules/functions this
@@ -511,6 +516,32 @@ def update_missing_layer_column(table, source_col, comment_col, gds_layers_prese
         existing = table.item(row, comment_col)
         if existing is None or existing.text() != comment:
             table.setItem(row, comment_col, QTableWidgetItem(comment))
+
+
+def _derived_layer_range_is_safe(metals_list, layer_min, layer_max):
+    """True only if MainWindowBase.get_gds_layers_in_range()'s fast,
+    non-flattening hierarchy scan cannot possibly miss a layer that "exists"
+    solely via boolean derivation from other real layers - i.e. no stackup
+    DerivedLayer's output layer number falls inside [layer_min, layer_max].
+    A derived layer's polygons are computed by gds_reader.resolve_derived_layers()
+    from other real layers and never exist as literal geometry in the raw
+    GDS, so a hierarchy walk that only looks at actual polygons would wrongly
+    report one "absent" if it lands in the queried range.
+
+    Deliberately conservative: any failure to introspect derived_layers
+    safely returns False (use the slow/exact read_gds()-based path), never
+    the reverse. In the common case - no <DerivedLayers> section in the
+    stackup XML at all - metals_list.derived_layers is None and this returns
+    True immediately.
+    """
+    derived_layers = getattr(metals_list, "derived_layers", None)
+    if derived_layers is None:
+        return True
+    try:
+        layernums = derived_layers.getlayernumbers()
+    except Exception:
+        return False
+    return not any(layer_min <= n <= layer_max for n in layernums)
 
 
 # ----------------------------------------
@@ -3010,17 +3041,32 @@ class MainWindowBase(QMainWindow):
     def get_gds_layers_in_range(self, layer_min, layer_max):
         """Return the set of GDS layer numbers in [layer_min, layer_max] that
         have at least one polygon on a datatype in the current purpose filter
-        - read the same way gds2palace's own reader would (same cellname/
-        purpose/preprocess), so "present" here means the same thing it would
-        during a real model build. Returns an empty set if the GDS file or
-        stackup isn't loaded/valid, rather than raising - this is only used
-        for Ports/Thermal tab UI hints (next-available-layer suggestion,
+        - "present" here means the same thing it would during a real model
+        build (same cellname/purpose). Returns an empty set if the GDS file
+        or stackup isn't loaded/valid, rather than raising - this is only
+        used for Ports/Thermal tab UI hints (next-available-layer suggestion,
         "(missing in layout)" annotations), never anything simulation-critical.
 
         Reads the Input Files tab's *live* widgets rather than saved_values,
         which only gets populated once that tab has been left at least once -
         a Ports/Thermal tab reached before that would otherwise see an empty
         GdsFile and silently find nothing.
+
+        Answered via gds_hierarchy_scan.layers_present_in_range() (walks the
+        cell hierarchy directly, no flatten) rather than gds2palace's own
+        gds_reader.read_gds(), which unconditionally flattens the whole
+        chosen cell first - fine for building a real model, but this is
+        called automatically and repeatedly just from browsing to a GDS file
+        or switching to the Ports/Thermal tab (see refresh_source_layer_hints()/
+        showEvent() in setupEM.py/setupThermal.py), so a densely-arrayed
+        layout (fill patterns, via arrays) made that flatten cost tens of
+        seconds per call, multiple times, before the user did anything else.
+        Falls back to the original read_gds()-based computation only when a
+        stackup "derived layer" (util_stackup_reader.derived_layer - a
+        synthetic layer computed via boolean ops on other real layers, whose
+        polygons don't exist as literal raw-GDS geometry) could have its
+        output layer number inside [layer_min, layer_max] - the fast
+        hierarchy walk can't see those, so it isn't safe to use there.
         """
         gdsfile = self.file_tab.gds_file_edit.text()
         if not os.path.isfile(gdsfile) or self.metals_list is None:
@@ -3031,6 +3077,17 @@ class MainWindowBase(QMainWindow):
             purposelist = ast.literal_eval('[' + purpose_text + ']') if purpose_text else [0]
         except Exception:
             purposelist = [0]
+
+        if _derived_layer_range_is_safe(self.metals_list, layer_min, layer_max):
+            try:
+                return gds_hierarchy_scan.layers_present_in_range(
+                    gdsfile, cellname, layer_min, layer_max, purposelist)
+            except Exception:
+                return set()
+
+        # slow/exact path: only reached when a derived layer's synthetic
+        # output number could fall inside [layer_min, layer_max] - unchanged
+        # from the original implementation
         preprocess = self.file_tab.preprocess_gds_checkbox.isChecked()
         layernumbers = list(range(layer_min, layer_max + 1))
         captured_stdout = io.StringIO()
