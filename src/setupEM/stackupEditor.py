@@ -2600,6 +2600,14 @@ class StackupEditorWindow(QDialog):
            first-candidate-found behavior whenever there's no usable number on either side
            (e.g. converting a Dielectric with no Boundary=) - never worse than the old
            behavior, only better when there's an actual number to compare.
+
+           Known limitation, accepted rather than solved: this only disambiguates an actual
+           TIE. It doesn't help when a different chiplet's element is simply the closest
+           candidate with no tie at all - e.g. one chiplet's internal cumulative thickness
+           happening to land exactly on another chiplet's unrelated Layer z, which then wins
+           outright on proximity alone, regardless of GDS numbers, before this tie-break ever
+           runs. Solving that would need chiplet membership to already be known while doing
+           the very conversion that establishes it - a much bigger change than this one.
         Args:
             zmin (float): the element's own resolved absolute Zmin
             exclude_name (string): don't consider a candidate with this name (self)
