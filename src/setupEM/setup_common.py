@@ -965,6 +965,18 @@ class FileInputTab(QWidget):
         # never from update_variable_overrides_grid()'s own repopulation (blockSignals above).
         if item.column() != 2:
             return
+        # read_XML() rebuilds this table (update_variable_overrides_grid() does
+        # setRowCount(0) then repopulates) - running that synchronously from within
+        # itemChanged would tear down the very item/editor the view is still in the
+        # middle of committing, which Qt reports as "commitData called with an editor
+        # that does not belong to this view". Deferred via QTimer.singleShot(0, ...),
+        # the same pattern used elsewhere in this codebase for this exact hazard
+        # (see StackupEditorWindow._guarded() in stackupEditor.py).
+        QTimer.singleShot(0, self._apply_variable_override_change)
+
+    def _apply_variable_override_change(self):
+        if not shiboken6.isValid(self):
+            return
         self.MainWindow.saved_values["variable_overrides"] = self.get_variable_overrides()
         self.MainWindow.read_XML()
 
