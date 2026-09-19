@@ -98,8 +98,8 @@ This installs both `setupEM` and `setupThermal` as commands, plus `gds2palace` a
 
 Installing setupEM does **not** install AWS Palace itself - it only creates the input files Palace needs. Palace can be installed via Apptainer/Singularity containers or built from source with the spack package manager; see:
 
-- [Installing Palace using Apptainer](Installing_Palace_using_Apptainer.pdf)
-- [Installing Palace using spack](Installing_Palace_using_Spack.pdf)
+- [Installing Palace using Apptainer](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-apptainer.md)
+- [Installing Palace using spack](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-spack.md)
 
 To start Palace from setupEM, a wrapper script **run_palace** is used - this is where you point to your actual Palace installation (a remote copy and remote simulation is also possible). A template is available in the gds2palace repository's `scripts` directory.
 

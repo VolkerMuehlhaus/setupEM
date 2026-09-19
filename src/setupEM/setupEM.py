@@ -1846,6 +1846,9 @@ class CreateModelTab(CreateModelTabBase):
             if box.clickedButton() is install_btn:
                 self.log_area.appendPlainText("Installing snp2le with pip ...")
                 self._process_purpose = "install_snp2le"
+                # Reset any stale working directory left over from a previous
+                # run_model()/open_model_fit() call - see create_model()'s comment.
+                self.process.setWorkingDirectory("")
                 self.process.start(sys.executable, ["-m", "pip", "install", "snp2le"])
             else:
                 self.log_area.appendPlainText("⚠️ snp2le is not installed. Install it with: pip install snp2le")
@@ -2122,6 +2125,14 @@ class CreateModelTab(CreateModelTabBase):
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
             self._process_purpose = "create_mesh"
+            # self.process is shared with run_model()/open_model_fit(), which set a
+            # working directory of their own (a model's *_data folder) and never clear
+            # it afterwards - it's sticky on the QProcess instance. If that leftover
+            # directory no longer exists, Windows' CreateProcess refuses to launch
+            # ANY process, even python_exe given by absolute path here, and QProcess
+            # reports it as the generic FailedToStart. Reset it so this launch never
+            # depends on what a previous, unrelated action last pointed it at.
+            self.process.setWorkingDirectory("")
             self.process.start(python_exe, [pymodel_filename])
 
 
@@ -2265,6 +2276,12 @@ class CreateModelTab(CreateModelTabBase):
                     # bash -lc: login shell so ~/.profile (where PATH additions for run_palace/combine_snp
                     # usually live, per gds2palace's scripts/README.md) gets sourced, same as a manually
                     # typed ./run_sim in a fresh WSL login shell would.
+                    # wsl.exe's target directory is passed explicitly via --cd, not via
+                    # QProcess's own working directory - but reset the latter anyway, since
+                    # it's shared with the Elmer branches below and open_model_fit(), and a
+                    # stale, since-deleted directory left over from one of those would make
+                    # Windows' CreateProcess refuse to launch wsl.exe itself (FailedToStart).
+                    self.process.setWorkingDirectory("")
                     self.process.start("wsl.exe", [
                         "--cd", wsl_run_path,
                         "--", "bash", "-lc", "./run_sim"
