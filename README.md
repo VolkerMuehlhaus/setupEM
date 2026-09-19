@@ -6,6 +6,10 @@ Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, b
 
 See [CHANGES.md](doc/CHANGES.md) for details.
 
+## Video Tutorial
+
+https://www.youtube.com/playlist?list=PLQ6NbZzeLAVU
+
 ## SetupEM 
 
 [gds2palace](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2) enables an **RFIC FEM simulation** workflow where GDSII layout files are simulated using the [Palace FEM solver by AWS](https://awslabs.github.io/palace/stable/). setupEM provides a Python-based **graphical user interface** to configure and run gds2palace, instead of creating the simulation model code manually, and also start simulation in Palace.
