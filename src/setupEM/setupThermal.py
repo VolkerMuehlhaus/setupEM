@@ -858,6 +858,14 @@ class CreateModelTab(CreateModelTabBase):
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
             self._process_purpose = "create_mesh"
+            # self.process is shared with run_model(), which sets a working directory
+            # of its own (a model's *_data folder) and never clears it afterwards -
+            # it's sticky on the QProcess instance. If that leftover directory no
+            # longer exists, Windows' CreateProcess refuses to launch ANY process,
+            # even python_exe given by absolute path here, and QProcess reports it
+            # as the generic FailedToStart. Reset it so this launch never depends on
+            # what a previous, unrelated action last pointed it at.
+            self.process.setWorkingDirectory("")
             self.process.start(python_exe, [pymodel_filename])
 
 
