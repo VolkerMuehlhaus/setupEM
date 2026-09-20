@@ -1,9 +1,11 @@
 
-# What's New - September 19, 2026
+# What's New - September 16-20, 2026
+
+Fixed a native crash in the 3D field viewer that could occur when dragging the clip-plane position or opacity slider, especially on large/complex fields (mainly reported on Linux). The clip-plane, opacity, and arrow-size sliders now only update the view once you release the slider, rather than redrawing on every tick while dragging.
+
+The Result File picker's entries are now labeled so files that share a name across different folders (e.g. per AMR iteration, per excitation) are no longer indistinguishable from each other. Adaptive mesh refinement's per-iteration copies are also hidden from the list by default, with an **Include AMR iterations** checkbox to show them, keeping the picker short for AMR runs.
 
 Fixed an intermittent "Process error: the program could not be started" when clicking Preview, Create Mesh, or Start Simulation after a previous run left a now-deleted or otherwise stale working directory behind.
-
-# What's New - September 16, 2026
 
 Fixed setupEM/setupThermal becoming unresponsive when loading a large, densely-arrayed GDS file. **Layout Preview** now warns (with a cancel option) if the selected layout has too many polygons to load smoothly. Separately, just browsing to such a file (or switching to the Ports/Thermal tab) no longer hangs while computing port/thermal-source layer hints.
 

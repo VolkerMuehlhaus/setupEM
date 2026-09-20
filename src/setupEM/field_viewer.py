@@ -63,17 +63,17 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
     QSlider, QComboBox, QLineEdit, QStyleFactory,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QShortcut, QKeySequence
 
 # __package__ is None/"" when this file is run directly rather than imported as part
 # of the setupEM package, so relative import fails - same dual-mode pattern used
 # throughout setupEM.py/setup_common.py/result_viewer.py for sibling imports.
 if __package__ in (None, ""):
-    from palace_results import find_paraview_files
+    from palace_results import find_paraview_files, is_amr_iteration_path
     from thermal_results import find_thermal_paraview_file
 else:
-    from .palace_results import find_paraview_files
+    from .palace_results import find_paraview_files, is_amr_iteration_path
     from .thermal_results import find_thermal_paraview_file
 
 
@@ -266,33 +266,42 @@ def _exact_clip_by_axis(mesh, axis, position, sign):
 
 class _ClipWorker(QThread):
     """Runs _exact_clip_by_axis() on a background thread - see that function's
-    docstring for why this can't just run inline in _redraw(). Emits exactly
-    one of succeeded/failed, tagged with the (axis, position, sign) it was
-    computed for, so a result that's no longer relevant (the user has since
-    moved to a different axis/position/sign) can be told apart from one
-    that's still current - see FieldViewerWindow._on_clip_succeeded(), which
-    compares this against the currently-desired key rather than trusting an
-    opaque "is this the latest request" counter, so a result stays usable
-    even if something unrelated (opacity, color scale, ...) redrew in the
-    meantime while this was still computing.
-    """
-    succeeded = Signal(object, str, float, int)  # (clipped_mesh, axis, position, sign)
-    failed = Signal(str, str, float, int)        # (error_message, axis, position, sign)
+    docstring for why this can't just run inline in _redraw(). Always given a
+    private, deep-copied mesh (see FieldViewerWindow._full_mesh_for_clip) that
+    only this worker ever touches - never the live self._full_mesh the GUI
+    thread renders directly and mutates (add_mesh()'s active-scalars
+    assignment, _add_vector_glyphs()'s point-data add/delete) - so there is no
+    object either thread can race on, regardless of timing or mesh size.
 
-    def __init__(self, mesh, axis, position, sign):
+    Emits exactly one of succeeded/failed, tagged with the (axis, position,
+    sign, generation) it was computed for, so a result that's no longer
+    relevant (the user has since moved to a different axis/position/sign, or
+    loaded a different file entirely - see FieldViewerWindow._mesh_generation)
+    can be told apart from one that's still current - see
+    FieldViewerWindow._on_clip_succeeded(), which compares this against the
+    currently-desired key rather than trusting an opaque "is this the latest
+    request" counter, so a result stays usable even if something unrelated
+    (opacity, color scale, ...) redrew in the meantime while this was still
+    computing.
+    """
+    succeeded = Signal(object, str, float, int, int)  # (clipped_mesh, axis, position, sign, generation)
+    failed = Signal(str, str, float, int, int)        # (error_message, axis, position, sign, generation)
+
+    def __init__(self, mesh, axis, position, sign, generation):
         super().__init__()
         self._mesh = mesh
         self._axis = axis
         self._position = position
         self._sign = sign
+        self._generation = generation
 
     def run(self):
         try:
             result = _exact_clip_by_axis(self._mesh, self._axis, self._position, self._sign)
         except Exception as exc:
-            self.failed.emit(str(exc), self._axis, self._position, self._sign)
+            self.failed.emit(str(exc), self._axis, self._position, self._sign, self._generation)
             return
-        self.succeeded.emit(result, self._axis, self._position, self._sign)
+        self.succeeded.emit(result, self._axis, self._position, self._sign, self._generation)
 
 
 def _array_magnitudes(values):
@@ -375,16 +384,28 @@ class FieldViewerWindow(QDialog):
     """Own top-level window (no Qt parent, WA_DeleteOnClose - same lifecycle as
     ResultViewerWindow), showing one field-result file - picked from file_paths,
     which may hold more than one equally-valid result (e.g. Palace can write both
-    a main "driven" field dump and a separate "driven_boundary" one; neither is
-    inherently the "right" one to default to, so the user picks) - with a single
-    axis-aligned clip plane and a field/array picker."""
+    a main "driven" field dump and a separate "driven_boundary" one, per
+    excitation, per AMR iteration; neither is inherently the "right" one to
+    default to, so the user picks - see _build_file_labels() for how each one
+    is labeled) - with a single axis-aligned clip plane and a field/array
+    picker."""
 
     def __init__(self, MainWindow, file_paths, source, off_screen=False):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.MainWindow = MainWindow
         self.file_paths = list(file_paths)
-        self.file_path = self.file_paths[0]
+        # AMR runs write a copy of every field-dump file under each iteration<N>
+        # subfolder in addition to the final, most-refined pass, multiplying this
+        # list by the iteration count - default to hiding those (they exist for
+        # convergence tracking, not usually 3D inspection); the "Include AMR
+        # iterations" checkbox in _build_ui() reveals the rest on request. Falls
+        # back to the full list if every candidate is (unexpectedly) flagged as
+        # an iteration path, rather than ending up with nothing to show.
+        self._final_paths = [p for p in self.file_paths if not is_amr_iteration_path(p)] or self.file_paths
+        self._visible_paths = self._final_paths
+        self.file_path = self._visible_paths[0]
+        self._file_labels = self._build_file_labels(self.file_paths)
         self.source = source
         # CLI-only (see main()'s --screenshot): render off-screen instead of
         # in a real, visible window - lets field_viewer.py run headless, e.g.
@@ -427,21 +448,46 @@ class FieldViewerWindow(QDialog):
         self._pending_clip_request = None
         self._clip_busy_cursor_active = False
         self._active_clip_key = None
+        # Private, deep-copied mesh handed to every _ClipWorker - never
+        # self._full_mesh itself. Ownership contract: once _start_clip_thread()
+        # hands this to a worker and starts it, the GUI thread must never read
+        # or write it again until _load_mesh() resets it to None for a new
+        # mesh. This is what actually makes the GUI thread's direct touches of
+        # self._full_mesh (add_mesh()'s active-scalars assignment,
+        # _add_vector_glyphs()'s point-data add/delete) safe regardless of
+        # timing: two distinct objects can never race on each other's
+        # internals, no matter how the two threads interleave. Created lazily
+        # (on first use, not eagerly on load) so a mesh clipping is never
+        # enabled for doesn't pay double memory for nothing.
+        self._full_mesh_for_clip = None
+        # Bumped by every _load_mesh() call (see there) and folded into every
+        # clip cache/request key below, so a clip result computed for a
+        # previous file/load can never be mistaken for one belonging to the
+        # currently displayed mesh - e.g. if the Result File combo is changed
+        # while a clip is still in flight for the old file.
+        self._mesh_generation = 0
         # Cache of the last background-clip result, keyed by the (axis,
-        # position, sign) it was computed for. Most redraw triggers (opacity,
-        # log scale, clim, mesh overlay, array selection, vector arrows) don't
-        # change the clip geometry at all - only axis/position/sign do - so
-        # reusing this avoids kicking off another expensive background clip
-        # for a purely cosmetic change. Also closes a real crash: on Linux and
-        # Windows, dragging the opacity slider (which fires many rapid
-        # _redraw() calls) was starting/finishing background clip threads in
-        # quick succession, occasionally destroying a _ClipWorker just before
-        # Qt considered it fully stopped ("QThread: Destroyed while thread is
-        # still running") - this cache means opacity changes no longer touch
-        # the clip thread machinery at all once one clip result exists for
-        # the current axis/position. See _redraw()/_on_clip_succeeded().
+        # position, sign, generation) it was computed for. Most redraw
+        # triggers (opacity, log scale, clim, mesh overlay, array selection,
+        # vector arrows) don't change the clip geometry at all - only
+        # axis/position/sign/generation do - so reusing this avoids kicking
+        # off another expensive background clip for a purely cosmetic change.
+        # Also closes a real crash: on Linux and Windows, dragging the
+        # opacity slider (which used to fire many rapid _redraw() calls) was
+        # starting/finishing background clip threads in quick succession,
+        # occasionally destroying a _ClipWorker just before Qt considered it
+        # fully stopped ("QThread: Destroyed while thread is still running")
+        # - this cache means opacity changes no longer touch the clip thread
+        # machinery at all once one clip result exists for the current
+        # axis/position/generation. See _redraw()/_on_clip_succeeded().
         self._clipped_mesh_cache = None
         self._clipped_mesh_cache_key = None
+        # See _schedule_redraw()/_perform_scheduled_redraw(): coalesces any
+        # number of redraw-triggering signals firing before the event loop
+        # next turns into a single _redraw() call, so rapid-fire UI changes on
+        # a large/complex mesh never render more than the final requested
+        # state.
+        self._redraw_scheduled = False
 
         self._build_ui()
         self._load_mesh()
@@ -483,20 +529,34 @@ class FieldViewerWindow(QDialog):
         controls_layout = QHBoxLayout()
 
         # Only shown when there's more than one candidate result file (e.g. Palace's
-        # main "driven" field dump vs. its separate "driven_boundary" one - both
-        # equally valid, neither an inherently better default) - see __init__.
+        # main "driven" field dump vs. its separate "driven_boundary" one, per
+        # excitation, per AMR iteration - both/all equally valid, neither an
+        # inherently better default) - see __init__/_build_file_labels().
         if len(self.file_paths) > 1:
             file_group = QGroupBox("Result File")
             file_layout = QVBoxLayout()
             self.file_combo = QComboBox()
-            self.file_combo.addItems([self._file_label(p) for p in self.file_paths])
+            self.file_combo.addItems([self._file_labels[p] for p in self._visible_paths])
             self.file_combo.currentIndexChanged.connect(self._on_file_changed)
             file_layout.addWidget(self.file_combo)
+
+            # Only shown when AMR actually produced iteration<N> copies to hide -
+            # see __init__'s self._final_paths/self._visible_paths.
+            hidden_count = len(self.file_paths) - len(self._final_paths)
+            if hidden_count > 0:
+                self.include_iterations_cb = QCheckBox(f"Include AMR iterations ({hidden_count} more)")
+                self.include_iterations_cb.setChecked(False)
+                self.include_iterations_cb.toggled.connect(self._on_include_iterations_toggled)
+                file_layout.addWidget(self.include_iterations_cb)
+            else:
+                self.include_iterations_cb = None
+
             file_layout.addStretch()
             file_group.setLayout(file_layout)
             controls_layout.addWidget(file_group, 1)
         else:
             self.file_combo = None
+            self.include_iterations_cb = None
 
         # Clip Plane: purely "where/whether to cut" - rendering options that
         # apply regardless of clipping (opacity, mesh overlay) live in their
@@ -540,7 +600,8 @@ class FieldViewerWindow(QDialog):
         self.clip_slider = QSlider(Qt.Horizontal)
         self.clip_slider.setRange(0, _SLIDER_STEPS)
         self.clip_slider.setValue(_SLIDER_STEPS // 2)
-        self.clip_slider.valueChanged.connect(self._on_redraw_needed)
+        self.clip_slider.valueChanged.connect(self._on_clip_slider_changed)
+        self.clip_slider.sliderReleased.connect(self._schedule_redraw)
         clip_layout.addWidget(self.clip_slider)
 
         clip_layout.addStretch()
@@ -562,6 +623,7 @@ class FieldViewerWindow(QDialog):
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(100)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.opacity_slider.sliderReleased.connect(self._schedule_redraw)
         display_layout.addWidget(self.opacity_slider)
 
         self.arrow_size_label = QLabel(f"Arrow size: {_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT}%")
@@ -573,6 +635,7 @@ class FieldViewerWindow(QDialog):
         self.arrow_size_slider.setValue(round(_VECTOR_ARROW_TARGET_FRACTION_PERCENT_DEFAULT / _ARROW_SIZE_STEP_PERCENT))
         self.arrow_size_slider.setEnabled(False)
         self.arrow_size_slider.valueChanged.connect(self._on_arrow_size_changed)
+        self.arrow_size_slider.sliderReleased.connect(self._schedule_redraw)
         display_layout.addWidget(self.arrow_size_slider)
 
         # Only meaningful (and enabled) when the selected Field array is itself
@@ -696,15 +759,67 @@ class FieldViewerWindow(QDialog):
     # ---------- Result file picker ----------
 
     @staticmethod
-    def _file_label(path):
-        """<parent folder>/<filename> - enough to tell e.g. Palace's "driven" and
-        "driven_boundary" collections apart at a glance, without the full path."""
-        return f"{os.path.basename(os.path.dirname(path))}/{os.path.basename(path)}"
+    def _build_file_labels(paths):
+        """{path: display_label} for every candidate result file, unique and as
+        short as possible. Palace's own field-dump folder nesting (driven vs.
+        driven_boundary, per excitation, and - with AMR - per iteration on top
+        of either) can go more than one directory deep, so labeling from just
+        the immediate parent folder can collapse unrelated files into
+        identical-looking entries (e.g. several iterations' own
+        "excitation_1/excitation_1.pvd"). Building each label from the path
+        relative to the common ancestor of all candidates instead keeps
+        whatever higher-level folder (e.g. "iteration3") is needed to tell
+        them apart.
+
+        A trailing "<dir>/<dir-name>.<ext>" is then collapsed to just
+        "<dir-name>.<ext>", since Palace's own dump files are consistently
+        named after their containing folder - this actually shortens the
+        common single-level case ("driven/driven.pvd" -> "driven.pvd") while
+        losing no information.
+
+        When the candidates mix Palace's volume ("driven"-style) and
+        boundary/surface ("driven_boundary"-style) dumps, each label also gets
+        a short emoji prefix (matching this codebase's existing emoji-as-icon
+        convention, e.g. the "View fields (...)..." button) - skipped when
+        every candidate is the same type, since there's then nothing to flag.
+        """
+        if len(paths) == 1:
+            return {paths[0]: os.path.basename(paths[0])}
+
+        root = os.path.commonpath(paths)
+        labels = {}
+        for path in paths:
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if "/" in rel:
+                dir_part, filename = rel.rsplit("/", 1)
+                stem = os.path.splitext(filename)[0]
+                last_dir = dir_part.rsplit("/", 1)[-1]
+                if last_dir == stem:
+                    parent = dir_part.rsplit("/", 1)[0] if "/" in dir_part else ""
+                    rel = f"{parent}/{filename}" if parent else filename
+            labels[path] = rel
+
+        is_boundary = {path: "boundary" in path.lower() for path in paths}
+        if len(set(is_boundary.values())) > 1:
+            for path in paths:
+                icon = "\U0001F532" if is_boundary[path] else "\U0001F9CA"
+                labels[path] = f"{icon} {labels[path]}"
+
+        return labels
 
     def _on_file_changed(self, index):
-        if index < 0 or index >= len(self.file_paths):
+        if index < 0 or index >= len(self._visible_paths):
             return
-        self.file_path = self.file_paths[index]
+        self._switch_to_file(self._visible_paths[index])
+
+    def _switch_to_file(self, path):
+        """Load `path` as the current result file, if it isn't already - shared by
+        _on_file_changed() (combo selection) and _on_include_iterations_toggled()
+        (which may need to fall back to a different file once AMR iterations are
+        hidden again)."""
+        if path == self.file_path:
+            return
+        self.file_path = path
         self._load_error = None
         self.warning_label.setText("")
         # A different result file can have entirely different geometry/bounds
@@ -715,15 +830,36 @@ class FieldViewerWindow(QDialog):
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
 
+    def _on_include_iterations_toggled(self, checked):
+        """Swap the Result File combo between the default final-pass-only list and
+        the full list including AMR's per-iteration copies - see __init__'s
+        self._final_paths/self._visible_paths and is_amr_iteration_path()."""
+        self._visible_paths = self.file_paths if checked else self._final_paths
+        target_path = self.file_path if self.file_path in self._visible_paths else self._visible_paths[0]
+        self.file_combo.blockSignals(True)
+        self.file_combo.clear()
+        self.file_combo.addItems([self._file_labels[p] for p in self._visible_paths])
+        self.file_combo.setCurrentIndex(self._visible_paths.index(target_path))
+        self.file_combo.blockSignals(False)
+        self._switch_to_file(target_path)
+
     # ---------- Mesh loading ----------
 
     def _load_mesh(self):
-        self.setWindowTitle(f"Field Viewer - {self._file_label(self.file_path)}")
-        # A cached clip result belongs to the mesh it was computed from - a
-        # new/different file needs a fresh clip regardless of whether the
-        # axis/position/sign happen to match the old cache key.
+        self.setWindowTitle(f"Field Viewer - {self._file_labels[self.file_path]}")
+        # Bump the generation before anything else below - see __init__'s
+        # self._mesh_generation. A cached/in-flight clip result belongs to the
+        # mesh it was computed from: a new/different file needs a fresh clip
+        # regardless of whether the axis/position/sign happen to match the old
+        # cache key, and the old generation's clip-worker copy is now stale
+        # too (an old worker still running against it, if any, keeps its own
+        # reference via its constructor argument, so dropping ours here is
+        # safe, not a use-after-free).
+        self._mesh_generation += 1
         self._clipped_mesh_cache = None
         self._clipped_mesh_cache_key = None
+        self._full_mesh_for_clip = None
+        self._pending_clip_request = None
         try:
             self._full_mesh = _load_full_mesh(self.file_path)
         except Exception as exc:
@@ -781,7 +917,7 @@ class FieldViewerWindow(QDialog):
         self.clip_slider.blockSignals(True)
         self.clip_slider.setValue(_SLIDER_STEPS // 2)
         self.clip_slider.blockSignals(False)
-        self._redraw()
+        self._schedule_redraw()
 
     def _slider_value_to_position(self):
         """Map the slider's integer [0, _SLIDER_STEPS] range to a real coordinate
@@ -811,16 +947,30 @@ class FieldViewerWindow(QDialog):
         return round(fraction * _SLIDER_STEPS)
 
     def _on_redraw_needed(self, _value=None):
-        self._redraw()
+        self._schedule_redraw()
+
+    def _on_clip_slider_changed(self, _value=None):
+        # Live label feedback on every tick, but only actually rebuild/render
+        # the mesh once the drag ends (sliderReleased, connected in
+        # _build_ui()) or for a non-drag change (keyboard, programmatic
+        # setValue()) - isSliderDown() is False for both of those, since
+        # neither involves a mouse press. See _schedule_redraw()'s docstring
+        # for why redrawing on every tick was unsafe/wasteful in the first
+        # place.
+        self._update_clip_position_label()
+        if not self.clip_slider.isSliderDown():
+            self._schedule_redraw()
 
     def _on_opacity_changed(self, value):
         self.opacity_label.setText(f"Opacity: {value}%")
-        self._redraw()
+        if not self.opacity_slider.isSliderDown():
+            self._schedule_redraw()
 
     def _on_arrow_size_changed(self, value):
         percent = value * _ARROW_SIZE_STEP_PERCENT
         self.arrow_size_label.setText(f"Arrow size: {percent:g}%")
-        self._redraw()
+        if not self.arrow_size_slider.isSliderDown():
+            self._schedule_redraw()
 
     # ---------- Axis views ----------
 
@@ -852,7 +1002,7 @@ class FieldViewerWindow(QDialog):
         camera_position = tuple(center + direction * distance)
         self.plotter.camera_position = [camera_position, tuple(center), _VIEW_UP[axis]]
         self.plotter.reset_camera()
-        self._redraw()  # re-clips using the (possibly just-changed) sign for this axis, then renders
+        self._schedule_redraw()  # re-clips using the (possibly just-changed) sign for this axis, then renders
 
     def _move_slider_to_max(self):
         """Move the clip slider, along the currently selected axis, to the
@@ -888,14 +1038,14 @@ class FieldViewerWindow(QDialog):
         self.clip_enabled_cb.blockSignals(True)
         self.clip_enabled_cb.setChecked(True)
         self.clip_enabled_cb.blockSignals(False)
-        self._redraw()
+        self._schedule_redraw()
 
     # ---------- Field/array picker ----------
 
     def _on_array_changed(self, _text=None):
         self._reset_clim_range()
         self._update_vector_checkbox_state()
-        self._redraw()
+        self._schedule_redraw()
 
     def _update_vector_checkbox_state(self):
         """Enable "Show arrows" only when the currently selected Field array is
@@ -944,7 +1094,7 @@ class FieldViewerWindow(QDialog):
 
     def _on_clim_reset_clicked(self):
         self._reset_clim_range()
-        self._redraw()
+        self._schedule_redraw()
 
     def _get_clim(self):
         """(min, max) parsed from the Min/Max fields, or None to let PyVista
@@ -1025,13 +1175,40 @@ class FieldViewerWindow(QDialog):
 
     # ---------- Redraw ----------
 
+    def _update_clip_position_label(self):
+        position = self._slider_value_to_position()
+        position_um = position * _POSITION_SCALE_TO_UM.get(self.source, 1.0)
+        self.clip_position_label.setText(f"Position: {position_um:.4g} um ({self._current_axis})")
+
+    def _schedule_redraw(self, *_args):
+        """Coalesce any number of redraw-triggering signals that fire before
+        the event loop next turns into a single _redraw() call, reading
+        whatever the final widget state is by then - not the state at the
+        moment each signal fired. This is the same "only the latest request
+        survives" pattern _request_clip() already applies to background clip
+        requests specifically, generalized to the cheap synchronous path too
+        (clip disabled, or an already-cached clip result), which had no such
+        coalescing: without this, enough triggers stacking up in Qt's event
+        queue faster than _apply_display_mesh() can complete on a large/
+        complex mesh (e.g. a dense vector-arrow glyph rebuild) would each
+        fully re-render in turn, wasting work before landing on the same
+        final state one call would have reached directly. *_args absorbs
+        whichever shape the connected signal carries (some pass a value,
+        sliderReleased passes none) without needing a per-connection wrapper.
+        """
+        if not self._redraw_scheduled:
+            self._redraw_scheduled = True
+            QTimer.singleShot(0, self._perform_scheduled_redraw)
+
+    def _perform_scheduled_redraw(self):
+        self._redraw_scheduled = False
+        self._redraw()
+
     def _redraw(self):
         if self._full_mesh is None:
             return
 
-        position = self._slider_value_to_position()
-        position_um = position * _POSITION_SCALE_TO_UM.get(self.source, 1.0)
-        self.clip_position_label.setText(f"Position: {position_um:.4g} um ({self._current_axis})")
+        self._update_clip_position_label()
 
         if not self.clip_enabled_cb.isChecked():
             # A clip that's still computing in the background (if any) is now
@@ -1044,8 +1221,9 @@ class FieldViewerWindow(QDialog):
         # _set_view()/_clip_sign) - same cut location either way, but flips
         # which side is kept so the cut face faces whichever side the camera
         # was last pointed at.
+        position = self._slider_value_to_position()
         sign = self._clip_sign.get(self._current_axis, 1)
-        cache_key = (self._current_axis, position, sign)
+        cache_key = (self._current_axis, position, sign, self._mesh_generation)
         if cache_key == self._clipped_mesh_cache_key:
             # The clip geometry itself hasn't changed since the last computed
             # result - this redraw is for something else entirely (opacity,
@@ -1059,7 +1237,7 @@ class FieldViewerWindow(QDialog):
 
         self._request_clip(*cache_key)
 
-    def _request_clip(self, axis, position, sign):
+    def _request_clip(self, axis, position, sign, generation):
         """Kick off a background clip for this axis/position/sign, unless one
         is already running - in that case just remember these as the latest
         desired parameters (_pending_clip_request) instead of starting a
@@ -1070,7 +1248,7 @@ class FieldViewerWindow(QDialog):
         up every intermediate one.
         """
         if self._clip_thread is not None and self._clip_thread.isRunning():
-            if (axis, position, sign) == self._active_clip_key:
+            if (axis, position, sign, generation) == self._active_clip_key:
                 # Already computing exactly this geometry - its result will
                 # satisfy this request too once it lands, since
                 # _on_clip_succeeded() checks against the then-current
@@ -1078,24 +1256,34 @@ class FieldViewerWindow(QDialog):
                 # so there's nothing to gain from queuing a duplicate.
                 self._pending_clip_request = None
                 return
-            self._pending_clip_request = (axis, position, sign)
+            self._pending_clip_request = (axis, position, sign, generation)
             return
-        self._start_clip_thread(axis, position, sign)
+        self._start_clip_thread(axis, position, sign, generation)
 
-    def _start_clip_thread(self, axis, position, sign):
+    def _start_clip_thread(self, axis, position, sign, generation):
         self._pending_clip_request = None
-        self._active_clip_key = (axis, position, sign)
+        self._active_clip_key = (axis, position, sign, generation)
         # Scoped to this window (not QApplication.setOverrideCursor()) - only
         # this field-viewer window is actually busy; the main setupEM/
         # setupThermal window (and any other open field viewer) stays fully
         # usable and shouldn't look busy too. Set once per coalesced chain of
         # clips (guarded so a mid-chain restart in _maybe_start_pending_clip()
         # doesn't set it again), cleared once the chain truly settles - see
-        # _clear_busy_cursor().
+        # _clear_busy_cursor(). Covers the one-time mesh copy just below too,
+        # which is a real (if much smaller than the clip itself) synchronous
+        # cost on a large mesh.
         if not self._clip_busy_cursor_active:
             self.setCursor(Qt.WaitCursor)
             self._clip_busy_cursor_active = True
-        thread = _ClipWorker(self._full_mesh, axis, position, sign)
+        # Lazily create this generation's private clip-worker copy - see its
+        # ownership contract in __init__. Reused for every subsequent clip
+        # against this same mesh (safe: mesh.clip() doesn't mutate its input,
+        # and only one _ClipWorker ever runs at a time against it), and reset
+        # to None by _load_mesh() for the next generation.
+        if self._full_mesh_for_clip is None:
+            self._full_mesh_for_clip = self._full_mesh.copy()
+        assert self._full_mesh_for_clip is not self._full_mesh
+        thread = _ClipWorker(self._full_mesh_for_clip, axis, position, sign, generation)
         thread.succeeded.connect(self._on_clip_succeeded)
         thread.failed.connect(self._on_clip_failed)
         self._clip_thread = thread
@@ -1119,13 +1307,15 @@ class FieldViewerWindow(QDialog):
         self._clip_thread.wait()
         self._clip_thread = None
 
-    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign):
+    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign)
+        result_key = (axis, position, sign, generation)
         # Compare against what's CURRENTLY desired (not "was this the most
         # recent request") - if nothing but the geometry key matters, a
         # result stays usable even if unrelated redraws (opacity, color
-        # scale, ...) happened while this was still computing.
+        # scale, ...) happened while this was still computing. The generation
+        # element also rejects a result computed for a file that's since been
+        # switched away from, even if axis/position/sign happen to coincide.
         if result_key == self._current_clip_key():
             self.warning_label.setText("")
             self._clipped_mesh_cache = clipped_mesh
@@ -1133,9 +1323,9 @@ class FieldViewerWindow(QDialog):
             self._apply_display_mesh(clipped_mesh)
         self._maybe_start_pending_clip()
 
-    def _on_clip_failed(self, message, axis, position, sign):
+    def _on_clip_failed(self, message, axis, position, sign, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign)
+        result_key = (axis, position, sign, generation)
         if result_key == self._current_clip_key():
             self.warning_label.setText(f"Clip failed: {message}")
             self._apply_display_mesh(self._full_mesh)
@@ -1148,18 +1338,20 @@ class FieldViewerWindow(QDialog):
             self._clear_busy_cursor()
 
     def _current_clip_key(self):
-        """(axis, position, sign) the clip plane is currently set to, or None
-        if clipping is off - the ground truth a background clip result is
-        checked against before being applied (see _on_clip_succeeded()),
-        recomputed fresh rather than cached, since the whole point is to
-        catch cases where the desired state has moved on since the result was
-        requested."""
+        """(axis, position, sign, generation) the clip plane is currently set
+        to, or None if clipping is off - the ground truth a background clip
+        result is checked against before being applied (see
+        _on_clip_succeeded()), recomputed fresh rather than cached, since the
+        whole point is to catch cases where the desired state has moved on
+        since the result was requested - including a file switch, via
+        self._mesh_generation."""
         if not self.clip_enabled_cb.isChecked():
             return None
         return (
             self._current_axis,
             self._slider_value_to_position(),
             self._clip_sign.get(self._current_axis, 1),
+            self._mesh_generation,
         )
 
     def _clear_busy_cursor(self):
