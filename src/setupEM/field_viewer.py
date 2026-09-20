@@ -70,10 +70,10 @@ from PySide6.QtGui import QShortcut, QKeySequence
 # of the setupEM package, so relative import fails - same dual-mode pattern used
 # throughout setupEM.py/setup_common.py/result_viewer.py for sibling imports.
 if __package__ in (None, ""):
-    from palace_results import find_paraview_files
+    from palace_results import find_paraview_files, is_amr_iteration_path
     from thermal_results import find_thermal_paraview_file
 else:
-    from .palace_results import find_paraview_files
+    from .palace_results import find_paraview_files, is_amr_iteration_path
     from .thermal_results import find_thermal_paraview_file
 
 
@@ -375,16 +375,28 @@ class FieldViewerWindow(QDialog):
     """Own top-level window (no Qt parent, WA_DeleteOnClose - same lifecycle as
     ResultViewerWindow), showing one field-result file - picked from file_paths,
     which may hold more than one equally-valid result (e.g. Palace can write both
-    a main "driven" field dump and a separate "driven_boundary" one; neither is
-    inherently the "right" one to default to, so the user picks) - with a single
-    axis-aligned clip plane and a field/array picker."""
+    a main "driven" field dump and a separate "driven_boundary" one, per
+    excitation, per AMR iteration; neither is inherently the "right" one to
+    default to, so the user picks - see _build_file_labels() for how each one
+    is labeled) - with a single axis-aligned clip plane and a field/array
+    picker."""
 
     def __init__(self, MainWindow, file_paths, source, off_screen=False):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.MainWindow = MainWindow
         self.file_paths = list(file_paths)
-        self.file_path = self.file_paths[0]
+        # AMR runs write a copy of every field-dump file under each iteration<N>
+        # subfolder in addition to the final, most-refined pass, multiplying this
+        # list by the iteration count - default to hiding those (they exist for
+        # convergence tracking, not usually 3D inspection); the "Include AMR
+        # iterations" checkbox in _build_ui() reveals the rest on request. Falls
+        # back to the full list if every candidate is (unexpectedly) flagged as
+        # an iteration path, rather than ending up with nothing to show.
+        self._final_paths = [p for p in self.file_paths if not is_amr_iteration_path(p)] or self.file_paths
+        self._visible_paths = self._final_paths
+        self.file_path = self._visible_paths[0]
+        self._file_labels = self._build_file_labels(self.file_paths)
         self.source = source
         # CLI-only (see main()'s --screenshot): render off-screen instead of
         # in a real, visible window - lets field_viewer.py run headless, e.g.
@@ -483,20 +495,34 @@ class FieldViewerWindow(QDialog):
         controls_layout = QHBoxLayout()
 
         # Only shown when there's more than one candidate result file (e.g. Palace's
-        # main "driven" field dump vs. its separate "driven_boundary" one - both
-        # equally valid, neither an inherently better default) - see __init__.
+        # main "driven" field dump vs. its separate "driven_boundary" one, per
+        # excitation, per AMR iteration - both/all equally valid, neither an
+        # inherently better default) - see __init__/_build_file_labels().
         if len(self.file_paths) > 1:
             file_group = QGroupBox("Result File")
             file_layout = QVBoxLayout()
             self.file_combo = QComboBox()
-            self.file_combo.addItems([self._file_label(p) for p in self.file_paths])
+            self.file_combo.addItems([self._file_labels[p] for p in self._visible_paths])
             self.file_combo.currentIndexChanged.connect(self._on_file_changed)
             file_layout.addWidget(self.file_combo)
+
+            # Only shown when AMR actually produced iteration<N> copies to hide -
+            # see __init__'s self._final_paths/self._visible_paths.
+            hidden_count = len(self.file_paths) - len(self._final_paths)
+            if hidden_count > 0:
+                self.include_iterations_cb = QCheckBox(f"Include AMR iterations ({hidden_count} more)")
+                self.include_iterations_cb.setChecked(False)
+                self.include_iterations_cb.toggled.connect(self._on_include_iterations_toggled)
+                file_layout.addWidget(self.include_iterations_cb)
+            else:
+                self.include_iterations_cb = None
+
             file_layout.addStretch()
             file_group.setLayout(file_layout)
             controls_layout.addWidget(file_group, 1)
         else:
             self.file_combo = None
+            self.include_iterations_cb = None
 
         # Clip Plane: purely "where/whether to cut" - rendering options that
         # apply regardless of clipping (opacity, mesh overlay) live in their
@@ -696,15 +722,67 @@ class FieldViewerWindow(QDialog):
     # ---------- Result file picker ----------
 
     @staticmethod
-    def _file_label(path):
-        """<parent folder>/<filename> - enough to tell e.g. Palace's "driven" and
-        "driven_boundary" collections apart at a glance, without the full path."""
-        return f"{os.path.basename(os.path.dirname(path))}/{os.path.basename(path)}"
+    def _build_file_labels(paths):
+        """{path: display_label} for every candidate result file, unique and as
+        short as possible. Palace's own field-dump folder nesting (driven vs.
+        driven_boundary, per excitation, and - with AMR - per iteration on top
+        of either) can go more than one directory deep, so labeling from just
+        the immediate parent folder can collapse unrelated files into
+        identical-looking entries (e.g. several iterations' own
+        "excitation_1/excitation_1.pvd"). Building each label from the path
+        relative to the common ancestor of all candidates instead keeps
+        whatever higher-level folder (e.g. "iteration3") is needed to tell
+        them apart.
+
+        A trailing "<dir>/<dir-name>.<ext>" is then collapsed to just
+        "<dir-name>.<ext>", since Palace's own dump files are consistently
+        named after their containing folder - this actually shortens the
+        common single-level case ("driven/driven.pvd" -> "driven.pvd") while
+        losing no information.
+
+        When the candidates mix Palace's volume ("driven"-style) and
+        boundary/surface ("driven_boundary"-style) dumps, each label also gets
+        a short emoji prefix (matching this codebase's existing emoji-as-icon
+        convention, e.g. the "View fields (...)..." button) - skipped when
+        every candidate is the same type, since there's then nothing to flag.
+        """
+        if len(paths) == 1:
+            return {paths[0]: os.path.basename(paths[0])}
+
+        root = os.path.commonpath(paths)
+        labels = {}
+        for path in paths:
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if "/" in rel:
+                dir_part, filename = rel.rsplit("/", 1)
+                stem = os.path.splitext(filename)[0]
+                last_dir = dir_part.rsplit("/", 1)[-1]
+                if last_dir == stem:
+                    parent = dir_part.rsplit("/", 1)[0] if "/" in dir_part else ""
+                    rel = f"{parent}/{filename}" if parent else filename
+            labels[path] = rel
+
+        is_boundary = {path: "boundary" in path.lower() for path in paths}
+        if len(set(is_boundary.values())) > 1:
+            for path in paths:
+                icon = "\U0001F532" if is_boundary[path] else "\U0001F9CA"
+                labels[path] = f"{icon} {labels[path]}"
+
+        return labels
 
     def _on_file_changed(self, index):
-        if index < 0 or index >= len(self.file_paths):
+        if index < 0 or index >= len(self._visible_paths):
             return
-        self.file_path = self.file_paths[index]
+        self._switch_to_file(self._visible_paths[index])
+
+    def _switch_to_file(self, path):
+        """Load `path` as the current result file, if it isn't already - shared by
+        _on_file_changed() (combo selection) and _on_include_iterations_toggled()
+        (which may need to fall back to a different file once AMR iterations are
+        hidden again)."""
+        if path == self.file_path:
+            return
+        self.file_path = path
         self._load_error = None
         self.warning_label.setText("")
         # A different result file can have entirely different geometry/bounds
@@ -715,10 +793,23 @@ class FieldViewerWindow(QDialog):
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
 
+    def _on_include_iterations_toggled(self, checked):
+        """Swap the Result File combo between the default final-pass-only list and
+        the full list including AMR's per-iteration copies - see __init__'s
+        self._final_paths/self._visible_paths and is_amr_iteration_path()."""
+        self._visible_paths = self.file_paths if checked else self._final_paths
+        target_path = self.file_path if self.file_path in self._visible_paths else self._visible_paths[0]
+        self.file_combo.blockSignals(True)
+        self.file_combo.clear()
+        self.file_combo.addItems([self._file_labels[p] for p in self._visible_paths])
+        self.file_combo.setCurrentIndex(self._visible_paths.index(target_path))
+        self.file_combo.blockSignals(False)
+        self._switch_to_file(target_path)
+
     # ---------- Mesh loading ----------
 
     def _load_mesh(self):
-        self.setWindowTitle(f"Field Viewer - {self._file_label(self.file_path)}")
+        self.setWindowTitle(f"Field Viewer - {self._file_labels[self.file_path]}")
         # A cached clip result belongs to the mesh it was computed from - a
         # new/different file needs a fresh clip regardless of whether the
         # axis/position/sign happen to match the old cache key.

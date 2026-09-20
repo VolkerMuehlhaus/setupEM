@@ -70,6 +70,19 @@ def find_paraview_files(run_path, model_basename):
     return sorted(glob.glob(os.path.join(output_dir, '**', '*.vtu'), recursive=True))
 
 
+def is_amr_iteration_path(path):
+    """True if `path` sits under (or is itself) one of the "iteration<N>" output
+    subfolders an adaptive mesh refinement run writes alongside its final,
+    most-refined pass at the output root - see _list_iteration_dirs(). Used by
+    field_viewer.py to default its Result File picker to the final pass's field
+    dumps only: AMR's earlier iterations exist for convergence tracking (see
+    build_results_summary()), not usually meant to be inspected in 3D themselves,
+    and a run with several iterations otherwise multiplies the picker's entries
+    by the iteration count.
+    """
+    return any(_ITERATION_RE.match(part) for part in os.path.normpath(path).split(os.sep))
+
+
 def _read_palace_json(dir_path):
     path = os.path.join(dir_path, 'palace.json')
     if not os.path.isfile(path):
