@@ -3320,6 +3320,17 @@ def main():
        _StandaloneMainWindow).
     """
     app = QApplication(sys.argv)
+
+    # Pin a light color scheme so the explicit light backgrounds set on
+    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
+    # auto-palette on accounts where Windows' per-user dark-mode setting is
+    # on (PySide6 6.5+ only; older versions just skip this and rely on the
+    # explicit "color:" rules already set on those field stylesheets).
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:
+        pass
+
     if sys.platform.startswith("win"):
         # matches setupEM.py's/setupThermal.py's main() - without this, Qt's default style
         # on Windows looks visibly different (fonts/widget chrome) from the full app

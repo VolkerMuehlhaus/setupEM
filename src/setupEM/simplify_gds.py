@@ -62,6 +62,7 @@ _LABEL_WIDTH = 130
 _EDIT_STYLE = """
             QLineEdit {
                 background-color: white;
+                color: black;
                 border: 1px solid gray;
                 border-radius: 4px;
                 padding: 4px;

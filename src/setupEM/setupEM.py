@@ -3226,6 +3226,16 @@ def parse_python_ports_definitions (file_path):
 def main():
     app = QApplication(sys.argv)
 
+    # Pin a light color scheme so the explicit light backgrounds set on
+    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
+    # auto-palette on accounts where Windows' per-user dark-mode setting is
+    # on (PySide6 6.5+ only; older versions just skip this and rely on the
+    # explicit "color:" rules already set on those field stylesheets).
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:
+        pass
+
     if sys.platform.startswith("win"):
         app.setStyle(QStyleFactory.create("Windows"))
 

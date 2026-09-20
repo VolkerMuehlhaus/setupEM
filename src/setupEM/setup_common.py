@@ -216,6 +216,7 @@ def _format_resolved_variable_value(value):
 EDIT_STYLE_OPTIONAL = """
             QLineEdit {
                 background-color: white;
+                color: black;
                 border: 1px solid gray;
                 border-radius: 4px;
                 padding: 4px;
@@ -225,6 +226,7 @@ EDIT_STYLE_OPTIONAL = """
 EDIT_STYLE_REQUIRED = """
             QLineEdit {
                 background-color: lightyellow;
+                color: black;
                 border: 1px solid gray;
                 border-radius: 4px;
                 padding: 4px;
@@ -234,6 +236,7 @@ EDIT_STYLE_REQUIRED = """
 COMBO_STYLE_REQUIRED = """
     QComboBox {
         background-color: lightyellow;
+        color: black;
         border: 1px solid gray;
         border-radius: 4px;
         padding: 4px;
@@ -244,6 +247,7 @@ COMBO_STYLE_REQUIRED = """
 COMBO_STYLE_OPTIONAL = """
     QComboBox {
         background-color: white;
+        color: black;
         border: 1px solid gray;
         border-radius: 4px;
         padding: 4px;
