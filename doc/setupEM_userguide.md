@@ -1,8 +1,9 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-08-21
+Document version: 2026-09-14
 
 ## Contents
+[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [What's New](#whats-new)  
 [About setupEM and setupThermal](#about-setupem-and-setupthermal)  
 [Installation](#installation)  
@@ -19,6 +20,9 @@ Document version: 2026-08-21
 [Ports tab](#ports-tab)  
 [Mesh and Boundaries tab](#mesh-and-boundaries-tab)  
 [Create Model tab](#create-model-tab)  
+[Result Viewer](#result-viewer)  
+[Model Fit](#model-fit)  
+[3D Field Viewer](#3d-field-viewer)  
 [Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
@@ -42,14 +46,23 @@ Document version: 2026-08-21
 &ensp;[Undo and Recent Files](#undo-and-recent-files)  
 [See also](#see-also)  
 
+## Result Viewer and Model Fit
+
+setupEM includes two built-in tools for working with simulation results directly, without external scripts:
+
+- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
+- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
+
 ## What's New
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
+- **A built-in 3D field viewer**, an in-app alternative to external ParaView, with a clip plane, vector-arrow overlay, and per-solver color presets — see chapter "[3D Field Viewer](#3d-field-viewer)".
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
 - **Start Simulation on Windows runs Palace directly and shows results automatically.** No more opening a terminal and typing `./run_sim` yourself - output streams live into the Log panel, Terminate actually works, and a results summary (degrees of freedom, simulation time, peak RAM, mesh-adaptation error indicators) appears automatically once a run finishes - see "[Create Model tab](#create-model-tab)".
+- **Start Simulation now checks for leftover results from a previous run** before launching the solver, and offers to delete them (default) or keep them — see "[Create Model tab](#create-model-tab)".
 
 
 ## About setupEM and setupThermal
@@ -85,8 +98,8 @@ This installs both `setupEM` and `setupThermal` as commands, plus `gds2palace` a
 
 Installing setupEM does **not** install AWS Palace itself - it only creates the input files Palace needs. Palace can be installed via Apptainer/Singularity containers or built from source with the spack package manager; see:
 
-- [Installing Palace using Apptainer](Installing_Palace_using_Apptainer.pdf)
-- [Installing Palace using spack](Installing_Palace_using_Spack.pdf)
+- [Installing Palace using Apptainer](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-apptainer.md)
+- [Installing Palace using spack](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-spack.md)
 
 To start Palace from setupEM, a wrapper script **run_palace** is used - this is where you point to your actual Palace installation (a remote copy and remote simulation is also possible). A template is available in the gds2palace repository's `scripts` directory.
 
@@ -144,7 +157,7 @@ Some layout pre-processing is defined here too: **Merge via arrays with spacing*
 
 ### Show Stackup
 
-The **Show stackup** button visualizes the chosen stackup and its material properties. Dielectric materials are color coded to show permittivity at a glance; metal layers show sheet resistance, thickness, and spacing to neighboring layers.
+The **Show stackup** button visualizes the chosen stackup and its material properties. Dielectric materials are color coded to show permittivity at a glance; metal layers show sheet resistance, thickness, and spacing to neighboring layers. Click any shape for its name, material, and z-position/thickness in a flyout.
 
 <img src="./png/showstackup1.png" alt="stackup" width="750">
 
@@ -192,7 +205,7 @@ Controls the mesh used for simulation, trading off accuracy against simulation t
 
 <img src="./png/mesh1.png" alt="mesh" width="700">
 
-**Mesh cell maximum size absolute** works together with cells/wavelength - the smaller of the two wins. **Mesh basis function** should stay at "most accurate" (order 2) unless you specifically want a faster, less accurate run. **Adaptive mesh iterations** (AMR) is usually unnecessary if you're already using order 2 with a ~2 µm initial mesh - a fine initial mesh without AMR is typically faster than a coarse mesh plus AMR.
+**Mesh cell maximum size absolute** works together with cells/wavelength - the smaller of the two wins. **Mesh basis function** offers three levels: "faster, less accurate" (order 1), "recommended" (order 2, the default), and "slower, most accurate" (order 3, Palace only - Elmer has no cubic-order solver, so this option is disabled in Elmer mode). **Adaptive mesh iterations** (AMR) is usually unnecessary if you're already using the recommended order 2 with a ~2 µm initial mesh - a fine initial mesh without AMR is typically faster than a coarse mesh plus AMR. When AMR iterations is non-zero, **AMR goal** (relative error tolerance) and **AMR maximum DOF** control when Palace stops refining - whichever of the two is hit first. Both have sensible defaults and rarely need changing.
 
 The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here - **both must be non-zero**, or meshing will fail.
 
@@ -210,6 +223,8 @@ The buttons work top-down: **preview** the model geometry first, then **create t
 
 **Start Simulation** runs the solver: on Linux this starts Palace via script `run_sim` directly; on Windows it runs the same `run_sim` script inside the Windows Subsystem for Linux (WSL), automatically - no terminal window opens, and Palace's console output streams live into the Log panel below, the same as on Linux. This works for simulation directories on a LOCAL drive only - WSL cannot reach a network drive. **Terminate** stops a running simulation, including one running inside WSL on Windows.
 
+If the output directory already holds results from a previous run, **Start Simulation** asks first whether to delete them or keep them (default: delete), so stale results don't linger alongside a rerun with different settings. Only the solver's own output is a deletion candidate - the mesh, `config.json`, and the run script that Create Mesh just wrote are never touched.
+
 <img src="./png/createmodel3.png" alt="create" width="700">
 
 This needs a `run_sim` script configured as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) (template in that repository's `scripts` directory); on Windows, the same requirement applies inside your WSL environment, e.g. `run_palace` needs to be reachable there via `PATH` (usually set up in `~/.profile`).
@@ -217,6 +232,56 @@ This needs a `run_sim` script configured as described in the [gds2palace documen
 When a Palace simulation finishes, a **results summary** is appended to the Log panel automatically: degrees of freedom, mesh elements, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read from Palace's own `palace.json`/`error-indicators.csv` output. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration.
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
+
+## Result Viewer
+
+Once you have Touchstone SnP results, click **View Results...** on the Create Model tab to open the built-in **Result Viewer** - no need to run the standalone `plot_snp.py` script by hand.
+
+<img src="./png/resultviewer_button.png" alt="view results button" width="700">
+
+The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter out the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result, so you can start with just the raw file and bring in the others only when needed.
+
+<img src="./png/resultviewer1.png" alt="result viewer" width="750">
+
+Pick which S-parameters to plot from the S-Parameters grid, sized to the lowest port count among the currently checked files. The top plot shows dB magnitude, the bottom shows phase, for every checked file overlaid with its own color and line style and one shared legend below - checking files across several runs, or a whole run group, overlays all of them at once:
+
+<img src="./png/resultviewer2.png" alt="result viewer multi-file overlay" width="750">
+
+For reflection parameters (S11, S22, ...), the Display panel can switch to a **Smith chart** or a **zoomed Smith chart** instead of dB+phase - this replaces the whole plot area, since a Smith chart isn't meaningful for non-reflection (transmission) parameters, which are listed as excluded from that view instead of shown empty:
+
+<img src="./png/resultviewer3.png" alt="result viewer smith chart" width="750">
+
+The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there's nothing to draw a line between.
+
+Result Viewer can also run standalone, without the full setupEM GUI: `python result_viewer.py [target_dir]`, or via the `resultViewer` console script installed with the package.
+
+## Model Fit
+
+Click **Model Fit...** on the Create Model tab (next to **View Results...**) to extract a lumped-element netlist from the current run's S-parameter result, using [snp2le](https://github.com/iic-jku/snp2le) - an external, open-source tool, not part of setupEM.
+
+<img src="./png/resultviewer_button.png" alt="model fit button" width="700">
+
+If snp2le isn't installed, setupEM offers to install it for you via pip:
+
+<img src="./png/modelfit1.png" alt="snp2le not installed" width="350">
+
+Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - there's no need to click Model Fit a second time. Choosing **Cancel** instead logs the manual install command and the project link.
+
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+
+<img src="./png/modelfit2.png" alt="snp2le starting" width="700">
+
+If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
+
+## 3D Field Viewer
+
+Once field-dump results are available, click **View fields (...)...** on the Create Model tab to open them. The label shows which viewer it opens, Built-in or ParaView, matching the setting in Preferences > Viewer.
+
+<img src="./png/fieldviewer2.png" alt="3D field viewer" width="750">
+
+The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
+
+Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If ParaView is selected but not found on your system, setupEM falls back to the built-in viewer automatically.
 
 ## Code tab
 
@@ -228,11 +293,15 @@ Use **File > Export to \*.py model** to save the current code to disk without ru
 
 ## File menu
 
-Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal), including a "Default Settings" configuration (stored in your home directory) that's reloaded independently of any project.
+Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal), including a "Default Config" configuration (stored in your home directory) that's reloaded independently of any project. You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
 
-**Load Settings ...** and **Import from \*.py model ...** each have a **Recent** submenu right below them, listing your last 10 files of that kind for quick reopening; saving a settings file adds it to that list too. Use "Clear Recent Files" in either submenu to reset it.
+**Load Config ...** and **Import from \*.py model ...** each have a **Recent** submenu right below them, listing your last 10 files of that kind for quick reopening; saving a config file adds it to that list too. Use "Clear Recent Files" in either submenu to reset it.
 
 **Import from \*.py model** loads settings from existing model code (e.g. the examples in the gds2palace repository), by detecting known keywords with or without the `settings[...]` dict syntax - this also works for openEMS Python models, though you'll likely need to adjust `refined_cellsize` afterward (openEMS models the MIM differently and typically needs a finer mesh).
+
+**Preferences ...** changes the built-in defaults that a brand-new/blank field starts out showing (e.g. fstart/fstop, mesh refinement, dielectric oversize margin, the Ports tab's auto-assign source layer range, the Palace tab's AMR goal/maximum DOF) - saved per-user via Qt's settings mechanism, separate from any project's `.simcfg`/`.tsimcfg` file and from "Save as Default Config".
+
+<img src="./png/preferences1.png" alt="preferences" width="500">
 
 <img src="./png/filemenu1.png" alt="file" width="700">
 
@@ -318,6 +387,8 @@ Same **Mesh refinement at the edges** / **Mesh cell maximum size absolute** / ba
 ## The Stackup Editor
 
 The Stackup Editor is a standalone graphical tool for creating and editing the XML stackup files used throughout this workflow - materials, the dielectric stack, drawn metal/via layers, derived layers, named Variables, and thermal conductivity tables. It replaces hand-editing this XML in a text editor.
+
+Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
 
 ### Launching the editor
 

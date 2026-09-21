@@ -43,15 +43,16 @@ import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import shiboken6
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QPushButton, QComboBox, QLineEdit, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
-    QScrollArea, QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
+    QColorDialog, QMenuBar, QInputDialog, QCompleter, QStyledItemDelegate, QStyleFactory,
 )
 from PySide6.QtGui import (
     QColor, QFontMetrics, QKeySequence, QAction, QFontDatabase,
-    QSyntaxHighlighter, QTextCharFormat, QFont,
+    QSyntaxHighlighter, QTextCharFormat, QFont, QShortcut,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QStringListModel, QSettings
 
@@ -71,11 +72,13 @@ else:
 # as part of the setupEM package, so relative import fails.
 if __package__ in (None, ""):
     from setup_common import (
-        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+        VectorWidget, ChipletSwitcher, epsilon_to_color,
+        default_stackup_dielectric_label, default_stackup_metal_label,
     )
 else:
     from .setup_common import (
-        VectorWidget, epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
+        VectorWidget, ChipletSwitcher, epsilon_to_color,
+        default_stackup_dielectric_label, default_stackup_metal_label,
     )
 
 # QSettings scope for the "Open Recent" file list - shared across setupEM/setupThermal/
@@ -616,7 +619,8 @@ class ElementTableEditor(QWidget):
                  reload_on_attr_change=frozenset(), compute_fn=None, gray_fn=None,
                  pre_set_attr_fn=None, reference_choices_fn=None,
                  header_tooltips=None, operand_lookup_fn=None, variable_names_fn=None,
-                 invalid_fn=None, table_choices_fn=None):
+                 invalid_fn=None, table_choices_fn=None, reorder_fn=None,
+                 descending_attrs=frozenset()):
         """container_fn(root) -> list[Element]: fetches the current rows to display,
            re-called by reload() so the editor can refresh itself after any structural
            change (add/remove/move) without the caller having to re-fetch and hand
@@ -674,6 +678,17 @@ class ElementTableEditor(QWidget):
              field whose edit was what just made the whole file invalid (see
              StackupEditorWindow._is_invalid_field()), so the user's eye lands on the
              actual cause instead of just the generic status line/Save error list.
+           reorder_fn(root, ordered_elements): reorders the underlying XML elements
+             to match ordered_elements, enabling click-a-header-to-sort (by that
+             column's current value) on every "text"/"computed" column. This is a
+             one-time reorder, not a persistent "stay sorted" mode - editing/adding
+             rows afterward doesn't re-sort, so a new row being filled in doesn't
+             jump around before it's finished. Omit to leave headers unclickable.
+           descending_attrs: attribute names that should sort largest-first when
+             their header is clicked (e.g. a z-position column, so the physically
+             topmost layer lands at the top of the list) - every other numeric
+             column sorts smallest-first. A row whose value can't be parsed as a
+             number always sorts last, regardless of direction.
         """
         super().__init__()
         self.columns = columns
@@ -696,6 +711,8 @@ class ElementTableEditor(QWidget):
         self.gray_fn = gray_fn
         self.invalid_fn = invalid_fn
         self.pre_set_attr_fn = pre_set_attr_fn
+        self.reorder_fn = reorder_fn
+        self.descending_attrs = descending_attrs
 
         self.root = None
         self.row_elements = []
@@ -712,6 +729,17 @@ class ElementTableEditor(QWidget):
                 tooltip = header_tooltips.get(attr)
                 if tooltip:
                     self.table.horizontalHeaderItem(col).setToolTip(tooltip)
+        if reorder_fn is not None:
+            # click-to-sort only makes sense for a plain value column - "text"
+            # (e.g. Name) or "computed" (e.g. the resolved ResultZmin), not a
+            # combo-box/button kind - append to any header_tooltips text already set
+            for col, (attr, _header, kind) in enumerate(columns):
+                if kind in ("text", "computed"):
+                    item = self.table.horizontalHeaderItem(col)
+                    hint = ("Click to sort by this column (largest first)"
+                            if attr in descending_attrs else "Click to sort by this column")
+                    item.setToolTip(f"{item.toolTip()}\n{hint}" if item.toolTip() else hint)
+            self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         header = self.table.horizontalHeader()
@@ -963,6 +991,36 @@ class ElementTableEditor(QWidget):
             self.table.selectRow(new_row)
         self.on_changed(structural=True)
 
+    def _on_header_clicked(self, col):
+        # a one-time reorder (see reorder_fn's docstring above), not a persistent
+        # sort mode - reload() below rebuilds the table from the new element
+        # order, but nothing here keeps re-sorting it as values change afterward
+        if self.reorder_fn is None or not self.row_elements:
+            return
+        attr, _header, kind = self.columns[col]
+
+        def sort_key(element):
+            if kind == "computed":
+                text = self._computed.get(id(element), {}).get(attr, "")
+            else:
+                text = element.get(attr, "") or ""
+            try:
+                value = float(text)
+                if attr in self.descending_attrs:
+                    value = -value
+                return (0, value)
+            except (TypeError, ValueError):
+                # non-numeric (e.g. Name) or blank (e.g. a row whose Z couldn't be
+                # resolved) - sort after every numeric value, regardless of direction
+                return (1, text)
+
+        ordered = sorted(self.row_elements, key=sort_key)
+        if ordered == self.row_elements:
+            return
+        self.reorder_fn(self.root, ordered)
+        self.reload()
+        self.on_changed(structural=True)
+
 
 # ------------------------------------------------------------------
 # Separate, resizable preview window (the editing tables need the space more
@@ -973,11 +1031,11 @@ class StackupPreviewWindow(QWidget):
     """Own top-level window for the live stackup cross-section preview, so it
        gets real screen space instead of sharing the editor window with the
        editing tables. Reuses the same VectorWidget instance as the editor -
-       updates happen by mutating that widget's data and calling .update(),
-       so this window doesn't need any refresh logic of its own.
+       updates happen by calling that widget's refresh(), so this window
+       doesn't need any refresh logic of its own.
 
-    Deliberately NOT WA_DeleteOnClose: the QScrollArea here owns the shared
-    VectorWidget (setWidget() reparents it), so destroying this window on
+    Deliberately NOT WA_DeleteOnClose: this window's layout owns the shared
+    VectorWidget (addWidget() reparents it), so destroying this window on
     close would destroy that widget too, breaking the editor that still
     references it. Closing (the X button) just hides the window instead.
 
@@ -992,17 +1050,31 @@ class StackupPreviewWindow(QWidget):
     deleteLater() on this window instead of relying on Qt object-tree cleanup.
     """
 
-    def __init__(self, vector_widget, parent=None):
+    def __init__(self, vector_widget, parent=None, legend_widget=None, chiplet_switcher=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Stackup Preview")
         self.resize(700, 900)
+        self.vector_widget = vector_widget
+        self.chiplet_switcher = chiplet_switcher
 
+        # vector_widget is a QGraphicsView, already self-scrolling - no QScrollArea
+        # wrapper needed (or wanted: it would nest a second set of scrollbars).
+        # "Topology Overview" lives inside chiplet_switcher's own combo (its first entry),
+        # not as a separate control here - see ChipletSwitcher.
         layout = QVBoxLayout()
-        scroll = QScrollArea()
-        scroll.setWidget(vector_widget)
-        scroll.setWidgetResizable(True)
-        layout.addWidget(scroll)
+        if chiplet_switcher is not None:
+            layout.addWidget(chiplet_switcher)
+
+        layout.addWidget(vector_widget)
+        if legend_widget is not None:
+            layout.addWidget(legend_widget)
         self.setLayout(layout)
+
+        # Ctrl+C copies the stackup cross-section (not the legend) to the
+        # clipboard as an image - window-scoped (default QShortcut context) so
+        # it fires regardless of which child widget currently has focus
+        QShortcut(QKeySequence.Copy, self).activated.connect(
+            lambda: QApplication.clipboard().setPixmap(vector_widget.grab()))
 
     def closeEvent(self, event):
         event.ignore()
@@ -1033,6 +1105,10 @@ class StackupEditorWindow(QDialog):
 
         self.tree = None
         self.current_filename = None
+        # serialized snapshot as of the last load/new/save - has_unsaved_changes()
+        # compares against this; lets the main app decide whether this editor can
+        # be closed silently (e.g. when a different substrate file is selected there)
+        self._saved_snapshot = None
 
         # bounded multi-level undo: _last_snapshot is always an independent deep
         # copy of the tree as it was right before the most recent change;
@@ -1051,10 +1127,19 @@ class StackupEditorWindow(QDialog):
         self._was_valid = True
         self._invalid_field = None
 
+        # full text behind the status line's "Details..." button - see
+        # _refresh_validation_status()/_show_status_details()
+        self._status_details_text = ""
+
         # asked once per loaded/new file (reset in new_file()/_load_file()): whether to
         # write auto-assigned implicit-Dielectric-stacking References into the XML at
         # Save time (see _maybe_offer_explicit_dielectric_references())
         self._asked_about_implicit_dielectric_references = False
+
+        # asked once per loaded/new file (reset in new_file()/_load_file()): whether to add a
+        # shared Variable for a chiplet branch point/root Dielectric missing Boundary= at
+        # Save time (see _maybe_offer_chiplet_boundary_variable())
+        self._asked_about_chiplet_boundary = False
 
         # schemaVersion as of the last successful load/save (reset in new_file()/
         # _load_file(), refreshed in _save_to() on success) - lets save() notice when a
@@ -1184,6 +1269,7 @@ class StackupEditorWindow(QDialog):
             not_applicable_fn=_material_not_applicable,
             blank_if_default_fn=_material_blank_if_default,
             reload_on_attr_change={"Type"},
+            pre_set_attr_fn=self._handle_material_name_change,
             header_tooltips={
                 attr: "Numeric value, or \"=expression\" referencing a Variable"
                 for attr in ("Permittivity", "DielectricLossTangent", "Conductivity", "Rs",
@@ -1202,14 +1288,14 @@ class StackupEditorWindow(QDialog):
             move_fn=stackup_writer.move_dielectric,
             default_attrs_fn=self._default_dielectric_attrs,
             on_changed=self._on_dielectrics_changed,
-            material_choices_fn=self._material_names,
+            material_choices_fn=self._dielectric_material_choices,
             reference_choices_fn=self._dielectric_names,
             gray_fn=_dielectric_gray_fn,
             compute_fn=self._compute_dielectric_zpositions_bound,
             # these four drive the resulting-Zmin/Zmax computation and the
             # position-mode gray-out state, so they must live-refresh
             reload_on_attr_change={"Thickness", "Zmin", "Zmax", "Reference", "ReferenceEdge"},
-            pre_set_attr_fn=self._handle_dielectric_thickness_change,
+            pre_set_attr_fn=self._handle_dielectric_attr_change,
             header_tooltips={
                 "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
                 "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
@@ -1224,14 +1310,17 @@ class StackupEditorWindow(QDialog):
             container_fn=self._layers_container,
             add_fn=lambda root, **attrs: stackup_writer.add_layer(root, **attrs),
             remove_fn=stackup_writer.remove_layer,
+            reorder_fn=stackup_writer.reorder_layers,
+            descending_attrs={"ResultZmin", "ResultZmax"},
             default_attrs_fn=self._default_layer_attrs,
             on_changed=self._on_changed,
-            material_choices_fn=self._material_names,
+            material_choices_fn=self._layer_material_choices,
             reference_choices_fn=self._reference_target_names,
             type_choices=list(stackup_writer.VALID_LAYER_TYPES),
             compute_fn=self._compute_layer_zpositions_and_thickness,
             # Thickness/ResultZmin/ResultZmax are derived from these - must live-refresh
             reload_on_attr_change={"Zmin", "Zmax", "Reference", "ReferenceEdge"},
+            pre_set_attr_fn=self._handle_layer_name_change,
             header_tooltips={
                 "Zmin": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
                 "Zmax": "Absolute position, or offset from Reference if set - or \"=expression\" referencing a Variable",
@@ -1252,6 +1341,10 @@ class StackupEditorWindow(QDialog):
         layers_layout.addLayout(offset_row)
         layers_layout.addWidget(self.layers_editor)
         layers_tab.setLayout(layers_layout)
+        # saved as an attribute (unlike the other plain tab containers) because
+        # _on_preview_element_selected() needs to switch to it by widget identity -
+        # self.layers_editor itself is not the tab's widget, layers_tab is
+        self.layers_tab = layers_tab
 
         self.derived_layers_editor = ElementTableEditor(
             DERIVED_LAYER_COLUMNS,
@@ -1288,7 +1381,7 @@ class StackupEditorWindow(QDialog):
             invalid_fn=self._is_invalid_field,
         )
         self.tables_editor.table.itemSelectionChanged.connect(
-            lambda: QTimer.singleShot(0, self._sync_points_editor_from_table_selection))
+            lambda: QTimer.singleShot(0, self._guarded(self._sync_points_editor_from_table_selection)))
         # left-align (default QHeaderView alignment is centered) - these headers read as
         # labels ("Table name", "Number of data points"), not numbers, so left reads better
         self.tables_editor.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1363,8 +1456,18 @@ class StackupEditorWindow(QDialog):
         outer_layout.addWidget(self.tabs)
 
         # ---------- status ----------
+        status_row = QHBoxLayout()
         self.status_label = QLabel("")
-        outer_layout.addWidget(self.status_label)
+        status_row.addWidget(self.status_label)
+        # only ever shown for the "N note(s)" case - errors already point at Save's own
+        # dialog ("see Save for details"), which shows the full error list on click
+        self.status_details_btn = QPushButton("Details...")
+        self.status_details_btn.setFlat(True)
+        self.status_details_btn.setVisible(False)
+        self.status_details_btn.clicked.connect(self._show_status_details)
+        status_row.addWidget(self.status_details_btn)
+        status_row.addStretch()
+        outer_layout.addLayout(status_row)
 
         self.setLayout(outer_layout)
 
@@ -1378,12 +1481,39 @@ class StackupEditorWindow(QDialog):
             dielectric_label_fn=self.MainWindow.stackup_dielectric_label,
             metal_label_fn=self.MainWindow.stackup_metal_label,
             via_label_suffix_fn=self.MainWindow.stackup_via_label_suffix,
+            metal_color_fn=self.MainWindow.stackup_metal_color,
         )
         self.vector_widget.setMinimumSize(600, 800)
+        self.chiplet_switcher = ChipletSwitcher(self.vector_widget.set_active_chiplet,
+                                                 self.vector_widget.set_topology_mode)
+        self.vector_widget.set_chiplet_switcher(self.chiplet_switcher)
+
+        # two-way sync between the preview graphics and the Dielectric Stack/Layers
+        # tables: clicking a shape in the preview selects its row (and switches to
+        # its tab); selecting a row highlights the matching shape in the preview.
+        # Deferred via QTimer.singleShot(0, ...), same pattern already used for the
+        # Tables<->Points sync above (_sync_points_editor_from_table_selection) -
+        # avoids reentering Qt's selection/item machinery synchronously from
+        # within a signal it's still emitting. Wrapped in self._guarded(...): this
+        # window can be closed (manually, or auto-closed - see
+        # _close_stackup_editor_if_clean in setup_common.py) in the interval between
+        # scheduling one of these and the timer actually firing, which would
+        # otherwise hit a RuntimeError from touching an already-deleted Qt widget.
+        self.vector_widget.elementSelected.connect(
+            lambda kind, name: QTimer.singleShot(
+                0, self._guarded(lambda: self._on_preview_element_selected(kind, name))))
+        self.dielectrics_editor.table.itemSelectionChanged.connect(
+            lambda: QTimer.singleShot(0, self._guarded(self._on_dielectrics_row_selected)))
+        self.layers_editor.table.itemSelectionChanged.connect(
+            lambda: QTimer.singleShot(0, self._guarded(self._on_layers_row_selected)))
+
         # created once and kept for the editor's lifetime, but deliberately with
         # no Qt parent (see StackupPreviewWindow docstring) - cleaned up explicitly
         # in closeEvent() below rather than via Qt's parent-child auto-delete
-        self.preview_window = StackupPreviewWindow(self.vector_widget)
+        legend_fn = getattr(self.MainWindow, "stackup_color_legend", None)
+        legend_widget = legend_fn() if legend_fn is not None else None
+        self.preview_window = StackupPreviewWindow(self.vector_widget, legend_widget=legend_widget,
+                                                    chiplet_switcher=self.chiplet_switcher)
         self.preview_window.move(self.x() + self.width() + 20, self.y())
 
         if initial_filename and os.path.isfile(initial_filename):
@@ -1392,6 +1522,29 @@ class StackupEditorWindow(QDialog):
             self.new_file()
 
         self._open_preview_window()
+
+    def _guarded(self, fn):
+        """Wraps fn (called with no arguments) so it's a no-op if this window (or
+           its vector_widget) has already been destroyed - guards every
+           QTimer.singleShot(0, ...) deferred call in this file, since this window
+           can be closed (manually, or auto-closed - see
+           _close_stackup_editor_if_clean in setup_common.py) in the interval
+           between scheduling one and the timer actually firing, which would
+           otherwise raise "Internal C++ object already deleted" from touching
+           self.tabs/self.tree/etc. on a dead widget.
+
+           Checks vector_widget separately from self: it lives in preview_window,
+           which has no Qt parent relationship to this window (see
+           StackupPreviewWindow's docstring) and is torn down via its own
+           deleteLater() call in closeEvent() below - a separate deferred-deletion
+           chain that isn't guaranteed to finish strictly after (or before) this
+           window's own WA_DeleteOnClose teardown, so self being still-valid at the
+           moment this runs does not guarantee vector_widget still is too.
+        """
+        def wrapper():
+            if shiboken6.isValid(self) and shiboken6.isValid(self.vector_widget):
+                fn()
+        return wrapper
 
     def _open_preview_window(self):
         self.preview_window.show()
@@ -1436,6 +1589,123 @@ class StackupEditorWindow(QDialog):
             "Material": materials[0] if materials else "",
             "Thickness": "1.0",
         }
+
+    def _handle_rename_with_cascade(self, element, new_value, ref_specs, entity_label, editors_to_reload):
+        """Shared rename-cascade logic for a "Name" edit on a Material/Dielectric/Layer that
+           other elements may point back at by name (Material=/Reference=): applies the
+           rename itself unconditionally, then - if anything still refers to the OLD name -
+           offers to update those references too, same confirm-then-cascade shape as
+           _handle_dielectric_thickness_change() above.
+        Args:
+            element (xml.etree.ElementTree.Element): the element being renamed - still
+              holds its old Name (this is called from a pre_set_attr_fn, before the normal
+              attribute-set path would have applied new_value)
+            new_value (string): the new Name
+            ref_specs (list of (list of Element, string)): (container, ref_attr) pairs to
+              scan for elements whose ref_attr attribute equals the OLD name - e.g.
+              [(dielectrics, "Material"), (layers, "Material")] for a material rename
+            entity_label (string): "material"/"dielectric"/"layer", for the dialog text
+            editors_to_reload (list of ElementTableEditor): reloaded (so the table reflects
+              the cascaded values) only if the user accepts the cascade
+        """
+        old_name = element.get("Name")
+        # mirror ElementTableEditor._set_attr()'s own normal-path handling of an
+        # empty value (delete the attribute, don't store Name="") - that path is
+        # skipped entirely once this hook returns True, so it's this hook's job
+        if new_value:
+            element.set("Name", new_value)
+        elif "Name" in element.attrib:
+            del element.attrib["Name"]
+        # an empty new_value can't be a valid reference target - never offer to
+        # point existing References/Materials at "", that would just corrupt them
+        if not old_name or not new_value or old_name == new_value:
+            return
+
+        referrers = [(ref_attr, candidate)
+                     for container, ref_attr in ref_specs
+                     for candidate in container
+                     if candidate is not element and candidate.get(ref_attr) == old_name]
+        if not referrers:
+            return
+
+        names = ", ".join(referring_el.get("Name") or "<unnamed>" for _, referring_el in referrers)
+        reply = QMessageBox.question(
+            self, f"Update references to this {entity_label}?",
+            f"{len(referrers)} element(s) reference this {entity_label} by its old name "
+            f"'{old_name}':\n{names}\n\n"
+            f"Update them to use the new name '{new_value}'?",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            for ref_attr, referring_el in referrers:
+                referring_el.set(ref_attr, new_value)
+            # deferred, same reasoning/pattern as ElementTableEditor._set_attr()'s own
+            # reload_on_attr_change branch: this may still be firing from inside the
+            # very cell/item whose own itemChanged signal triggered this rename ("Name"
+            # isn't in reload_on_attr_change, so that existing deferral doesn't cover
+            # this path) - reload() tearing down the table synchronously here would
+            # destroy that item while its signal is still dispatching.
+            QTimer.singleShot(0, self._guarded(
+                lambda editors=editors_to_reload: [editor.reload() for editor in editors]))
+
+    def _handle_material_name_change(self, element, attr, new_value):
+        """pre_set_attr_fn for the Materials editor: renaming a material that's still
+           referenced by Material="<old name>" on any Dielectric/Layer offers to update
+           those references to the new name too - see _handle_rename_with_cascade().
+        """
+        if attr != "Name":
+            return False
+        root = self.tree.getroot()
+        self._handle_rename_with_cascade(
+            element, new_value,
+            ref_specs=[(self._dielectrics_container(root), "Material"),
+                       (self._layers_container(root), "Material")],
+            entity_label="material",
+            editors_to_reload=[self.dielectrics_editor, self.layers_editor])
+        return True
+
+    def _handle_dielectric_name_change(self, element, attr, new_value):
+        """pre_set_attr_fn (Name branch) for the Dielectrics editor: renaming a dielectric
+           that's still targeted by Reference="<old name>" on any other Dielectric or Layer
+           (a Layer's Reference can target either) offers to update those references to the
+           new name too - see _handle_rename_with_cascade().
+        """
+        if attr != "Name":
+            return False
+        root = self.tree.getroot()
+        self._handle_rename_with_cascade(
+            element, new_value,
+            ref_specs=[(self._dielectrics_container(root), "Reference"),
+                       (self._layers_container(root), "Reference")],
+            entity_label="dielectric",
+            editors_to_reload=[self.dielectrics_editor, self.layers_editor])
+        return True
+
+    def _handle_dielectric_attr_change(self, element, attr, new_value):
+        """pre_set_attr_fn for the Dielectrics editor - dispatches to whichever of the two
+           attrs it actually cares about, since ElementTableEditor only takes one callback.
+        """
+        if attr == "Name":
+            return self._handle_dielectric_name_change(element, attr, new_value)
+        if attr == "Thickness":
+            return self._handle_dielectric_thickness_change(element, attr, new_value)
+        return False
+
+    def _handle_layer_name_change(self, element, attr, new_value):
+        """pre_set_attr_fn for the Layers editor: renaming a layer that's still targeted by
+           Reference="<old name>" on any other Layer offers to update those references to
+           the new name too - see _handle_rename_with_cascade(). A Dielectric's own
+           Reference can't target a Layer (see reference_choices_fn's docstring), so only
+           other Layers are ever real candidates here.
+        """
+        if attr != "Name":
+            return False
+        root = self.tree.getroot()
+        self._handle_rename_with_cascade(
+            element, new_value,
+            ref_specs=[(self._layers_container(root), "Reference")],
+            entity_label="layer",
+            editors_to_reload=[self.layers_editor])
+        return True
 
     def _handle_dielectric_thickness_change(self, element, attr, new_value):
         """pre_set_attr_fn for the Dielectrics editor: when a non-absolute (implicit-stacked
@@ -1652,6 +1922,26 @@ class StackupEditorWindow(QDialog):
             return []
         return [m.get("Name") for m in self._materials_container(self.tree.getroot()) if m.get("Name")]
 
+    def _dielectric_material_choices(self):
+        # AIR is always usable without a <Materials> entry (stackup_reader.parse_substrate()
+        # injects a default) - offer it in the dropdown even when the file doesn't define one
+        names = self._material_names()
+        if not any(n.upper() == "AIR" for n in names):
+            names = names + ["AIR"]
+        return names
+
+    def _layer_material_choices(self):
+        # PEC and AIR are both usable on a Layer without a <Materials> entry - offer them in
+        # the dropdown even when the file doesn't define one (see stackup_reader.PEC_MATERIAL_NAME
+        # and the built-in default AIR material in stackup_reader.parse_substrate())
+        names = self._material_names()
+        extras = []
+        if not any(n.upper() == stackup_reader.PEC_MATERIAL_NAME.upper() for n in names):
+            extras.append(stackup_reader.PEC_MATERIAL_NAME)
+        if not any(n.upper() == "AIR" for n in names):
+            extras.append("AIR")
+        return names + extras
+
     def _layer_names(self):
         if self.tree is None:
             return []
@@ -1817,6 +2107,7 @@ class StackupEditorWindow(QDialog):
         self.current_filename = None
         self._set_filename_label("(new, unsaved)")
         self._asked_about_implicit_dielectric_references = False
+        self._asked_about_chiplet_boundary = False
         self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
         self._reload_all_editors()
         self._reset_undo_baseline()
@@ -1838,6 +2129,7 @@ class StackupEditorWindow(QDialog):
         self.current_filename = filename
         self._set_filename_label(filename)
         self._asked_about_implicit_dielectric_references = False
+        self._asked_about_chiplet_boundary = False
         self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
         self._reload_all_editors()
         self._reset_undo_baseline()
@@ -1877,6 +2169,7 @@ class StackupEditorWindow(QDialog):
         self.current_filename = None
         self._set_filename_label(f"(imported from {source_label}, unsaved)")
         self._asked_about_implicit_dielectric_references = False
+        self._asked_about_chiplet_boundary = False
         self._loaded_schema_version = self.tree.getroot().get("schemaVersion")
         self._reload_all_editors()
         self._reset_undo_baseline()
@@ -2061,6 +2354,55 @@ class StackupEditorWindow(QDialog):
             self.dielectrics_editor.reload()
             self.layers_editor.reload()
 
+    def _maybe_offer_chiplet_boundary_variable(self, root):
+        """Called once per file per editing session, right before Save actually writes the
+           file: if this stackup branches into multiple chiplets and any branch point or
+           chiplet root Dielectric has no Boundary= layer number, offer to add one shared
+           Variable and reference it as Boundary= on all of them - gds2palace needs an
+           explicit Boundary on both sides of a chiplet branch to know which GDS polygons
+           belong to the shared base and which belong to each chiplet (see
+           dielectric_layers_list.find_missing_chiplet_boundaries()). The user still has to
+           fill in the actual GDS layer number afterward on the Variables tab - this only
+           gets every affected Dielectric pointed at one shared place to set it.
+        """
+        if self._asked_about_chiplet_boundary:
+            return
+        self._asked_about_chiplet_boundary = True
+
+        try:
+            materials_list, dielectrics_list, metals_list = stackup_reader.parse_substrate(root)
+        except (Exception, SystemExit):
+            return  # data not fully resolvable - _save_to()'s validate_stackup() already
+                     # guarantees zero errors before calling this, so this is cheap insurance
+                     # only, same as _refresh_preview()'s equivalent guard
+
+        missing = dielectrics_list.find_missing_chiplet_boundaries()
+        if not missing:
+            return
+
+        missing_names = {d.name for d in missing}
+        names = ", ".join(sorted(missing_names))
+        reply = QMessageBox.question(
+            self, "Add a shared chiplet boundary Variable?",
+            "This stackup branches into multiple chiplets, but these Dielectrics have no "
+            f"Boundary= layer number:\n\n{names}\n\n"
+            "gds2palace needs Boundary= on both the shared base and each chiplet's own root "
+            "Dielectric to compute the correct bounding box once a stackup branches like "
+            "this. Add one shared Variable now and reference it as Boundary= on all of them? "
+            "You'll still need to set its actual GDS layer number on the Variables tab "
+            "afterward - this is asked only once per file.",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        var_name = _unique_name(self._variable_names(), "chiplet_boundary_layer")
+        stackup_writer.add_variable(root, Name=var_name, Value="0")
+        for element in self._dielectrics_container(root):
+            if element.get("Name") in missing_names:
+                element.set("Boundary", f"={var_name}")
+        self.variables_editor.reload()
+        self.dielectrics_editor.reload()
+
     def _save_to(self, filename):
         root = self.tree.getroot()
         errors = stackup_writer.validate_stackup(root)
@@ -2071,6 +2413,7 @@ class StackupEditorWindow(QDialog):
             return False
 
         self._maybe_offer_explicit_dielectric_references(root)
+        self._maybe_offer_chiplet_boundary_variable(root)
 
         app_name = getattr(self.MainWindow, "APP_NAME", "setupEM")
         stackup_writer.stamp_header_comments(root, app_name, self.description_edit.toPlainText())
@@ -2087,6 +2430,8 @@ class StackupEditorWindow(QDialog):
         # upgrade again if the version changes further from here, not on every save
         self._loaded_schema_version = root.get("schemaVersion")
         self._add_recent_file(filename)
+        # this is now the "nothing to lose" baseline again
+        self._mark_saved_baseline()
 
         saved_values = getattr(self.MainWindow, "saved_values", {}) or {}
         substrate_file = saved_values.get("SubstrateFile")
@@ -2261,9 +2606,11 @@ class StackupEditorWindow(QDialog):
             element = dielectric_elements.get(dielectric.name)
             if element is None or element.get("Reference"):
                 continue  # already Reference-based - leave untouched
+            own_gds_number = int(dielectric.gdsboundary) if dielectric.gdsboundary is not None else None
             candidate = self._nearest_reference_candidate(
                 dielectric.zmin, dielectric.name, dielectrics_list.dielectrics, [],
-                fallback_to_lowest_dielectric=False)
+                fallback_to_lowest_dielectric=False, own_gds_number=own_gds_number,
+                include_dielectric_bottom_edges=False)
             if candidate is None:
                 continue  # nothing below it - stays the natural implicit anchor at z=0
             candidate_name, candidate_edge, candidate_z = candidate
@@ -2289,7 +2636,7 @@ class StackupEditorWindow(QDialog):
                 continue  # already Reference-based - leave untouched
             candidate = self._nearest_reference_candidate(
                 metal.zmin, metal.name, dielectrics_list.dielectrics, metals_list.metals,
-                fallback_to_lowest_dielectric=True)
+                fallback_to_lowest_dielectric=True, own_gds_number=int(metal.layernum))
             if candidate is None:
                 continue  # no dielectric in the file at all - nothing sensible to reference
             candidate_name, candidate_edge, candidate_z = candidate
@@ -2303,18 +2650,42 @@ class StackupEditorWindow(QDialog):
         stackup_writer.stamp_reference_format_comment(root, stackup_reader.__version__)
 
     @staticmethod
-    def _nearest_reference_candidate(zmin, exclude_name, dielectrics, metals, fallback_to_lowest_dielectric):
+    def _nearest_reference_candidate(zmin, exclude_name, dielectrics, metals, fallback_to_lowest_dielectric,
+                                      own_gds_number=None, include_dielectric_bottom_edges=True):
         """Find the best Reference target for an element positioned at `zmin`: among every
-           other Dielectric's Top and Bottom edge, and every Layer's Top edge, the one with
-           the largest z that is still at or below `zmin` - i.e. the nearest thing below,
-           whether touching (gap 0) or not (e.g. a capacitor plate floating a small distance
-           above the metal below it). Both Dielectric edges are real candidates for different
-           reasons: another Dielectric's Top is where one stacks directly on the one below;
-           a Dielectric's own Bottom is where the lowest Layer *inside* it naturally sits.
+           other Dielectric's Top (and, for a Layer, Bottom) edge, and every Layer's Top edge,
+           the one with the largest z that is still at or below `zmin` - i.e. the nearest thing
+           below, whether touching (gap 0) or not (e.g. a capacitor plate floating a small
+           distance above the metal below it). A Dielectric's own Bottom edge is a real
+           candidate for a LAYER (that's where the lowest Layer *inside* it naturally sits,
+           e.g. a backside contact) - but never for another DIELECTRIC (see
+           include_dielectric_bottom_edges below), since two Dielectrics are never legitimately
+           related "bottom to bottom", only "top to bottom" (one stacks directly on the other).
            `metals` should be [] when converting a Dielectric (Reference on a Dielectric can
            only target another Dielectric, never a Layer). Dielectrics are checked before
-           metals, so an exact tie (both at the same z) prefers the Dielectric - more
-           fundamental/stable a target than an individual Layer.
+           metals, so an exact tie between a Dielectric and a Layer prefers the Dielectric -
+           more fundamental/stable a target than an individual Layer.
+
+           A multi-chiplet stackup (see util_stackup_reader.detect_chiplet_groups()) can have
+           several *different* candidates genuinely tied at the same qualifying z - e.g. a
+           Layer choosing between two different chiplets' own first Dielectric, both starting
+           at the shared interposer's top. Plain z-matching can't tell those apart, so when
+           more than one same-kind candidate ties for best z, own_gds_number (this element's
+           own GDS layer number - Layer= for a Layer, Boundary= for a Dielectric, if it has
+           one) is used to prefer whichever tied candidate's own GDS number (same rule) is
+           numerically closest, on the theory that layers/dielectrics belonging to the same
+           chiplet were likely drawn with nearby GDS layer numbers. Falls back to the original
+           first-candidate-found behavior whenever there's no usable number on either side
+           (e.g. converting a Dielectric with no Boundary=) - never worse than the old
+           behavior, only better when there's an actual number to compare.
+
+           Known limitation, accepted rather than solved: this only disambiguates an actual
+           TIE. It doesn't help when a different chiplet's element is simply the closest
+           candidate with no tie at all - e.g. one chiplet's internal cumulative thickness
+           happening to land exactly on another chiplet's unrelated Layer z, which then wins
+           outright on proximity alone, regardless of GDS numbers, before this tie-break ever
+           runs. Solving that would need chiplet membership to already be known while doing
+           the very conversion that establishes it - a much bigger change than this one.
         Args:
             zmin (float): the element's own resolved absolute Zmin
             exclude_name (string): don't consider a candidate with this name (self)
@@ -2325,30 +2696,60 @@ class StackupEditorWindow(QDialog):
                 Bottom edge with whatever (possibly negative) offset that implies - used for
                 Layers (e.g. a backside ground plane below the substrate); Dielectrics have
                 no such fallback, since there both being asked here is what defines "lowest"
+            own_gds_number (int, optional): this element's own GDS layer number, for the
+                tie-break above - None (the default) skips straight to the fallback
+            include_dielectric_bottom_edges (bool): whether another Dielectric's Bottom edge
+                is a candidate at all - True (the default) for a Layer; the Dielectric
+                conversion call site passes False (see docstring above). Without this, two
+                chiplet Dielectrics sharing the same zmin (the branch point: both start at
+                the shared interposer's top) would spuriously tie against *each other's*
+                Bottom edge - which happens to sit at that exact same z purely because they
+                start there too - competing with (and, once a GDS-number tie-break exists,
+                sometimes beating) the actually-correct shared interposer Top-edge target.
         Returns:
             (name, edge, z) of the chosen candidate, or None if there isn't one
         """
         epsilon = 1e-5
-        best = None  # (z, name, edge)
+        candidates = []  # each: (z, name, edge, gds_number_or_None, is_dielectric)
         for dielectric in dielectrics:
             if dielectric.name == exclude_name:
                 continue
-            for edge, z in (("Top", dielectric.zmax), ("Bottom", dielectric.zmin)):
-                if z <= zmin + epsilon and (best is None or z > best[0]):
-                    best = (z, dielectric.name, edge)
+            dielectric_gds = int(dielectric.gdsboundary) if dielectric.gdsboundary is not None else None
+            edges = [("Top", dielectric.zmax)]
+            if include_dielectric_bottom_edges:
+                edges.append(("Bottom", dielectric.zmin))
+            for edge, z in edges:
+                if z <= zmin + epsilon:
+                    candidates.append((z, dielectric.name, edge, dielectric_gds, True))
         for metal in metals:
             if metal.name == exclude_name:
                 continue
             z = metal.zmax
-            if z <= zmin + epsilon and (best is None or z > best[0]):
-                best = (z, metal.name, "Top")
+            if z <= zmin + epsilon:
+                candidates.append((z, metal.name, "Top", int(metal.layernum), False))
 
-        if best is not None:
-            return best[1], best[2], best[0]
-        if fallback_to_lowest_dielectric and dielectrics:
-            lowest = min(dielectrics, key=lambda d: d.zmin)
-            return lowest.name, "Bottom", lowest.zmin
-        return None
+        if not candidates:
+            if fallback_to_lowest_dielectric and dielectrics:
+                lowest = min(dielectrics, key=lambda d: d.zmin)
+                return lowest.name, "Bottom", lowest.zmin
+            return None
+
+        best_z = max(c[0] for c in candidates)
+        tied = [c for c in candidates if best_z - c[0] <= epsilon]
+
+        # unchanged rule: an exact Dielectric/Layer tie prefers the Dielectric
+        if any(c[4] for c in tied):
+            tied = [c for c in tied if c[4]]
+
+        # still-tied same-kind candidates: prefer GDS-number proximity, but only when
+        # there's actually a number on both sides to compare - see docstring above
+        if len(tied) > 1 and own_gds_number is not None:
+            numbered = [c for c in tied if c[3] is not None]
+            if numbered:
+                tied = [min(numbered, key=lambda c: abs(c[3] - own_gds_number))]
+
+        chosen = tied[0]  # unchanged fallback: first survivor in original (file) order
+        return chosen[1], chosen[2], chosen[0]
 
     # ---------- convert to legacy format ----------
 
@@ -2655,6 +3056,7 @@ class StackupEditorWindow(QDialog):
             return
         root = self.tree.getroot()
         errors = stackup_writer.validate_stackup(root)
+        warnings = stackup_writer.find_reserved_material_definitions(root)
 
         was_valid = self._was_valid
         self._was_valid = not errors
@@ -2678,8 +3080,8 @@ class StackupEditorWindow(QDialog):
             # and recreate out from under the signal that's still emitting it.
             QTimer.singleShot(0, self._reload_all_editors)
 
-        self._refresh_preview(root, errors)
-        self._refresh_validation_status(errors)
+        warnings = warnings + self._refresh_preview(root, errors)
+        self._refresh_validation_status(errors, warnings)
 
     # ---------- undo (bounded multi-level) ----------
 
@@ -2693,6 +3095,23 @@ class StackupEditorWindow(QDialog):
         # file's invalidity is meaningless for this one
         self._was_valid = True
         self._invalid_field = None
+        # also the new "nothing to lose" baseline for has_unsaved_changes()
+        self._mark_saved_baseline()
+
+    def _mark_saved_baseline(self):
+        self._saved_snapshot = (
+            ET.tostring(self.tree.getroot(), encoding="unicode") if self.tree is not None else None
+        )
+
+    def has_unsaved_changes(self):
+        """True if the in-memory tree differs from what was last loaded/created/saved.
+           Used by the main app to decide whether this editor can be closed silently
+           (e.g. when a different substrate file is selected there) without risking
+           losing an in-progress edit.
+        """
+        if self.tree is None:
+            return False
+        return ET.tostring(self.tree.getroot(), encoding="unicode") != self._saved_snapshot
 
     def _record_undo_point(self):
         if self.tree is None:
@@ -2724,10 +3143,14 @@ class StackupEditorWindow(QDialog):
         self._refresh_xml_preview_if_active()
 
     def _refresh_preview(self, root, errors):
+        """Returns any dielectric-z-overlap warnings found (see
+        dielectric_layers_list.find_z_overlaps()), for the caller to merge into its own
+        warnings list - empty whenever the preview itself couldn't be refreshed.
+        """
         if errors:
             # data is not fully consistent yet (e.g. mid-edit) - leave the last
             # good preview showing rather than risk parse_substrate() choking on it
-            return
+            return []
         try:
             materials_list, dielectrics_list, metals_list = stackup_reader.parse_substrate(root)
         except (Exception, SystemExit):
@@ -2739,19 +3162,71 @@ class StackupEditorWindow(QDialog):
             # get here, but this is cheap insurance against ending the whole
             # process over a gap in that mirroring rather than just skipping a
             # preview refresh.
-            return
-        self.vector_widget.materials_list = materials_list
-        self.vector_widget.dielectrics_list = dielectrics_list
-        self.vector_widget.metals_list = metals_list
-        self.vector_widget.update()
+            return []
+        self.vector_widget.refresh(materials_list, dielectrics_list, metals_list)
+        self.chiplet_switcher.set_groups(dielectrics_list.chiplet_groups)
+        return dielectrics_list.find_z_overlaps() + dielectrics_list.find_missing_chiplet_boundary_warnings()
 
-    def _refresh_validation_status(self, errors):
-        if not errors:
-            self.status_label.setText("Valid.")
-            self.status_label.setStyleSheet("color: green;")
+    def _on_preview_element_selected(self, kind, name):
+        """Preview -> table: a shape was clicked in the cross-section preview -
+           switch to its tab and select its row there."""
+        editor = self.dielectrics_editor if kind == "dielectric" else self.layers_editor
+        tab_widget = editor if kind == "dielectric" else self.layers_tab
+        try:
+            row = next(i for i, el in enumerate(editor.row_elements) if el.get("Name") == name)
+        except StopIteration:
+            return
+        self.tabs.setCurrentWidget(tab_widget)
+        if editor.table.currentRow() != row:
+            editor.table.selectRow(row)
+
+    def _on_dielectrics_row_selected(self):
+        """Table -> preview: a Dielectric Stack row was selected - highlight the
+           matching slab in the preview. A deselected table (row < 0) clears the
+           preview selection too, so listeners outside this editor (e.g. Layout
+           Preview's cross-window highlight) see the clear as well."""
+        row = self.dielectrics_editor.table.currentRow()
+        if 0 <= row < len(self.dielectrics_editor.row_elements):
+            name = self.dielectrics_editor.row_elements[row].get("Name")
+            if name:
+                self.vector_widget.select_element("dielectric", name)
         else:
+            self.vector_widget.scene().clearSelection()
+
+    def _on_layers_row_selected(self):
+        """Table -> preview: a Layers row was selected - highlight the matching
+           metal/via/sheet box in the preview. A deselected table (row < 0) clears
+           the preview selection too, so listeners outside this editor (e.g.
+           Layout Preview's cross-window highlight) see the clear as well."""
+        row = self.layers_editor.table.currentRow()
+        if 0 <= row < len(self.layers_editor.row_elements):
+            name = self.layers_editor.row_elements[row].get("Name")
+            if name:
+                self.vector_widget.select_element("layer", name)
+        else:
+            self.vector_widget.scene().clearSelection()
+
+    def _refresh_validation_status(self, errors, warnings=None):
+        warnings = warnings or []
+        self.status_details_btn.setVisible(bool(warnings) and not errors)
+        if errors:
             self.status_label.setText(f"{len(errors)} problem(s) - see Save for details.")
             self.status_label.setStyleSheet("color: darkred;")
+        elif warnings:
+            # short line only - the full text used to be inlined here, which could grow
+            # to an unreasonable single-line length (every warning joined with "; ") and
+            # forced the whole window wider to fit it. Full text now lives behind the
+            # "Details..." button instead, mirroring how the errors case above already
+            # points at Save's own dialog rather than inlining every error.
+            self.status_label.setText(f"Valid - {len(warnings)} note(s).")
+            self.status_label.setStyleSheet("color: #b8860b;")
+            self._status_details_text = "\n".join(f"- {w}" for w in warnings)
+        else:
+            self.status_label.setText("Valid.")
+            self.status_label.setStyleSheet("color: green;")
+
+    def _show_status_details(self):
+        QMessageBox.information(self, "Validation notes", self._status_details_text)
 
     def _on_tab_changed(self, index):
         if self.tabs.widget(index) is self.xml_preview_tab:
@@ -2823,6 +3298,9 @@ class _StandaloneMainWindow:
 
     def stackup_dielectric_color(self, material):
         return epsilon_to_color(material.eps, 95)
+
+    def stackup_metal_color(self, material):
+        return None  # no override - compute_stackup_layout()'s default type-based color
 
     def stackup_dielectric_label(self, dielectric, material):
         return default_stackup_dielectric_label(dielectric, material)

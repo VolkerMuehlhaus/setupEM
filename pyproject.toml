@@ -12,21 +12,33 @@ authors = [
     { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
 ]
 dependencies = [
-    "gds2palace>=0.3.6",
+    "gds2palace>=0.5.2",
+    "gds_prepare_for_EM>=1.2.0",
     "PySide6",
+    "shiboken6",
     "scipy",
     "requests",
     "scikit-rf",
     "matplotlib",
     "numpy",
-    "gdspy"
+    "gdspy",
+    "meshio",
+    "pyvista",
+    "pyvistaqt"
 ]
 requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/VolkerMuehlhaus/setupEM"
+Repository = "https://github.com/VolkerMuehlhaus/setupEM"
+Changelog = "https://github.com/VolkerMuehlhaus/setupEM/blob/main/doc/CHANGES.md"
 
 [project.scripts]
 setupEM = "setupEM.setupEM:main"
 setupThermal = "setupEM.setupThermal:main"
 stackupEditor = "setupEM.stackupEditor:main"
+resultViewer = "setupEM.result_viewer:main"
+fieldViewer = "setupEM.field_viewer:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "setupEM.__version__"}

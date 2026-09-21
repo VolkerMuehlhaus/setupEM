@@ -25,11 +25,14 @@ import os
 import json
 import csv
 import re
+import math
+import cmath
+import glob
 
 _ITERATION_RE = re.compile(r'^iteration(\d+)$')
 
 
-def _find_output_dir(run_path, model_basename):
+def find_output_dir(run_path, model_basename):
     # config.json's Problem.Output is a path relative to config.json's own directory
     config_path = os.path.join(run_path, 'config.json')
     output_rel = None
@@ -43,6 +46,41 @@ def _find_output_dir(run_path, model_basename):
     if not output_rel:
         output_rel = 'output/' + model_basename
     return os.path.normpath(os.path.join(run_path, output_rel))
+
+
+def find_paraview_files(run_path, model_basename):
+    """All ParaView collection files under this run's Palace output directory, found
+    recursively. Palace's own field-dump feature (triggered by fdump/SaveStep) writes
+    its category/excitation folder structure without gds2palace's control - confirmed
+    (on two Palace versions) to only keep the last-solved excitation's Cycle files, so
+    no fixed filename or count can be assumed here. Prefers .pvd, then falls back to
+    .pvtu (the multi-partition index - ties per-partition pieces back into one dataset),
+    then loose .vtu if neither exists yet. Empty list if the output directory doesn't
+    exist / has nothing yet.
+    """
+    output_dir = find_output_dir(run_path, model_basename)
+    if not os.path.isdir(output_dir):
+        return []
+    pvd_files = sorted(glob.glob(os.path.join(output_dir, '**', '*.pvd'), recursive=True))
+    if pvd_files:
+        return pvd_files
+    pvtu_files = sorted(glob.glob(os.path.join(output_dir, '**', '*.pvtu'), recursive=True))
+    if pvtu_files:
+        return pvtu_files
+    return sorted(glob.glob(os.path.join(output_dir, '**', '*.vtu'), recursive=True))
+
+
+def is_amr_iteration_path(path):
+    """True if `path` sits under (or is itself) one of the "iteration<N>" output
+    subfolders an adaptive mesh refinement run writes alongside its final,
+    most-refined pass at the output root - see _list_iteration_dirs(). Used by
+    field_viewer.py to default its Result File picker to the final pass's field
+    dumps only: AMR's earlier iterations exist for convergence tracking (see
+    build_results_summary()), not usually meant to be inspected in 3D themselves,
+    and a run with several iterations otherwise multiplies the picker's entries
+    by the iteration count.
+    """
+    return any(_ITERATION_RE.match(part) for part in os.path.normpath(path).split(os.sep))
 
 
 def _read_palace_json(dir_path):
@@ -79,12 +117,122 @@ def _read_error_indicators(dir_path):
     try:
         return {
             'norm': float(fields['Norm']),
-            'minimum': float(fields['Minimum']),
             'maximum': float(fields['Maximum']),
-            'mean': float(fields['Mean']),
         }
     except (KeyError, ValueError):
         return None
+
+
+def _parse_palace_port_s_csv(path):
+    """Parse a Palace port-S.csv file into (freq_list, S_dB_list, S_arg_list,
+    num_ports), where S_dB_list/S_arg_list are one dict-per-frequency mapping
+    'i j' port-pair strings to their |S| (dB) / phase (deg) string values.
+    """
+    freq = []
+    S_dB = []
+    S_arg = []
+    params = []
+    num_ports = 0
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            aline = line.rstrip()
+            aline = aline.replace(",", "")
+            aline = aline.replace("(dB)", "")
+            aline = aline.replace("(deg.)", "")
+
+            if 'Hz)' in aline:
+                # header line: items are like |S[1][1]| arg(S[1][1])
+                items = aline.split()
+                for item in items:
+                    if '|' in item:
+                        Sxx = item.replace('|S', '').replace('|', '')
+                        Sxx = Sxx.replace('][', ' ').replace('[', '').replace(']', '')
+                        params.append(Sxx)
+                        a, b = (int(x) for x in Sxx.split())
+                        num_ports = max(num_ports, a, b)
+                continue
+
+            items = aline.split()
+            if not items:
+                continue
+            dB = {}
+            arg = {}
+            for param in params:
+                dB_index = 2 * params.index(param) + 1
+                arg_index = dB_index + 1
+                dB[param] = items[dB_index]
+                arg[param] = items[arg_index]
+            freq.append(items[0])
+            S_dB.append(dB)
+            S_arg.append(arg)
+
+    return freq, S_dB, S_arg, num_ports
+
+
+def read_port_s_data(dir_path):
+    """Parse dir_path/port-S.csv (if present), or None if the file is
+    missing, unfinished, or malformed (e.g. a still-running pass). Public
+    (no leading underscore): also used by result_viewer.py to build a live
+    preview of the most recently completed AMR iteration while Palace is
+    still running - see find_live_iteration_dirs() below.
+    """
+    path = os.path.join(dir_path, 'port-S.csv')
+    if not os.path.isfile(path):
+        return None
+    try:
+        freq, S_dB, S_arg, num_ports = _parse_palace_port_s_csv(path)
+    except (OSError, ValueError, IndexError):
+        return None
+    if not freq:
+        return None
+    return freq, S_dB, S_arg, num_ports
+
+
+def _max_delta_s(prev_data, curr_data):
+    """Max |S_curr - S_prev| across all ports and frequencies common to both
+    passes, mirroring HFSS's per-pass Max Delta S. Returns None if either
+    pass has no port-S data, or the two use different port counts.
+    """
+    if prev_data is None or curr_data is None:
+        return None
+    freq_p, dB_p, arg_p, ports_p = prev_data
+    freq_c, dB_c, arg_c, ports_c = curr_data
+    if ports_p != ports_c:
+        return None
+
+    max_delta = 0.0
+    found_any = False
+    for idx in range(min(len(freq_p), len(freq_c))):
+        for key in set(dB_p[idx]) & set(dB_c[idx]):
+            try:
+                Sp = cmath.rect(10 ** (float(dB_p[idx][key]) / 20.0), math.radians(float(arg_p[idx][key])))
+                Sc = cmath.rect(10 ** (float(dB_c[idx][key]) / 20.0), math.radians(float(arg_c[idx][key])))
+            except ValueError:
+                continue
+            found_any = True
+            max_delta = max(max_delta, abs(Sc - Sp))
+    return max_delta if found_any else None
+
+
+def _collect_amr_rows(output_dir, iteration_dirs):
+    """One row per AMR iteration subfolder, plus the root output_dir as
+    'Final': (label, palace_json_dict_or_None, error_indicators_dict_or_None,
+    max_delta_s_vs_previous_row_or_None).
+    """
+    dirs_in_order = list(iteration_dirs) + [output_dir]
+    labels = [os.path.basename(d) for d in iteration_dirs] + ["Final"]
+
+    rows = []
+    prev_port_s = None
+    for label, d in zip(labels, dirs_in_order):
+        summary = _read_palace_json(d)
+        errors = _read_error_indicators(d)
+        port_s = read_port_s_data(d)
+        delta_s = _max_delta_s(prev_port_s, port_s)
+        rows.append((label, summary, errors, delta_s))
+        prev_port_s = port_s
+    return rows
 
 
 def _list_iteration_dirs(output_dir):
@@ -98,6 +246,22 @@ def _list_iteration_dirs(output_dir):
             found.append((int(match.group(1)), full_path))
     found.sort(key=lambda item: item[0])
     return [full_path for _, full_path in found]
+
+
+def find_live_iteration_dirs(run_path, model_basename):
+    """While a multi-iteration AMR run is still in progress (before combine_snp has
+    produced real Touchstone files), return the list of iteration<N> subfolders under
+    this run's Palace output directory that already have a successfully-parsed
+    port-S.csv - i.e. iterations whose solve+error-estimate has fully completed - in
+    ascending order. Empty list if AMR is off (no iteration<N> subfolders exist at
+    all - a single pass writes directly to the output root, never to iteration<N>) or
+    if no iteration has completed yet. Deliberately does NOT include the output root
+    itself (the "Final", most-refined pass) - see result_viewer.py's live-preview
+    handling for why.
+    """
+    output_dir = find_output_dir(run_path, model_basename)
+    iteration_dirs = _list_iteration_dirs(output_dir)
+    return [d for d in iteration_dirs if read_port_s_data(d) is not None]
 
 
 def _format_duration(seconds):
@@ -128,11 +292,27 @@ def _format_sci(x):
     return 'n/a' if x is None else f"{x:.3e}"
 
 
+def _format_delta(x):
+    return 'n/a' if x is None else f"{x:.4f}"
+
+
+def _save_convergence_summary(run_path, summary_text):
+    """Save the AMR summary table alongside the run's config.json /
+    port_information.json, so it's available on disk without re-running the
+    simulation or digging through the setupEM log.
+    """
+    try:
+        with open(os.path.join(run_path, "mesh_convergence_summary.txt"), "w", encoding="utf-8") as f:
+            f.write(summary_text + "\n")
+    except OSError:
+        pass
+
+
 def build_results_summary(run_path, model_basename):
     """Return a formatted multi-line summary of Palace results found under run_path,
     or an explanatory message if nothing is there yet.
     """
-    output_dir = _find_output_dir(run_path, model_basename)
+    output_dir = find_output_dir(run_path, model_basename)
     if not os.path.isdir(output_dir):
         return (f"No Palace results found yet (expected output directory: {output_dir}) "
                  "-- has the simulation finished?")
@@ -155,19 +335,18 @@ def build_results_summary(run_path, model_basename):
         if errors:
             lines.append(
                 f"Error indicator    : Norm={_format_sci(errors['norm'])}  "
-                f"Max={_format_sci(errors['maximum'])}  Mean={_format_sci(errors['mean'])}"
+                f"Max={_format_sci(errors['maximum'])}"
             )
         lines.append("=" * 40)
         return "\n".join(lines)
 
     # Adaptive mesh refinement: one row per iteration subfolder, plus the root as "Final"
-    rows = [(os.path.basename(it_dir), _read_palace_json(it_dir), _read_error_indicators(it_dir))
-            for it_dir in iteration_dirs]
-    rows.append(("Final", _read_palace_json(output_dir), _read_error_indicators(output_dir)))
+    rows = _collect_amr_rows(output_dir, iteration_dirs)
 
-    headers = ["Iteration", "DOF", "Mesh elems", "Error Norm", "Error Max", "Error Mean", "Time", "Peak RAM"]
+    headers = ["Iteration", "DOF", "Mesh elems", "Error Norm", "Error Max",
+               "Max dS", "Time", "Peak RAM"]
     table_rows = []
-    for label, summary, errors in rows:
+    for label, summary, errors, delta_s in rows:
         summary = summary or {}
         errors = errors or {}
         table_rows.append([
@@ -176,7 +355,7 @@ def build_results_summary(run_path, model_basename):
             _format_int(summary.get('mesh_elements')),
             _format_sci(errors.get('norm')),
             _format_sci(errors.get('maximum')),
-            _format_sci(errors.get('mean')),
+            _format_delta(delta_s),
             _format_duration(summary.get('duration_s')),
             _format_ram(summary.get('peak_ram_mb')),
         ])
@@ -196,4 +375,6 @@ def build_results_summary(run_path, model_basename):
     for row in table_rows:
         lines.append(fmt_row(row))
     lines.append("=" * len(header_line))
-    return "\n".join(lines)
+    summary_text = "\n".join(lines)
+    _save_convergence_summary(run_path, summary_text)
+    return summary_text

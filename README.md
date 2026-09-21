@@ -4,11 +4,13 @@
 
 ## What's New
 
-- **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
-- A graphical **Stackup XML Editor** (Tools > Edit Stackup XML...), including Variables, Reference-relative positioning, Derived Layers, and Thermal Tables
-- Input Files tab can now **override stackup Variables** (e.g. `total_thickness`) directly, without hand-editing the XML or the generated model
+Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, built-in 3D field viewer, GDSII Layout Simplification, XML Stackup Editor, setupThermal for Elmer thermal simulation.
 
 See [CHANGES.md](doc/CHANGES.md) for details.
+
+## Video Tutorial
+
+https://www.youtube.com/playlist?list=PLQ6NbZzeLAVU
 
 ## SetupEM 
 
@@ -20,6 +22,11 @@ The setupEM package now includes setupThermal also, which is the equivalent of s
 
 An overview of the SetupEM user interface is given below in chapter "Using setupEM"
 
+Two more external tools are used by parts of the workflow, and are not installed automatically:
+
+- [ParaView](https://www.paraview.org/) — optional, for viewing field-dump output (Palace/Elmer EM) and Elmer thermal result files with ParaView itself instead of the built-in 3D field viewer (see [3D Field Viewer](#3d-field-viewer) below). Not required: the built-in viewer needs nothing extra installed and is the default.
+- An MPI implementation — only needed for multi-process Elmer runs (the Elmer solver settings' multithreading option). Use OpenMPI or MPICH on Linux/macOS; on Windows, install [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi) (setupEM checks for this and shows a download link if it's missing).
+
 
 ## Installing the AWS Palace FEM solver engine
 **setupEM** creates and runs simulation models for the AWS Palace FEM solver engine. The underlying solver **AWS Palace** can be installed in multiple ways. For a smooth interaction with the gds2palace workflow, it is recommended to create some scripts that help running the model and convert the Palace results to SnP Touchstone files.
@@ -27,21 +34,18 @@ An overview of the SetupEM user interface is given below in chapter "Using setup
 For development of this workflow, Palace was installed using the Singularity/Apptainer installation method. This was rather simple and straightforward, even with no knowledge about container usage. The resulting apptainer file palace.sif can be integrated very easily in a Linux system like the Ubuntu 24.04 system used here, and can then be moved to other Linux machines using simple copy of the container file. The script to start Palace from the apptainer is included in the scripts directory in this repository.
 
 Notes on installing the Palace solver using **apptainer** container manager:
-[Installing Palace using Apptainer](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/Installing_Palace_using_Apptainer.pdf) 
+[Installing Palace using Apptainer](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-apptainer.md) 
 
 Using the spack package manager, Palace can also be created from source with a few simple commands. All tools required by the build process will be downloaded and installed automatically by spack, so you can sit and watch while your system builds the software.
 
 Notes in compiling Palace using the **spack package manager for Linux**:
-[Installing Palace using spack](./doc/Installing_Palace_using_Spack.pdf) 
-
-Thread on compiling Palace using the **spack package manager for MacOS**:
-[Spack install for MacOS outdated?](https://github.com/awslabs/palace/issues/581) 
+[Installing Palace using spack](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/building-palace-spack.md) 
 
 You can use any of the installation methods described on the AWS Palace web site. The gds2palace workflow does not change, it only creates the input files for Palace and does not care how you installed Palace, or on what platform you run the actual Palace simulation from these model files. To start Palace from setupEM, a wrapper script **run_palace** is used, and this is where you point to your actual installation (even remote copy & remote simulation is possible).
 
 
 # Installation of setupEM (including gds2palace workflow files)
-As a Python program that uses the Qt library, setupEM works on Linux, Windows, MacOS and other platforms. The Palace solver itself is designed for Linux systems, but can you install it using the Windows Subsystem for Linux (WSL). Palace also works well on MacOS, installed using spack as described [above](https://github.com/awslabs/palace/issues/581).
+As a Python program that uses the Qt library, setupEM works on Linux, Windows, MacOS and other platforms. The Palace solver itself is designed for Linux systems, but can you install it using the Windows Subsystem for Linux (WSL). Palace also works well on MacOS, installed using spack.
 
 To install setupEM, activate the Python venv where you want to install.
 
@@ -78,11 +82,18 @@ sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxc
 ## Dependencies
 The setupEM module also installs these dependencies:
 - gds2palace
+- gds_prepare_for_EM
 - PySide6
+- shiboken6
 - scipy
 - requests
 - scikit-rf
 - matplotlib
+- numpy
+- gdspy
+- meshio
+- pyvista
+- pyvistaqt
     
 ---
 
@@ -109,7 +120,7 @@ On this tab, you configure input files:
 
 The fields for GDSII and XML file support drag & drop or you can use the Browse... buttons.
 
-Some pre-processing of the layout is also defined here: You can specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box. If your layout includes **polygons with holes**, you need to set the "Preprocess GDSII file" checkbox, otherwise you will get error messages during meshing.
+Some pre-processing of the layout is also defined here: You can specify a distance (in micron) which is used for **via array merging**, to speed up simulation by replacing many individual vias with one large via box.
 
 <img src="./doc/png/inputfiles1.png" alt="input files" width="700">
 
@@ -159,9 +170,9 @@ Parameter "Mesh refinement at the edges" does what the name says, this is parame
 
 Parameter "Mesh cell maximum size absolute" works in combination with the cells/wavelength value, the mesh will use the lower of these two dimensions.
 
-Parameter "Mesh basis function" is an expert setting that controls the order of FEM basis function. Use setting "most accurate", which means order=2 for basis functions. Only for a quick & dirty simulation, use "faster/less accurate", if you know what you are doing.
+Parameter "Mesh basis function" is an expert setting that controls the order of FEM basis function, with three levels: "faster, less accurate" (order 1), "recommended" (order 2, the default), and "slower, most accurate" (order 3, Palace only - not available in Elmer mode, since Elmer has no cubic-order solver). Use the default "recommended" setting unless you specifically want a faster, less accurate run, or need the extra accuracy of order 3.
 
-Parameter "Adaptive mesh iterations" does what the name says: Palace offers adaptive mesh refinement (AMR) but if we use mesh basis function order 2 ("most accurate") with mesh refinement of 2 micron or so, the initial mesh is usually fine enough and we don't need AMR. Starting from a coarse mesh plus AMR usually takes more simulation time than going for a finer initial mesh without AMR. If you experience something different, your feedback and example is much appreciated!
+Parameter "Adaptive mesh iterations" does what the name says: Palace offers adaptive mesh refinement (AMR) but if we use mesh basis function order 2 ("recommended") with mesh refinement of 2 micron or so, the initial mesh is usually fine enough and we don't need AMR. Starting from a coarse mesh plus AMR usually takes more simulation time than going for a finer initial mesh without AMR. If you experience something different, your feedback and example is much appreciated! When AMR iterations is non-zero, "AMR goal" (relative error tolerance) and "AMR maximum DOF" control when Palace stops refining, whichever limit is hit first - the defaults rarely need changing.
 
 For the boundary conditions, absorbing boundary and pefect electric conductor are supported at the present time. You can specify the oversize of the dielectric layers from the metal drawing, and the additional layer of air that srrounds everything. **Both these distances must NOT be zero, otherwise you will get mesh errors!**
 
@@ -177,6 +188,8 @@ The buttons are used top down: You can first preview the resulting model geometr
 
 To start simulation, use the "Run palace" button. If you are on Linux, this will start Palace using script "run_sim". If you are on Windows, this will start the Linux Subsystem for Windows (WSL) and open a command prompt in the simulation directory.
 
+If the output directory already has results from a previous run, you are asked whether to delete or keep them before starting - default is to delete, so a rerun with different settings doesn't leave stale results mixed in with the new ones.
+
 <img src="./doc/png/createmodel3.png" alt="create" width="700">
 
 To start simulation on Linux, it is required that you have configured a script "run_sim" as described in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf). You can find a template [here](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/tree/main/scripts) in the gds2palace repository.
@@ -188,17 +201,81 @@ To start simulation on Windows from the WSL terminal, type
 
 To **create Touchstone SnP output** from simulation results, please have a look at the scripts directory. Script "combine_snp" runs Python code "combine_extend_snp.py", which scans your directories (working directory and below) and converts simulation results to Touchstone file format. Supported input file format: Palace and Elmer S-parameter data.
 
+## Result Viewer
+
+Once you have Touchstone SnP results, click **View Results...** on the Create Model tab to open the built-in **Result Viewer** - no need to run the standalone `plot_snp.py` script by hand.
+
+<img src="./doc/png/resultviewer_button.png" alt="view results button" width="700">
+
+The Result Viewer recursively scans the Target Directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. 
+The **Include _dc files** / **Include _deembedded files** checkboxes filter out DC-extrapolated and de-embedded variants created by `combine_extend_snp.py`, so you can start with just the raw result and bring in the others only when needed.
+
+<img src="./doc/png/resultviewer1.png" alt="result viewer" width="750">
+
+Pick which S-parameters to plot from the S-Parameters grid. 
+Checking files across several runs, or a whole run group, overlays all of them at once:
+
+<img src="./doc/png/resultviewer2.png" alt="result viewer multi-file overlay" width="750">
+
+For reflection parameters (S11, S22, ...), the Display panel can switch to a **Smith chart** or a **zoomed Smith chart** instead of dB+phase. 
+
+<img src="./doc/png/resultviewer3.png" alt="result viewer smith chart" width="750">
+
+The matplotlib toolbar above the plot (pan/zoom/save as PNG) works as usual. A file with only a single simulated frequency point is marked with a dot instead of a line, since there is nothing to draw a line between.
+
+Result Viewer can also be run standalone, without the full setupEM GUI, either directly (`python result_viewer.py [target_dir]`) or via the `resultViewer` console script installed with the package.
+
+## Model Fit
+
+Click **Model Fit...** on the Create Model tab (next to **View Results...**) to extract a lumped-element netlist from the current run's S-parameter result, using [snp2le](https://github.com/iic-jku/snp2le) - an external, open-source tool, not part of setupEM.
+
+<img src="./doc/png/resultviewer_button.png" alt="model fit button" width="700">
+
+If snp2le isn't installed, setupEM offers to install it for you via pip:
+
+<img src="./doc/png/modelfit1.png" alt="snp2le not installed" width="350">
+
+Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - no need to click Model Fit a second time. Choosing **Cancel** logs the manual install command and the project link instead.
+
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+
+<img src="./doc/png/modelfit2.png" alt="snp2le starting" width="700">
+
+If no raw result file exists yet (no simulation has been run), Model Fit shows a warning instead of starting snp2le - run a simulation first.
+
+## 3D Field Viewer
+
+Once field-dump results are available (Palace: set `fdump`; Elmer: enable field dump), click **View fields (...)...** on the Create Model tab to open them - the "..." in the label shows which viewer it opens, **Built-in** or **ParaView**, per the setting described below.
+
+<img src="./doc/png/fieldviewer1.png" alt="3D field viewer" width="750">
+
+The built-in viewer has a single, axis-aligned clip plane (X/Y/Z + a position slider, shown in µm) to see a cross-section through the model, rather than a free-orientation drag-widget - **Find max.** jumps the plane straight to the largest value of the currently selected field along that axis. Standard CAD/ParaView-style **+X/-X/+Y/-Y/+Z/-Z** buttons snap the camera to look straight down each axis; the clip plane's kept side follows whichever of these you last used for its axis, so the exposed cut face always faces the camera instead of occasionally showing the model's untouched exterior surface.
+
+The **Field** panel picks which array to color by, defaulting to E-field magnitude (log color scale) for Palace and Elmer-as-EM-solver mode, or temperature (linear) for Elmer thermal - the Min/Max fields let you override the color range manually, with a button to reset back to the data's own range. **Display** controls opacity (to see a hotspot through the surrounding material without losing the outer shape as context) and a mesh-edge overlay. If more than one equally-valid result file exists (e.g. Palace's main "driven" field dump and its separate "driven_boundary" one), a **Result File** picker lets you choose between them instead of guessing.
+
+For a vector array (E/B-field, Poynting vector `S`, ...), **Show arrows** overlays direction arrows on top of the color, auto-scaled from the field's own magnitude on a log scale so both weak and strong regions stay visible instead of only the single hottest point - the **Arrow size** slider (0.5% steps) scales them to taste, and also controls how densely they're packed in, since smaller arrows can sit closer together than large ones without turning into a solid block.
+
+<img src="./doc/png/fieldviewer2.png" alt="3D field viewer, vector arrows on the Poynting vector S" width="750">
+
+Choose which viewer **View fields (...)...** opens - **Built-in** (default, needs nothing else installed) or **ParaView** - on **Preferences > Viewer**. If ParaView is selected but not found on your system, setupEM/setupThermal fall back to the built-in viewer automatically, with a message in the Log panel.
+
+<img src="./doc/png/preferences_viewer1.png" alt="3D field viewer preference" width="500">
+
+Also runnable standalone, without the full setupEM/setupThermal GUI, either directly (`python field_viewer.py <file_path> [--source palace|elmer_em|elmer_thermal]`) or via the `fieldViewer` console script installed with the package.
+
 ## Code 
 Behind the scenes, the setupEM user interface created Python model code for gds2palace, and you can check the resulting code on the "Code" tab.
 
 <img src="./doc/png/code1.png" alt="code" width="700">
 
 ## File menu
-In the setupEM File menu, you can save and load simulation configurations, and you can also save and load a user defined "Default Settings" configuration. This includes the choice of simulation target directory and all other settings. Settings are stored in a JSON file with file extension ".simcfg". The "Default Settings" will be stored to the user home diretory.
+In the setupEM File menu, you can save and load simulation configurations, and you can also save and load a user defined "Default Config" configuration. This includes the choice of simulation target directory and all other settings. Configurations are stored in a JSON file with file extension ".simcfg". The "Default Config" will be stored to the user home diretory.
 
 Using "File > Import from *.py model", you can load settings from existing simulation model code, e.g. the examples included in the gds2palace repository. This import is based on detecting known keywords, with or without the settings[] syntax, and also works for openEMS Python models. Note that openEMS substrates model the MIM differently, and parameter "refined_cellsize" will usually be smaller in openEMS simulation, so you need to adjust these settings.
 
 If you are on the "Code" tab, you can also export the Python model code using "File > Export to *.py model". This option is only required if you want to save the model code **without** running it. Buttons "Create mesh and model file" and "Run Palace" on the "Create Model" tab will also save the model code to the target directory, and run it from there.
+
+"File > Preferences..." lets you change the built-in defaults that a brand-new/blank field starts out showing (e.g. fstart/fstop, mesh refinement, dielectric oversize margin), saved per-user and independent of any project file.
 
 <img src="./doc/png/filemenu1.png" alt="file" width="700">
 

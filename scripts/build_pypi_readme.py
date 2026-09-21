@@ -17,10 +17,13 @@
 #
 ########################################################################
 
-# Rewrite relative links/images in README.md to absolute GitHub URLs, so they
-# render correctly on the PyPI package page (PyPI has no access to files
-# outside the built distribution). Writes README_pypi.md at repo root, which
-# pyproject.toml's readme= key points at. Regenerate before every build.
+# Build a short PyPI package-page README instead of dumping the full,
+# screenshot-heavy repo README.md into the long_description: title + intro
+# (reused verbatim from README.md) + install line + a link to GitHub for full
+# docs + the last few dated entries from doc/CHANGES.md, so PyPI visitors can
+# see what actually changed without digging through the whole README. Writes
+# README_pypi.md at repo root, which pyproject.toml's readme= key points at.
+# Regenerate before every build.
 
 import os
 import re
@@ -28,6 +31,7 @@ import tomllib
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_BASE = "https://raw.githubusercontent.com/VolkerMuehlhaus/setupEM/main/"
+REPO_URL = "https://github.com/VolkerMuehlhaus/setupEM"
 
 def is_relative(path):
     return not (path.startswith('http://') or path.startswith('https://') or path.startswith('#'))
@@ -51,6 +55,34 @@ def rewrite_relative_links(text):
 
     return text
 
+def extract_intro(readme_text):
+    # title is the first line; README.md's very next section is "## What's
+    # New" (a hand-curated highlights list, redundant with the Recent
+    # changes excerpt below), so skip it and use the following section's
+    # body - the actual one-paragraph tool description - as the intro
+    lines = readme_text.splitlines()
+    title = lines[0]
+    rest = '\n'.join(lines[1:])
+    chunks = [c for c in re.split(r'\n(?=#)', rest) if c.strip()]
+    for chunk in chunks:
+        chunk_lines = chunk.splitlines()
+        heading = chunk_lines[0].lstrip('#').strip().lower()
+        if heading == "what's new":
+            continue
+        return title, '\n'.join(chunk_lines[1:]).strip()
+    return title, ''
+
+def extract_recent_changes(n=3, heading_level=1):
+    # doc/CHANGES.md has no separate title line - it starts directly with
+    # dated entries as "# What's New - <date>" headings
+    with open(os.path.join(REPO_ROOT, 'doc', 'CHANGES.md'), 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    marker = '#' * heading_level + ' '
+    chunks = re.split(rf'\n(?={re.escape(marker)})', text)
+    entries = [c.strip() for c in chunks if c.strip().startswith(marker)]
+    return '\n\n'.join(entries[:n])
+
 def package_requirements_note():
     # README.md describes the whole repo/workflow, which is broader than what
     # the installed package itself needs. Append an accurate note derived
@@ -72,9 +104,25 @@ def main():
     dst_path = os.path.join(REPO_ROOT, 'README_pypi.md')
 
     with open(src_path, 'r', encoding='utf-8') as f:
-        text = f.read()
+        readme_text = f.read()
 
-    text = rewrite_relative_links(text)
+    with open(os.path.join(REPO_ROOT, 'pyproject.toml'), 'rb') as f:
+        project_name = tomllib.load(f)['project']['name']
+
+    title, intro = extract_intro(readme_text)
+    recent_changes = extract_recent_changes(n=3)
+    changelog_url = f"{REPO_URL}/blob/main/doc/CHANGES.md"
+
+    parts = [
+        title,
+        rewrite_relative_links(intro),
+        f'## Install\n\n    pip install {project_name}',
+        f'**Full documentation, installation guide, and usage walkthrough:**\n{REPO_URL}',
+        '## Recent changes',
+        rewrite_relative_links(recent_changes),
+        f'Full history: [CHANGES.md]({changelog_url})',
+    ]
+    text = '\n\n'.join(parts)
     text += package_requirements_note()
 
     with open(dst_path, 'w', encoding='utf-8') as f:
