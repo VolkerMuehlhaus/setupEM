@@ -1,5 +1,7 @@
 # Python GUI for gds2palace 
 
+![Intro](./doc/png/setupEM_banner.png)
+
 ## What's New
 
 - **setupThermal**, a companion app for Elmer thermal simulation, alongside setupEM
