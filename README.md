@@ -1,5 +1,7 @@
 # Python GUI for gds2palace 
 
+![Intro](./doc/png/setupEM_banner.png)
+
 ## What's New
 
 Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, built-in 3D field viewer, GDSII Layout Simplification, XML Stackup Editor, setupThermal for Elmer thermal simulation.
