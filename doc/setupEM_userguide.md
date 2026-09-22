@@ -1,9 +1,8 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-09-14
+Document version: 2026-09-22
 
 ## Contents
-[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [What's New](#whats-new)  
 [About setupEM and setupThermal](#about-setupem-and-setupthermal)  
 [Installation](#installation)  
@@ -20,10 +19,11 @@ Document version: 2026-09-14
 [Ports tab](#ports-tab)  
 [Mesh and Boundaries tab](#mesh-and-boundaries-tab)  
 [Create Model tab](#create-model-tab)  
+[Code tab](#code-tab)  
+[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [Result Viewer](#result-viewer)  
 [Model Fit](#model-fit)  
 [3D Field Viewer](#3d-field-viewer)  
-[Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
 [KLayout integration](#klayout-integration)  
@@ -45,13 +45,6 @@ Document version: 2026-09-14
 &ensp;[Converting between position formats](#converting-between-position-formats)  
 &ensp;[Undo and Recent Files](#undo-and-recent-files)  
 [See also](#see-also)  
-
-## Result Viewer and Model Fit
-
-setupEM includes two built-in tools for working with simulation results directly, without external scripts:
-
-- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
-- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
 
 ## What's New
 
@@ -233,6 +226,21 @@ When a Palace simulation finishes, a **results summary** is appended to the Log 
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
 
+## Code tab
+
+The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.
+
+<img src="./png/code1.png" alt="code" width="700">
+
+Use **File > Export to \*.py model** to save the current code to disk without running it (only available while this tab is active). The Create Model tab's Preview/Create Mesh/Start Simulation buttons also save the script to the target directory before running it.
+
+## Result Viewer and Model Fit
+
+setupEM includes two built-in tools for working with simulation results directly, without external scripts:
+
+- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
+- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
+
 ## Result Viewer
 
 Once you have Touchstone SnP results, click **View Results...** on the Create Model tab to open the built-in **Result Viewer** - no need to run the standalone `plot_snp.py` script by hand.
@@ -282,14 +290,6 @@ Once field-dump results are available, click **View fields (...)...** on the Cre
 The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
 
 Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If ParaView is selected but not found on your system, setupEM falls back to the built-in viewer automatically.
-
-## Code tab
-
-The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.
-
-<img src="./png/code1.png" alt="code" width="700">
-
-Use **File > Export to \*.py model** to save the current code to disk without running it (only available while this tab is active). The Create Model tab's Preview/Create Mesh/Start Simulation buttons also save the script to the target directory before running it.
 
 ## File menu
 

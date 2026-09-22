@@ -1548,6 +1548,15 @@ class CreateModelTab(CreateModelTabBase):
         self._init_status_state()
         self.apply_preference_visibility()
 
+        # Polls the real memory footprint of the running Palace process(es) - see
+        # _poll_palace_memory()/_measure_palace_memory_gb() below. Started in run_model()
+        # right after the Palace process launches; self-stops (in _poll_palace_memory())
+        # once self.process is no longer running, so no separate wiring is needed in
+        # on_finished()/on_process_error()/terminate_run().
+        self._ram_poll_timer = QTimer(self)
+        self._ram_poll_timer.setInterval(5000)
+        self._ram_poll_timer.timeout.connect(self._poll_palace_memory)
+
     def apply_preference_visibility(self):
         # Called from __init__, from MainWindow.setPalaceMode()/setElmerMode() (mode
         # switch also affects status_line visibility), and from MainWindow's Preferences
@@ -1563,28 +1572,21 @@ class CreateModelTab(CreateModelTabBase):
     # Regexes matched against real Palace 0.16.0 stdout (see palace-x86_64.bin console
     # output), one AMR iteration's worth of an 8-port sweep:
     #   "Running with 16 MPI processes"
-    #   "Estimated current per-rank memory usage is: Min. 84.8M, Max. 87.1M, Avg. 85.7M, Total 1.3G"
-    #   "Estimated peak per-rank memory usage is: Min. 1.5G, Max. 1.6G, Avg. 1.5G, Total 24.2G"
     #   "Sweeping excitation index 2 (2/8):"
     #   "It 1/1: ω/2π = 9.300e+01 GHz (total elapsed time = 1.52e+01 s, solve 1/8)"
     #   "Completed 1 iteration of adaptive mesh refinement (AMR):"
-    # "Estimated ... memory usage" appears both early (current, post mesh-partition) and
-    # again per AMR iteration (peak); the parser just keeps the latest value seen, whichever
-    # wording it came from. Deliberately per-rank, not per-node: per-rank Total is the sum
-    # of every individual rank's own estimate, i.e. the actual total memory footprint of the
-    # whole job, regardless of how ranks are distributed across nodes (per-node Total is only
-    # numerically the same thing when everything happens to run on a single node).
     # "Sweeping excitation" marks a port in a uniform sweep; "Adding excitation" is the
     # equivalent during PROM/adaptive offline construction (Beginning PROM construction
     # offline phase: / Adding excitation index 1 (1/2):) - both mean "now on port N/M".
+    #
+    # Memory ("Est. memory" on the status line, and the "Stop Palace if memory exceeds"
+    # kill switch) is NOT parsed from Palace's own self-reported "Estimated .../rank
+    # memory usage" log lines - real-world comparisons showed that figure can be
+    # inaccurate. Instead self._status_mem_gb is measured directly from the OS by
+    # _poll_palace_memory()/_measure_palace_memory_gb() (below), on a QTimer, summing the
+    # real RSS of the actual palace-x86_64 process(es) (one per MPI rank) - the same
+    # process name _kill_palace_process_for_ram_limit() already pkills by.
     _RE_MPI = re.compile(r"Running with (\d+) MPI processes")
-    # "current" vs "peak" is NOT current-vs-forecast: real testing (AMR run, limit set
-    # to 4GB) showed "current" stays low while "peak" reports each iteration's real,
-    # already-incurred high-water mark (3.79 -> 5.08 -> 9.85 GB) - a current-only RAM
-    # check never saw those numbers and never fired. _check_ram_limit() now checks
-    # self._status_mem_gb, the same latest-of-either-kind value already shown on the
-    # live status line, instead of singling out one kind - see _parse_palace_status_line().
-    _RE_MEM_TOTAL = re.compile(r"Estimated (?:current|peak) per-rank memory usage is:.*Total\s+([\d.]+)([MG])")
     _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
@@ -1664,14 +1666,6 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
-        m = self._RE_MEM_TOTAL.search(line)
-        if m:
-            value, unit = float(m.group(1)), m.group(2)
-            self._status_mem_gb = value / 1024 if unit == "M" else value
-            self._check_ram_limit()
-            self._update_status_line()
-            return
-
         m = self._RE_EXCITATION.search(line)
         if m:
             self._status_port_cur = int(m.group(1))
@@ -1725,16 +1719,83 @@ class CreateModelTab(CreateModelTabBase):
                 self._update_status_line()
                 return
 
+    def _poll_palace_memory(self):
+        """QTimer callback (self._ram_poll_timer, every 5s) started in run_model()
+        right after the Palace process launches. Self-stopping: once self.process is
+        no longer running, stops the timer and returns, so on_finished()/
+        on_process_error()/terminate_run() don't need to separately stop it.
+
+        Measures the real RSS of the running palace-x86_64 process(es) via
+        _measure_palace_memory_gb() instead of trusting Palace's own self-reported
+        "Estimated .../rank memory usage" log lines, which real-world comparisons
+        showed can be inaccurate. If no such process can be found right now (e.g.
+        Palace is actually running on a remote host via run_palace_remote, where this
+        machine has no visibility into its process tree at all), self._status_mem_gb
+        is simply left as-is - the status line shows "n/a" rather than a guessed or
+        stale number, and _check_ram_limit() is not called for that tick.
+        """
+        if self.process.state() != QProcess.Running:
+            self._ram_poll_timer.stop()
+            return
+        mem_gb = self._measure_palace_memory_gb()
+        if mem_gb is not None:
+            self._status_mem_gb = mem_gb
+            self._check_ram_limit()
+            self._update_status_line()
+
+    def _measure_palace_memory_gb(self):
+        """Return the summed RSS, in GB, of every palace-x86_64 process currently
+        running (one per MPI rank - apptainer exec ~/palace_NNN.sif palace -np N
+        config.json), or None if none can be found or the query itself fails.
+        Matches on the process's full command line ("args"), the same way
+        _kill_palace_process_for_ram_limit() already pkills it (pkill -f
+        palace-x86_64), rather than the kernel-truncated 15-char "comm" name (real
+        binary name observed on a live run: palace-x86_64.bin under
+        /opt/palace/bin/, launched via mpirun -n N under hydra_pmi_proxy).
+
+        Deliberately does NOT filter with awk/grep on the ps command line itself:
+        wsl.exe reconstructs and re-parses everything after "--" through an extra
+        shell layer, which silently drops "$"-prefixed tokens like awk's "$1"
+        before awk ever sees them (confirmed directly - even single-quoted "$1"
+        came back empty). So ps's raw, unfiltered output is fetched instead, and
+        the per-process filtering/summing happens here in Python instead, which
+        sidesteps that quoting layer entirely.
+
+        Never raises: a failed/timed-out query just means this poll tick reports
+        nothing, the same as no matching process being found.
+        """
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["wsl.exe", "--", "bash", "-lc", "ps -eo rss,args --no-headers"],
+                    capture_output=True, text=True, timeout=5, check=False)
+            else:
+                result = subprocess.run(
+                    ["ps", "-eo", "rss,args", "--no-headers"],
+                    capture_output=True, text=True, timeout=5, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+        total_kb = 0
+        for line in result.stdout.splitlines():
+            rss_str, _, args = line.strip().partition(" ")
+            if "palace-x86_64" not in args:
+                continue
+            try:
+                total_kb += int(rss_str)
+            except ValueError:
+                continue
+        return total_kb / 1024 / 1024 if total_kb > 0 else None
+
     def _check_ram_limit(self):
-        """Called every time self._status_mem_gb updates - the same latest-
-        of-either-("current"-or-"peak")-kind value already shown on the live
-        status line (see _parse_palace_status_line()/_update_status_line()).
-        If it exceeds Preferences > Palace's "Stop Palace if memory exceeds"
-        limit, kill the solver and let run_sim's own postprocessing step run
-        on whatever it already computed (see
-        _kill_palace_process_for_ram_limit()). Guarded by _ram_kill_triggered
-        so this only ever fires once per run, even though more memory lines
-        may still arrive before the kill actually takes effect.
+        """Called every time _poll_palace_memory() gets a real measurement (see
+        _measure_palace_memory_gb()) - the same latest value already shown on the
+        live status line (see _update_status_line()). If it exceeds Preferences >
+        Palace's "Stop Palace if memory exceeds" limit, kill the solver and let
+        run_sim's own postprocessing step run on whatever it already computed (see
+        _kill_palace_process_for_ram_limit()). Guarded by _ram_kill_triggered so this
+        only ever fires once per run, even though more polls may still land before
+        the kill actually takes effect.
         """
         if self._ram_kill_triggered or self._status_mem_gb is None:
             return
@@ -2296,6 +2357,10 @@ class CreateModelTab(CreateModelTabBase):
                     self.process.setWorkingDirectory(run_path)
                     # start simulation
                     self.process.start(".//run_sim")
+
+                # Start polling the real Palace process memory now that it's launched -
+                # see _poll_palace_memory()/_measure_palace_memory_gb().
+                self._ram_poll_timer.start()
 
             else:
                 # Elmer mode
