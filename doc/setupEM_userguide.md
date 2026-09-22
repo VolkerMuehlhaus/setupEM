@@ -56,6 +56,7 @@ This chapter gives a brief overview of major features added since the previous e
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
 - **Start Simulation on Windows runs Palace directly and shows results automatically.** No more opening a terminal and typing `./run_sim` yourself - output streams live into the Log panel, Terminate actually works, and a results summary (degrees of freedom, simulation time, peak RAM, mesh-adaptation error indicators) appears automatically once a run finishes - see "[Create Model tab](#create-model-tab)".
 - **Start Simulation now checks for leftover results from a previous run** before launching the solver, and offers to delete them (default) or keep them — see "[Create Model tab](#create-model-tab)".
+- **Conductor meshing option (Palace only)**: choose **Surface impedance** (default, as before) or **Solve inside (volume mesh)** for more accurate low-frequency conductor loss — see "[Mesh and Boundaries tab](#mesh-and-boundaries-tab)".
 
 
 ## About setupEM and setupThermal
@@ -194,7 +195,7 @@ Controls the mesh used for simulation, trading off accuracy against simulation t
 
 **Mesh refinement at the edges** (`refined_cellsize`) sets the mesh size along polygon edges. This is not a global lower bound on mesh size (unlike the IHP openEMS flow) - smaller geometry just gets a locally smaller mesh. 2-5 µm is a good starting point for most IHP SG13G2 models.
 
-**In this FEM workflow, conductors use surface impedance on their side walls - there's no need to mesh into skin effect**, unlike the openEMS flow (`gds2openEMS`), where solid conductors are meshed and `refined_cellsize` partially controls skin-effect resolution. This lets the FEM flow use a much coarser mesh.
+**Conductor meshing** defaults to **Surface impedance**: conductors use surface impedance on their side walls, no need to mesh into skin effect, unlike the openEMS flow (`gds2openEMS`), where solid conductors are meshed and `refined_cellsize` partially controls skin-effect resolution. This lets the FEM flow use a much coarser mesh. The alternative, **Solve inside (volume mesh)**, meshes conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, where skin depth is no longer small compared to conductor cross section, but not recommended as a general default: it costs more RAM and simulation time, and becomes inaccurate at higher frequencies unless the mesh actually resolves the skin effect.
 
 <img src="./png/mesh1.png" alt="mesh" width="700">
 
