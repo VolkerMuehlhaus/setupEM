@@ -61,10 +61,10 @@ from pyvistaqt import QtInteractor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
-    QSlider, QComboBox, QLineEdit, QStyleFactory,
+    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QColor
 
 # __package__ is None/"" when this file is run directly rather than imported as part
 # of the setupEM package, so relative import fails - same dual-mode pattern used
@@ -438,6 +438,19 @@ class FieldViewerWindow(QDialog):
         # this looks like the first mesh" heuristic was firing on every redraw.
         self._camera_needs_reset = True
 
+        # Colors for mesh edges / vector arrows / scalar-bar (legend) text,
+        # each changeable via a small swatch button next to its checkbox in
+        # the Display group (see _build_ui()/_pick_color()) - independent of
+        # the per-mesh state above, so they stay put across result-file
+        # switches. Defaults: black matches PyVista's own default edge_color
+        # (unchanged look for "Overlay mesh"); dimgray matches this viewer's
+        # original hardcoded arrow color (see _add_vector_glyphs()); black
+        # for legend text since the Display group's white control backgrounds
+        # make black the more legible default here.
+        self._edge_color = "black"
+        self._arrow_color = "dimgray"
+        self._legend_text_color = "black"
+
         # Background clip computation state - see _exact_clip_by_axis()/
         # _ClipWorker's docstrings for why the clip itself always runs off the
         # GUI thread. At most one _ClipWorker runs at a time: a _redraw() call
@@ -638,18 +651,46 @@ class FieldViewerWindow(QDialog):
         self.arrow_size_slider.sliderReleased.connect(self._schedule_redraw)
         display_layout.addWidget(self.arrow_size_slider)
 
+        # Each row below pairs a checkbox with a small swatch button (in front
+        # of it, per the requested layout) that opens a color picker for the
+        # thing that checkbox toggles - mesh edges, vector arrows, and the
+        # scalar-bar legend text, respectively. All three swatches share
+        # _pick_color()/_style_swatch_button(); only the swatch and the state
+        # attribute it edits differ per row.
+        def _swatch_row(attr_name, initial_color, checkbox):
+            swatch = QPushButton()
+            swatch.setFixedSize(18, 18)
+            swatch.setToolTip("Choose color")
+            # Without these, Qt treats this as the dialog's default button and
+            # fires it on Enter from any focused widget - same issue/fix as
+            # clim_reset_btn above.
+            swatch.setAutoDefault(False)
+            swatch.setDefault(False)
+            self._style_swatch_button(swatch, initial_color)
+            swatch.clicked.connect(lambda: self._pick_color(attr_name, swatch))
+            row = QHBoxLayout()
+            row.addWidget(swatch)
+            row.addWidget(checkbox)
+            row.addStretch()
+            display_layout.addLayout(row)
+
         # Only meaningful (and enabled) when the selected Field array is itself
         # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
         # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
         self.show_vectors_cb = QCheckBox("Show arrows")
         self.show_vectors_cb.setEnabled(False)
         self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
-        display_layout.addWidget(self.show_vectors_cb)
+        _swatch_row("_arrow_color", self._arrow_color, self.show_vectors_cb)
 
         self.show_edges_cb = QCheckBox("Overlay mesh")
         self.show_edges_cb.setChecked(False)
         self.show_edges_cb.toggled.connect(self._on_redraw_needed)
-        display_layout.addWidget(self.show_edges_cb)
+        _swatch_row("_edge_color", self._edge_color, self.show_edges_cb)
+
+        self.show_legend_cb = QCheckBox("Show legend")
+        self.show_legend_cb.setChecked(True)
+        self.show_legend_cb.toggled.connect(self._on_redraw_needed)
+        _swatch_row("_legend_text_color", self._legend_text_color, self.show_legend_cb)
 
         display_layout.addStretch()
         display_group.setLayout(display_layout)
@@ -949,6 +990,22 @@ class FieldViewerWindow(QDialog):
     def _on_redraw_needed(self, _value=None):
         self._schedule_redraw()
 
+    def _pick_color(self, attr_name, button):
+        """Open a color picker for the state attribute attr_name (one of
+        _edge_color/_arrow_color/_legend_text_color), and apply it on accept.
+        Shared by the three small swatch buttons in the Display group - see
+        _build_ui()."""
+        current = QColor(getattr(self, attr_name))
+        color = QColorDialog.getColor(current, self, "Choose color")
+        if color.isValid():
+            setattr(self, attr_name, color.name())
+            self._style_swatch_button(button, color.name())
+            self._schedule_redraw()
+
+    @staticmethod
+    def _style_swatch_button(button, color_hex):
+        button.setStyleSheet(f"background-color: {color_hex}; border: 1px solid #666;")
+
     def _on_clip_slider_changed(self, _value=None):
         # Live label feedback on every tick, but only actually rebuild/render
         # the mesh once the drag ends (sliderReleased, connected in
@@ -1171,7 +1228,7 @@ class FieldViewerWindow(QDialog):
             # Internal-only helper array - don't leave it in the mesh's array
             # list (would otherwise show up in the Field dropdown's arrays).
             del mesh.point_data[scale_key]
-        return self.plotter.add_mesh(glyphs, color="dimgray", reset_camera=False)
+        return self.plotter.add_mesh(glyphs, color=self._arrow_color, reset_camera=False)
 
     # ---------- Redraw ----------
 
@@ -1385,15 +1442,18 @@ class FieldViewerWindow(QDialog):
             show_edges = self.show_edges_cb.isChecked()
             self._mesh_actor = self.plotter.add_mesh(
                 display_mesh, scalars=array_name, cmap=self._current_cmap,
-                show_edges=show_edges, log_scale=use_log, clim=clim, opacity=opacity,
-                scalar_bar_args={"title": array_name}, reset_camera=False,
+                show_edges=show_edges, edge_color=self._edge_color,
+                log_scale=use_log, clim=clim, opacity=opacity,
+                show_scalar_bar=self.show_legend_cb.isChecked(),
+                scalar_bar_args={"title": array_name, "color": self._legend_text_color},
+                reset_camera=False,
             )
         else:
             opacity = self.opacity_slider.value() / 100.0
             show_edges = self.show_edges_cb.isChecked()
             self._mesh_actor = self.plotter.add_mesh(
                 display_mesh, color="lightgrey", opacity=opacity, show_edges=show_edges,
-                reset_camera=False)
+                edge_color=self._edge_color, reset_camera=False)
 
         if self._vector_actor is not None:
             self.plotter.remove_actor(self._vector_actor, render=False)
