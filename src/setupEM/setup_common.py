@@ -1179,6 +1179,25 @@ INVALID_MATERIAL_COLOR = QColor(255, 0, 0, 80)
 # unlike any of those, so it gets its own recognizable "ideal conductor" look.
 PEC_MATERIAL_COLOR = QColor(180, 220, 255, 140)
 
+# via-style box default fill for a Type="via" Layer (an actual conductive via) - kept as its
+# own named constant so DIELECTRIC_VIA_COLOR below has something explicit to contrast against
+VIA_COLOR = QColor(136, 192, 200, 80)
+
+# a Type="dielectric" Layer drawn via the same via-style z_to_y-placed box (e.g. a conformal
+# passivation fill shaped around a metal, not an actual conductor) - a warm amber, distinct
+# from VIA_COLOR's cool teal, PEC_MATERIAL_COLOR's light blue, and INVALID_MATERIAL_COLOR's
+# red, so it reads at a glance as "dielectric fill", not "via"
+DIELECTRIC_VIA_COLOR = QColor(230, 200, 130, 100)
+
+# a Reference=<metal>-anchored dielectric-fill Layer (see fill_layers_by_ref_metal in
+# compute_stackup_layout()) whose real z-range genuinely overlaps another real conductor/
+# sheet metal, not just a dielectric slab - a materially different, more serious situation
+# than crossing a dielectric boundary (two different materials modeled at the same z), so it
+# gets a bold, solid look instead of DIELECTRIC_VIA_COLOR's translucent fill or the
+# intrusion overlay's thin dashed outline - unmistakably "something is wrong here"
+CONFLICT_FILL_COLOR = QColor(230, 120, 40, 150)
+CONFLICT_PEN = QPen(QColor(200, 60, 0), 2)
+
 
 def _is_pec_material(materialname):
     """True if materialname is the reserved PEC keyword (case-insensitive) - a Layer that
@@ -1267,6 +1286,71 @@ def _build_layer_tooltip(metal):
     return "\n".join(lines)
 
 
+def _find_intruded_dielectrics(candidates_above, metal):
+    """Classify which dielectric_shape(s) above a metal's own dielectric its real zmax
+    reaches into, for drawing the "straddling boundary" overlay - a metal is allowed to
+    legitimately extend past its own dielectric's zmax (see
+    util_stackup_reader.register_metals_inside()) into any number of dielectrics above it.
+
+    Args:
+        candidates_above (list of dict): dielectric_shape entries (see compute_stackup_layout())
+            for every dielectric above the metal's own, in bottom-up screen order, already
+            chiplet/interposer-scoped (a slice of the same list compute_stackup_layout()
+            itself iterates, so scoping is inherited for free).
+        metal (metal_layer): the intruding metal (its real, resolved .zmax).
+
+    Returns:
+        (intruded, truncated): intruded is an ordered list of (dielectric_shape, fraction)
+        - fraction=1.0 for a dielectric band metal.zmax fully consumes, a real 0<fraction<=1
+        for the final, partially-entered band. truncated is True if metal.zmax reaches past
+        even the topmost candidate's zmax (nothing left above to draw into).
+    """
+    intruded = []
+    for shape in candidates_above:
+        d = shape['dielectric']
+        if metal.zmax >= d.zmax:
+            intruded.append((shape, 1.0))
+            continue
+        if metal.zmax > d.zmin:
+            fraction = (metal.zmax - d.zmin) / (d.zmax - d.zmin)
+            intruded.append((shape, fraction))
+        return intruded, False
+    # loop exhausted every candidate without finding a final (partial) band - metal.zmax
+    # reaches past even the topmost visible dielectric
+    return intruded, True
+
+
+def _fill_layer_conflicts_with_metal(fill_layer, target_metal, metals_list, visible_layers):
+    """True if fill_layer's real [zmin, zmax) genuinely overlaps some OTHER real conductor/
+    sheet metal - a materially different, more serious situation than merely crossing a
+    dielectric boundary (two different materials modeled at the same z), worth its own
+    distinct visual flag (see CONFLICT_FILL_COLOR/CONFLICT_PEN in compute_stackup_layout()).
+
+    Args:
+        fill_layer (metal_layer): the Reference=<metal>-anchored Type="dielectric" layer
+            being checked (its own real, resolved .zmin/.zmax).
+        target_metal (metal_layer): fill_layer's own Reference target - excluded from the
+            check (fill_layer necessarily overlaps the metal it's anchored to; that's normal).
+        metals_list (metal_layers_list): every metal in the file, real conductors/sheets and
+            fill/via layers alike - filtered here to real conductor/sheet metals only.
+        visible_layers (set or None): same chiplet/interposer scoping compute_stackup_layout()
+            applies everywhere else - None means no filtering (every metal in scope).
+
+    Returns:
+        bool
+    """
+    for candidate in metals_list.metals:
+        if candidate is target_metal or candidate is fill_layer:
+            continue
+        if not (candidate.is_metal or candidate.is_sheet):
+            continue
+        if visible_layers is not None and candidate not in visible_layers:
+            continue
+        if candidate.zmin < fill_layer.zmax - 1e-6 and fill_layer.zmin < candidate.zmax - 1e-6:
+            return True
+    return False
+
+
 def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width, height,
                             dielectric_color_fn, dielectric_label_fn,
                             metal_label_fn, via_label_suffix_fn, metal_color_fn,
@@ -1301,6 +1385,11 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
     """
     draw_calls = []
     interactive_entries = []
+    # (metal, xmetal, wmetal, intruded, truncated, metal_entry) queued by the "last metal"
+    # block below when a metal's real zmax pokes past its own dielectric's zmax - drawn only
+    # after the main per-dielectric loop below, once every dielectric_shape's screen_y/screen_h
+    # is known (see _find_intruded_dielectrics() and the deferred drawing pass after the loop)
+    pending_intrusions = []
 
     # chiplet-aware filtering: with no branching detected (the ordinary case) or no
     # chiplet_groups at all (e.g. an in-memory dielectrics_list built by hand rather than via
@@ -1396,6 +1485,48 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
     penGray = QPen(QColor(134, 132, 130))
     penDarkGray = QPen(QColor(53, 50, 47))
     penOverlap = QPen(QColor(220, 0, 0))  # same red as InteractiveRegionItem._OVERLAP_PEN
+    penIntrusion = QPen(QColor(220, 0, 0), 1, Qt.DashLine)  # same red, dashed like _OVERLAP_PEN -
+    # used for the "metal straddles the dielectric boundary" overlay (see pending_intrusions)
+
+    # Reference=<metal>-anchored Type="dielectric" fill layers (e.g. conformal passivation
+    # sitting directly above/around a real conductor, positioned relative to that metal
+    # rather than to any <Dielectric> slab) - classified here so the main loop below can
+    # give an "extends_beyond" one its own schematic slot attached to its Reference metal
+    # (drawn in the SAME dielectric the metal itself lives in, not wherever
+    # register_metals_inside()'s own zmin-containment logic would otherwise place it - e.g.
+    # SiO2 for TopMetal2's own TM2_above, not AIR), and draw a "same_range" one (e.g. a
+    # side-wall fill spanning the identical z-range as its metal, like TM2_sides) as a
+    # companion within the metal's own row - instead of routing either through the generic
+    # via/z_to_y placement path below, which is the wrong model for something anchored to a
+    # metal rather than to a dielectric boundary.
+    _FILL_EPSILON = 1e-6  # same magnitude/reasoning as register_metals_inside()'s _BOUNDARY_EPSILON
+    fill_layers_by_ref_metal = {}   # {metal_layer: [(fill_layer, "same_range"|"extends_beyond"), ...]}
+    handled_fill_layers = set()     # fill layers actually drawn by the new mechanism below -
+    # populated as pass 2 draws them (not here), so a fill layer whose Reference target never
+    # ends up in the normal per-dielectric stack (e.g. LBE/BACKSIDEGND, an orphaned backside
+    # metal outside every <Dielectric>'s range) is correctly left on the old via/z_to_y path
+    for candidate in metals_list.metals:
+        if not (candidate.is_dielectric and candidate.reference):
+            continue
+        if visible_layers is not None and candidate not in visible_layers:
+            continue
+        target_metal = metals_list.getbylayername(candidate.reference)
+        if target_metal is None or not (target_metal.is_metal or target_metal.is_sheet):
+            # Reference points at a dielectric (the common, unrelated "Reference=Substrate"
+            # backside-AIR pattern used elsewhere, e.g. LBE - deliberately left alone: that
+            # pattern routinely spans/encompasses other real metals on purpose, e.g. LBE
+            # legitimately overlapping SUBGND, which isn't a conflict to flag), or at another
+            # fill/via layer (chained Reference - not observed in this workspace) - leave on
+            # the old via/z_to_y path untouched
+            continue
+        same_range = (abs(candidate.zmin - target_metal.zmin) < _FILL_EPSILON
+                      and abs(candidate.zmax - target_metal.zmax) < _FILL_EPSILON)
+        extends_beyond = candidate.zmax > target_metal.zmax + _FILL_EPSILON
+        if not (same_range or extends_beyond):
+            continue  # some other shape (e.g. extends only below the metal) - not handled
+                      # yet, leave on the old via/z_to_y path
+        fill_layers_by_ref_metal.setdefault(target_metal, []).append(
+            (candidate, "same_range" if same_range else "extends_beyond"))
 
     # get total dielectric parts, where each metal in a dielectric adds one part
     dielectric_shapes = []
@@ -1456,8 +1587,12 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
     stored_z = np.array([0])
     stored_y = np.array([ymin])
 
-    for dielectric_shape in dielectric_shapes:
+    for di, dielectric_shape in enumerate(dielectric_shapes):
         h = part_height * dielectric_shape['numparts']
+        # stashed for the deferred intrusion-overlay pass below (after this loop), once every
+        # dielectric_shape's screen position is known - see _find_intruded_dielectrics()
+        dielectric_shape['screen_y'] = y
+        dielectric_shape['screen_h'] = h
         dielectric = dielectric_shape['dielectric']
         color = dielectric_shape['color']
         material = dielectric_shape['material']
@@ -1579,26 +1714,31 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     # "no override", i.e. every caller except setupThermal
                     override_color = metal_color_fn(material)
                     if override_color is not None:
+                        metal_fill_color = override_color
                         setBrush(override_color)
                         drawRect(xmetal, flipy(ymetal), wmetal, -int(height_box))
                     elif material.type.upper() == "CONDUCTOR":
-                        setBrush(QColor(230, 230, 230, 90))
+                        metal_fill_color = QColor(230, 230, 230, 90)
+                        setBrush(metal_fill_color)
                         drawRect(xmetal, flipy(ymetal), wmetal, -int(height_box))
                     else:
-                        setBrush(QColor(230, 130, 130, 90))
+                        metal_fill_color = QColor(230, 130, 130, 90)
+                        setBrush(metal_fill_color)
                         drawRect(xmetal, flipy(ymetal), wmetal, -int(height_box))
                 elif _is_pec_material(metal.material):
                     # reserved PEC keyword: valid (no <Materials> entry needed/expected -
                     # materials_list.get_by_name() deliberately returns None for it), draw as
                     # an ideal conductor instead of falling into the invalid-reference case below
                     height_box = 3 if metal.is_sheet else part_height / 2
-                    setBrush(PEC_MATERIAL_COLOR)
+                    metal_fill_color = PEC_MATERIAL_COLOR
+                    setBrush(metal_fill_color)
                     drawRect(xmetal, flipy(ymetal), wmetal, -int(height_box))
                     label_string = 'PEC (ideal conductor)'
                 else:
                     # material assignment is invalid
                     height_box = part_height / 2
-                    setBrush(INVALID_MATERIAL_COLOR)
+                    metal_fill_color = INVALID_MATERIAL_COLOR
+                    setBrush(metal_fill_color)
                     drawRect(xmetal, flipy(ymetal), wmetal, -int(height_box))
                     label_string = 'INVALID MATERIAL REFERENCE: ' + metal.material
 
@@ -1610,6 +1750,34 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     "tooltip": _build_layer_tooltip(metal),
                     "chiplet_id": entry_chiplet_id(metal),
                 })
+                # kept by reference for the deferred intrusion-overlay pass below, which may
+                # later union more area into this same dict's "rect" - identity, not a copy
+                metal_entry = interactive_entries[-1]
+
+                # same-range Reference=<metal>-anchored fill layer companion(s) (e.g.
+                # TM2_sides: side-wall dielectric fill spanning this metal's own exact
+                # z-range) - drawn as a smaller inset within this metal's own box rather
+                # than a separate schematic row, since it needs no extra headroom above.
+                # Unconditional (not gated on this metal being topmost): a side-wall fill
+                # companion can attach to any metal, not just the topmost one.
+                for fill_layer, kind in fill_layers_by_ref_metal.get(metal, []):
+                    if kind != "same_range":
+                        continue
+                    handled_fill_layers.add(fill_layer)
+                    inset_w = wmetal * 0.4
+                    inset_x = xmetal + wmetal - inset_w
+                    setBrush(DIELECTRIC_VIA_COLOR)
+                    setPen(penBlack)
+                    drawRect(inset_x, flipy(ymetal), inset_w, -int(height_box))
+                    interactive_entries.append({
+                        "kind": "layer",
+                        "key": fill_layer.name,
+                        "rect": QRectF(inset_x, flipy(ymetal), inset_w, -int(height_box)).normalized(),
+                        "ref": fill_layer,
+                        "tooltip": _build_layer_tooltip(fill_layer),
+                        "chiplet_id": entry_chiplet_id(fill_layer),
+                    })
+                    drawText_left(inset_x + 5, flipy(ymetal), inset_w - 10, part_height / 2, fill_layer.name)
 
                 setPen(penBlack)
                 drawText_left(xmetal + 10, flipy(ymetal), wmetal, part_height / 2, f"{metal.name} ({metal.layernum})")
@@ -1649,8 +1817,12 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                         text_height = max(height_box, 14)
                         drawText_left(xmetal - 60, flipy(ymetal + height_box), 50, text_height, heightstring)
 
-                if n == len(metals_inside) - 1:
-                    # last metal (top metal)
+                if next_metal_above is None:
+                    # topmost metal at this dielectric's highest zmin level - not just the
+                    # last list entry, since several metals can share that top zmin side by
+                    # side (see next_metal_above's own computation above): each one gets its
+                    # own independent check here, so a side-by-side sibling with a taller
+                    # zmax than its neighbor is never silently skipped
                     # place text for distance to dielectric boundary
 
                     setPen(penBlack)
@@ -1670,6 +1842,108 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     setPen(penOverlap if dz < 0 else penGray)
                     drawTextAt(xmetal - 60, flipy(ymetal + height_box + 5), heightstring)
 
+                    # this metal's own dielectric's real top edge - a metal's drawn box only
+                    # fills the bottom half of its schematic "slot" (the top half is
+                    # reserved for this very label), so there's always a gap between the
+                    # metal's own box top and its dielectric's real edge. Bridging that gap
+                    # in the same style (below) keeps an overlay visually attached to
+                    # whatever it describes instead of floating disconnected above it.
+                    # Computed unconditionally (not just when this metal itself intrudes):
+                    # an attached "extends_beyond" fill layer below needs it even when the
+                    # metal itself doesn't intrude.
+                    own_dielectric_top = dielectric_shape['screen_y'] + dielectric_shape['screen_h']
+
+                    if dz < 0:
+                        # queue the "straddling boundary" overlay - drawn later, once every
+                        # dielectric_shape above has a known screen position (see the
+                        # deferred pass after this loop) - deliberately not drawn here: the
+                        # dielectric(s) above haven't been painted yet at this point in the
+                        # bottom-up loop, so drawing now would just get overdrawn by them.
+                        overlay_color = QColor(metal_fill_color)
+                        overlay_color.setAlpha(70)
+                        intruded, truncated = _find_intruded_dielectrics(dielectric_shapes[di + 1:], metal)
+                        # label=None: this metal's own "-X.XXXµm" label was already drawn
+                        # above (short enough to fit the left margin without spilling into
+                        # the overlay's own rectangle, unlike a fill layer's longer
+                        # "<name>: -X.XXXµm" label below - see its own comment)
+                        pending_intrusions.append((xmetal, wmetal, overlay_color, penIntrusion, ymetal + height_box,
+                                                    own_dielectric_top, intruded, truncated, metal_entry, None))
+
+                    # Reference=<metal>-anchored fill layers attached to this metal that
+                    # extend past its own zmax (e.g. TM2_above: conformal passivation
+                    # reaching further up than the metal itself, all the way to Passive/AIR)
+                    # - none of this real material actually sits inside THIS dielectric (all
+                    # of TM2_above's real z-range is above SiO2's own real zmax), so it gets
+                    # no separate drawn box/schematic slot of its own here (that would wrongly
+                    # imply real material sitting inside SiO2, right above TopMetal2, which
+                    # isn't where it physically is). Instead its ENTIRE visual representation
+                    # is the very same "straddles the boundary" overlay mechanism used above
+                    # for the metal itself - anchored at this metal's own real top edge
+                    # (own_top_y/own_dielectric_top, already computed above), walking upward
+                    # through whatever dielectric(s) the fill layer's own real zmax reaches.
+                    # Only drawn when it actually reaches its own dielectric's real edge
+                    # (fill_dz < 0, same condition as the metal's own check) - if it doesn't,
+                    # there's nothing distinguishable to show (it's just more of the same
+                    # dielectric material already implied by the background fill).
+                    own_top_y = ymetal + height_box
+                    for fill_layer, kind in fill_layers_by_ref_metal.get(metal, []):
+                        if kind != "extends_beyond":
+                            continue
+                        fill_dz = dielectric.zmax - fill_layer.zmax
+                        if fill_dz >= 0:
+                            continue
+                        handled_fill_layers.add(fill_layer)
+
+                        # it's a dielectric via (Type="dielectric", drawn like a via
+                        # everywhere else in this function) - narrow, same width every
+                        # other via uses (TopVia1/TopVia2/Via1-4/etc., see the via-drawing
+                        # loop below), not the wide metal-box width, centered under the
+                        # metal it's attached to
+                        fill_via_w = (xmax - xmin) / 10
+                        fill_via_x = xmetal + (wmetal - fill_via_w) / 2
+
+                        has_conflict = _fill_layer_conflicts_with_metal(
+                            fill_layer, metal, metals_list, visible_layers)
+                        if has_conflict:
+                            fill_overlay_color = CONFLICT_FILL_COLOR
+                            fill_pen = CONFLICT_PEN
+                        else:
+                            fill_overlay_color = QColor(DIELECTRIC_VIA_COLOR)
+                            fill_overlay_color.setAlpha(70)
+                            fill_pen = penIntrusion
+
+                        if fill_dz > 10:
+                            fill_heightstring = f'{fill_dz:.1f}µm'
+                        else:
+                            fill_heightstring = f'{fill_dz:.3f}µm'
+                        # the label itself is drawn later, in the deferred pass below,
+                        # alongside the overlay it describes - not here: this label's text
+                        # ("<name>: -X.XXXµm") is long enough to spill rightward past the
+                        # xmetal-60 left margin into the overlay's own rectangle (unlike the
+                        # metal's own short "-X.XXXµm" label above, which fits inside that
+                        # margin), so drawing it now would just get painted over once the
+                        # deferred pass's translucent overlay rect is drawn on top of it
+                        fill_label = f"{fill_layer.name}: {fill_heightstring}"
+
+                        # placeholder rect at the anchor point - the deferred pass below
+                        # grows it via .united() to the overlay's actual drawn extent once
+                        # that's known, same as metal_entry above
+                        interactive_entries.append({
+                            "kind": "layer",
+                            "key": fill_layer.name,
+                            "rect": QRectF(fill_via_x, flipy(own_top_y), fill_via_w, 0).normalized(),
+                            "ref": fill_layer,
+                            "tooltip": _build_layer_tooltip(fill_layer),
+                            "chiplet_id": entry_chiplet_id(fill_layer),
+                        })
+                        fill_entry = interactive_entries[-1]
+
+                        fill_intruded, fill_truncated = _find_intruded_dielectrics(
+                            dielectric_shapes[di + 1:], fill_layer)
+                        pending_intrusions.append((fill_via_x, fill_via_w, fill_overlay_color, fill_pen, own_top_y,
+                                                    own_dielectric_top, fill_intruded, fill_truncated, fill_entry,
+                                                    fill_label))
+
                 if n == 0 and elevation > 0.001:
                     # metal not aligned with bottom of dielectric, add a label for offset value
                     heightstring = f'{elevation:.3f}µm'
@@ -1681,6 +1955,74 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     ymetal = ymetal + part_height
 
         y = y + h
+
+    # deferred intrusion-overlay pass: draw each queued metal's "straddles the dielectric
+    # boundary" overlay now that every dielectric_shape above has a known screen position
+    # (screen_y/screen_h, stashed earlier in this same loop). Deliberately run only after the
+    # main per-dielectric loop above, once every dielectric's own drawRect() is already in
+    # draw_calls, so each overlay reliably paints on top instead of being covered by the
+    # dielectric-above's own rectangle, drawn later in loop order. Purely additive: never
+    # touches stored_z/stored_y, so z_to_y (built below) is unaffected.
+    for (xmetal, wmetal, overlay_fill_color, overlay_pen, own_top_y, own_dielectric_top,
+         intruded, truncated, metal_entry, deferred_label) in pending_intrusions:
+        overlay_rect = None
+
+        # connector: bridges the anchor's own drawn top up to its own dielectric's real top
+        # edge (the reserved "boundary label" half-slot, see the comment where this was
+        # queued above) - same style as the rest of the overlay, so the whole thing reads as
+        # one continuous shape attached to whatever it describes instead of a disconnected
+        # floating box
+        setBrush(overlay_fill_color)
+        setPen(overlay_pen)
+        drawRect(xmetal, flipy(own_top_y), wmetal, -(own_dielectric_top - own_top_y))
+        overlay_rect = QRectF(xmetal, flipy(own_top_y), wmetal, -(own_dielectric_top - own_top_y)).normalized()
+        top_y = own_dielectric_top
+
+        for shape, fraction in intruded:
+            # a real proportional fraction of a huge band (e.g. TopMetal2 poking 1.1um
+            # into a 200um-thick, otherwise-empty AIR region above it) rounds down to a
+            # sliver too thin to see - floor it to a minimum visible fraction of that
+            # band's own schematic height so a small real intrusion still reads as
+            # "entered this dielectric", with the exact magnitude left to the numeric
+            # label rather than the overlay's height
+            visible_fraction = max(fraction, 0.15) if fraction < 1.0 else fraction
+            band_y = shape['screen_y']
+            band_h = shape['screen_h'] * visible_fraction
+            setBrush(overlay_fill_color)
+            setPen(overlay_pen)
+            drawRect(xmetal, flipy(band_y), wmetal, -band_h)
+            rect = QRectF(xmetal, flipy(band_y), wmetal, -band_h).normalized()
+            overlay_rect = rect if overlay_rect is None else overlay_rect.united(rect)
+            top_y = band_y + band_h
+
+        if overlay_rect is not None:
+            metal_entry["rect"] = metal_entry["rect"].united(overlay_rect)
+
+        if deferred_label is not None:
+            # drawn last (after the overlay rect(s) above), not alongside where it was
+            # computed - this label is long enough to spill past the xmetal-60 left margin
+            # into the overlay's own rectangle, so it must paint on top of that translucent
+            # fill rather than under it (see the comment where deferred_label was built).
+            # +16, not the metal's own label's +5: enough separation from that label to
+            # avoid the two lines of text visually merging, while staying clear of the
+            # dielectric boundary line/dashed frame border above (own_dielectric_top) -
+            # crowding a solid black line, a dashed red border, and text within a few
+            # pixels of each other is what made this label hard to read at +23.
+            setPen(penOverlap)
+            drawTextAt(xmetal - 60, flipy(own_top_y + 16), deferred_label)
+
+        if truncated:
+            # metal.zmax reaches past even the topmost visible dielectric - nothing left to
+            # draw into, so mark the cut instead of guessing a height: a few short open dash
+            # ticks above the topmost drawn band (or right above the metal's own box, if
+            # nothing was drawn at all - i.e. it's already in the topmost dielectric with none
+            # above it), echoing the chiplet sibling stub's "open top = continues beyond view"
+            # convention used elsewhere in this function
+            tick_y = flipy(top_y)
+            cx = xmetal + wmetal / 2
+            setPen(overlay_pen)
+            for dx in (-12, 0, 12):
+                drawLine(cx + dx, tick_y, cx + dx, tick_y - 8)
 
     # sort stored positions
     if len(stored_z) > 2:
@@ -1747,7 +2089,12 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
         w = (xmax - xmin) / 10
 
         for metal in metals_list.metals:
-            if metal.is_via or metal.is_dielectric:
+            # a Reference=<metal>-anchored dielectric-fill layer already drawn by the new
+            # per-dielectric-loop mechanism above (see fill_layers_by_ref_metal/
+            # handled_fill_layers) is excluded here - everything else (real vias, and any
+            # dielectric-fill layer that mechanism left on the old path, e.g. LBE/
+            # BACKSIDEGND) still renders exactly as before
+            if metal.is_via or (metal.is_dielectric and metal not in handled_fill_layers):
                 if visible_layers is not None and metal not in visible_layers:
                     continue
 
@@ -1758,11 +2105,23 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                 # color too (e.g. setupThermal's thermal-conductivity scale) -
                 # None means "no override", same default color as before
                 override_color = metal_color_fn(material)
-                setBrush(override_color if override_color is not None else QColor(136, 192, 200, 80))
+                default_color = DIELECTRIC_VIA_COLOR if metal.is_dielectric else VIA_COLOR
+                setBrush(override_color if override_color is not None else default_color)
 
                 y1 = z_to_y(metal.zmin)
                 y2 = z_to_y(metal.zmax)
-                h = abs(y2 - y1)
+                # a via/dielectric-fill layer whose z-span falls (even partially) inside a
+                # large, otherwise-empty dielectric - e.g. a thin conformal passivation layer
+                # poking into a 200um AIR region - interpolates to a near-invisible sliver:
+                # that dielectric's own schematic box is a single fixed-height slot regardless
+                # of its real thickness (same "big empty slot, tiny real feature" cause as the
+                # intrusion-overlay visibility floor above), so a small fraction of it is a
+                # small fraction of an already-small pixel budget. Floor at the same 3px
+                # minimum already used for zero-extrusion "sheet" metals elsewhere in this
+                # function - anchored at y1 (its start), which is unaffected and often exactly
+                # correct (e.g. matches a Reference-anchored metal's own real edge), so only
+                # the far edge grows when needed.
+                h = max(abs(y2 - y1), 3)
 
                 if pos == 1:
                     xvia = (xmax + xmin) / 2 - 4 * w / 2
