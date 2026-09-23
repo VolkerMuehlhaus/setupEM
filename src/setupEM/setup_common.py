@@ -3455,7 +3455,10 @@ class MainWindowBase(QMainWindow):
                     "cells_per_wavelength": "cells_per_wavelength",
                     "meshsize_max": "meshsize_max",
                     "adaptive_mesh_iterations": "adaptive_mesh_iterations",
+                    "amr_tol": "amr_tol",
+                    "amr_max_dof": "amr_max_dof",
                     "order": "order",
+                    "filled_metals": "filled_metals",
                     "iterative": "iterative",
                     "ELMER_MPI_THREADS": "ELMER_MPI_THREADS"
                 }
