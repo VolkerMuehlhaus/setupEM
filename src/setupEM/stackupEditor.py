@@ -2297,6 +2297,8 @@ class StackupEditorWindow(QDialog):
         filename, _ = QFileDialog.getSaveFileName(self, "Save Stackup XML File", previous_dir, "*.xml;;*.*")
         if not filename:
             return False
+        if not filename.lower().endswith(".xml"):
+            filename += ".xml"
         return self._save_to(filename)
 
     def _compute_auto_dielectric_references(self, dielectrics_elements):
