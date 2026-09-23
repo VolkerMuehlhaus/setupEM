@@ -464,6 +464,8 @@ class PortsTab(QWidget):
 
     def update_layers(self, metals_list):
         self.target_box.clear()
+        if metals_list is None:
+            return
         for metal in metals_list.metals:
             self.target_box.addItems([metal.name])
         # try to preset useful values for SG13G2 technology
@@ -1552,7 +1554,7 @@ class MainWindow(MainWindowBase):
     # ---------- Native config (*.tsimcfg) / Python import hooks ----------
     def apply_native_config_data(self, data):
         # update thermal objects, they are separate from the other internal data
-        self.thermal_tab.update_thermalobjects_from_JSON (data.get("thermal"))
+        self.thermal_tab.update_thermalobjects_from_JSON (data.get("thermal", []))
 
     def apply_python_import_data(self, file_path):
         # read thermal object assignments in workflow syntax for gds2palace Python code

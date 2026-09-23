@@ -1,4 +1,8 @@
 
+# What's New - September 23, 2026
+
+Added **File > New**, which resets setupEM/setupThermal to the same blank state as a freshly started application - useful for starting a new model without restarting the app.
+
 # What's New - September 22, 2026
 
 Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab, above Mesh refinement: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies.

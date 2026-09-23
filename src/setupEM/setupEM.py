@@ -712,6 +712,8 @@ class PortsTab(QWidget):
         self.target_box.clear()
         self.from_box.clear()
         self.to_box.clear()
+        if metals_list is None:
+            return
         for metal in metals_list.metals:
             self.target_box.addItems([metal.name])
             self.from_box.addItems([metal.name])
@@ -3184,7 +3186,7 @@ class MainWindow(MainWindowBase):
     # ---------- Native config (*.simcfg) / Python import hooks ----------
     def apply_native_config_data(self, data):
         # update ports, they are separate from the other internal data
-        self.ports_tab.update_port_from_import(data.get("ports"))
+        self.ports_tab.update_port_from_import(data.get("ports", []))
         # restore simulator mode (not part of saved_values, see native_config_extra_struct)
         if data.get("elmer_mode", False):
             self.setElmerMode()

@@ -3142,6 +3142,8 @@ class MainWindowBase(QMainWindow):
         file_menu = menu_bar.addMenu("&File")
 
         # browse_action = QAction("Browse Config File...", self)
+        self.new_action = QAction("New", self)
+        self.new_action.setShortcut(QKeySequence.New)
         self.load_settings_action = QAction("Load Config ...", self)
         self.save_action = QAction("Save Config ...", self)
         self.load_default_action = QAction("Load Default Config", self)
@@ -3154,6 +3156,7 @@ class MainWindowBase(QMainWindow):
         # disable export by default, only enable when on Code tab
         self.export_model_action.setEnabled(False)
 
+        self.new_action.triggered.connect(lambda: self.new_configuration())
         self.load_settings_action.triggered.connect(lambda: self.load_configuration_dialog())
         self.load_default_action.triggered.connect(lambda: self.load_configuration_from_file(self.DEFAULT_SETTINGS_FILE))
         self.save_action.triggered.connect(lambda: self.save_ask_filenamefile())
@@ -3164,6 +3167,8 @@ class MainWindowBase(QMainWindow):
         self.preferences_action.triggered.connect(lambda: self.open_preferences_dialog())
         exit_action.triggered.connect(self.close)
 
+        file_menu.addAction(self.new_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.load_settings_action)
         self.recent_settings_menu = file_menu.addMenu("Load Recent Config")
         file_menu.addAction(self.save_action)
@@ -3362,6 +3367,23 @@ class MainWindowBase(QMainWindow):
         return all_ok
 
     # ---------- User input persistence ----------
+
+    def new_configuration(self):
+        """File > New: reset to the same blank state as a freshly started app.
+        Mirrors __init__'s startup sequence (empty saved_values, no ports/thermal
+        objects, no cached stackup data) rather than loading any file, so every
+        field falls back to its built-in/Preferences default exactly like a
+        first launch would.
+        """
+        self.saved_values.clear()
+        self.materials_list = None
+        self.dielectrics_list = None
+        self.metals_list = None
+        self.update_target_layer_choices(None)
+        self.apply_native_config_data({})
+        self.load_all_tabs()
+        self.create_model_tab.log_area.clear()
+        self.create_model_tab._reset_live_status()
 
     def load_user_inputs(self, filename):
         # load of native configuration file
