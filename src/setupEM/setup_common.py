@@ -1395,6 +1395,7 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
     penBlack = QPen(Qt.black, 1)
     penGray = QPen(QColor(134, 132, 130))
     penDarkGray = QPen(QColor(53, 50, 47))
+    penOverlap = QPen(QColor(220, 0, 0))  # same red as InteractiveRegionItem._OVERLAP_PEN
 
     # get total dielectric parts, where each metal in a dielectric adds one part
     dielectric_shapes = []
@@ -1634,9 +1635,14 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                 if not previous_at_same_zmin:
                     # draw height to metal above
                     if next_metal_above is not None:
-                        dz = abs(next_metal_above.zmin - metal.zmax)
+                        # signed, not abs(): if this metal's zmax reaches past
+                        # next_metal_above's zmin, the two genuinely overlap in z
+                        # (e.g. a thick metal placed via Reference/Offset into the
+                        # same space as the one "above" it) - shown as a negative
+                        # gap in red rather than masked into a false positive gap
+                        dz = next_metal_above.zmin - metal.zmax
                         heightstring = f'{dz:.3f}µm'
-                        setPen(penGray)
+                        setPen(penOverlap if dz < 0 else penGray)
                         # sheet metals draw at height_box=3px, too short to fit this
                         # label without vertical clipping - give the text its own
                         # minimum box height, independent of the drawn box height
@@ -1651,17 +1657,17 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     # a metal is registered "inside" a dielectric by its zmin alone
                     # (see util_stackup_reader.register_metals_inside()) - its zmax
                     # can legitimately extend past that dielectric's own zmax into
-                    # the one(s) above (e.g. a thick metal sitting in a very thin
-                    # dielectric slab), which would otherwise show as a negative,
-                    # confusingly-worded "distance to the boundary above". Floor at
-                    # 0 - the metal is still drawn at its correct position/height,
-                    # this only affects this one label.
-                    dz = max(0.0, dielectric.zmax - metal.zmax)
+                    # the one(s) above (e.g. TopMetal2 sitting in a thin passivation
+                    # slab). Signed, not clamped to 0: a negative value means the
+                    # metal actually punches through this boundary into whatever's
+                    # above, which is real geometry worth surfacing, not hiding -
+                    # shown in red so it reads as "overlap" rather than "gap".
+                    dz = dielectric.zmax - metal.zmax
                     if dz > 10:
                         heightstring = f'{dz:.1f}µm'
                     else:
                         heightstring = f'{dz:.3f}µm'
-                    setPen(penGray)
+                    setPen(penOverlap if dz < 0 else penGray)
                     drawTextAt(xmetal - 60, flipy(ymetal + height_box + 5), heightstring)
 
                 if n == 0 and elevation > 0.001:

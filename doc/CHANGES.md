@@ -1,6 +1,8 @@
 
 # What's New - September 22-23, 2026
 
+The **Stackup Preview**'s "distance to boundary above" label (and the similar gap label between two stacked metals) now shows a negative value in red when a metal genuinely extends past that boundary - e.g. TopMetal2 punching through a thin passivation layer into the dielectric(s) above - instead of silently clamping to 0 and hiding the overlap.
+
 Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies.
 
 Palace's real memory usage is now measured directly from the running solver process(es) instead of parsed from its own log output, which could be inaccurate - this also makes the **"Stop Palace if memory exceeds"** kill switch more reliable.
