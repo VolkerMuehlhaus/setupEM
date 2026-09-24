@@ -1,11 +1,14 @@
 
-# What's New - September 22-23, 2026
 
-Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies.
+# What's New - September 22-24, 2026
+
+Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies. This option requires gds2palace v0.6.0 or later, earlier version silently ignore this setting.  
 
 Better display in **Stackup Preview**'s for metals/vias that push outside their base dieelectric.  
 
 Palace's real memory usage is now measured directly from the running solver process(es) instead of parsed from its own log output, which could be inaccurate - this also makes the **"Stop Palace if memory exceeds"** kill switch more reliable.
+
+The built-in **3D field viewer** can now switch between the results of a multi-frequency Palace field-dump ("fdump") run: a new **Cycle** picker appears whenever the loaded result file has more than one solved frequency, and `field_viewer.py --cycle <N>` selects one from the command line. Previously the viewer could only ever show one fixed cycle of such a file, with no way to see the others.
 
 Added **File > New**, which resets setupEM/setupThermal to the same blank state as a freshly started application - useful for starting a new model without restarting the app.
 

@@ -201,25 +201,60 @@ _VECTOR_ARROW_MIN_LENGTH_RATIO = 0.15
 _VECTOR_ARROW_DECIMATION_RATIO = 0.25
 
 
-def _load_full_mesh(file_path):
-    """Read file_path (.pvd/.pvtu/.vtu) into one pv.UnstructuredGrid/PolyData.
+def _load_full_mesh(file_path, cycle_index=None):
+    """Read file_path (.pvd/.pvtu/.vtu) into one pv.UnstructuredGrid/PolyData,
+    plus which cycle (0-based) was used and how many cycles the file has.
 
-    pv.read() on a .pvtu/.vtu returns the dataset directly. On a .pvd (Palace's
-    field-dump time/cycle collection), it returns a pv.MultiBlock instead - one
-    block per cycle it decided to expose (confirmed empirically: Palace's own
-    .pvd only ever carries the most recent solved cycle, so this is a 1-block
-    MultiBlock in practice, not a true spatial multi-block split). Take the last
-    block (most recent cycle) rather than combining blocks, since different
-    cycles are different solve states, not spatial partitions - combining them
-    would be physically meaningless.
+    pv.read() on a .pvtu/.vtu returns the dataset directly - always exactly
+    one cycle (cycle_index 0, num_cycles 1).
+
+    A .pvd (Palace's field-dump time/cycle collection) is a small XML index
+    of one <DataSet>/timestep per solved cycle - a multi-frequency Palace
+    "fdump" run (Solver.Driven.Samples with more than one Freq entry) writes
+    one cycle per solved frequency (confirmed empirically against a real
+    2-frequency run: 2 <DataSet> entries, 2 pv.get_reader().time_values).
+    Reading a .pvd needs pv.get_reader()'s explicit time-series API
+    (PVDReader.time_values / set_active_time_value()) - NOT plain pv.read(),
+    which silently collapses a .pvd to whichever single time step happens to
+    be a freshly constructed reader's default (confirmed empirically: the
+    FIRST cycle, not the last, and not configurable through pv.read() at
+    all). That silent, unconfigurable collapse - not a genuine "1-block
+    MultiBlock" as this function used to assume - is what made every other
+    cycle unreachable before cycle_index existed.
+
+    cycle_index (0-based) selects which cycle to return; None (the default)
+    picks the LAST one - a deliberate choice (the final/most-recently-solved
+    state), independent of whatever pv.read() happened to default to.
+
+    Raises ValueError if cycle_index is out of range for the file's actual
+    number of cycles.
     """
-    data = pv.read(file_path)
-    if isinstance(data, pv.MultiBlock):
-        for block in reversed(data):
-            if block is not None:
-                return block
-        raise ValueError(f"No readable block found in {file_path}")
-    return data
+    if os.path.splitext(file_path)[1].lower() == ".pvd":
+        reader = pv.get_reader(file_path)
+        time_values = reader.time_values
+        num_cycles = len(time_values)
+        if num_cycles == 0:
+            raise ValueError(f"No cycles found in {file_path}")
+        if cycle_index is None:
+            cycle_index = num_cycles - 1
+        elif not (0 <= cycle_index < num_cycles):
+            raise ValueError(
+                f"cycle {cycle_index + 1} out of range for {file_path} "
+                f"(has {num_cycles} cycle(s))")
+        reader.set_active_time_value(time_values[cycle_index])
+        data = reader.read()
+        if isinstance(data, pv.MultiBlock):
+            for block in reversed(data):
+                if block is not None:
+                    return block, cycle_index, num_cycles
+            raise ValueError(
+                f"No readable block found in {file_path} at cycle {cycle_index + 1}")
+        return data, cycle_index, num_cycles
+
+    if cycle_index not in (None, 0):
+        raise ValueError(
+            f"cycle {cycle_index + 1} out of range for {file_path} (has 1 cycle)")
+    return pv.read(file_path), 0, 1
 
 
 def _attach_complex_e_magnitude(mesh, source):
@@ -419,6 +454,14 @@ class FieldViewerWindow(QDialog):
         self._vector_actor = None
         self._current_axis = "Z"
         self._load_error = None
+        # Which cycle of a multi-cycle .pvd (one per solved frequency, for a
+        # multi-frequency Palace fdump run) to display - see _load_full_mesh().
+        # None means "this file's own last cycle", the same default as before
+        # this selector existed. Reset to None in _switch_to_file() so a
+        # cycle index from one file never leaks into a different file that
+        # may have a different (or no) cycle at that position.
+        self._cycle_index = None
+        self._num_cycles = 1
         # Which side of the clip plane is kept, per axis - +1 (default, matches
         # the original behavior) keeps the negative side; -1 keeps the positive
         # side instead. Updated by _set_view() to match whichever axis-view
@@ -570,6 +613,22 @@ class FieldViewerWindow(QDialog):
         else:
             self.file_combo = None
             self.include_iterations_cb = None
+
+        # Only shown when the currently loaded file actually has >1 cycles
+        # (e.g. a multi-frequency Palace fdump .pvd, one <DataSet> per solved
+        # frequency) - see _load_full_mesh()'s (cycle_index, num_cycles)
+        # return values. Built unconditionally, unlike file_group above,
+        # since different Result Files can have different cycle counts -
+        # visibility is toggled in _load_mesh() on every load.
+        self.cycle_group = QGroupBox("Cycle")
+        cycle_layout = QVBoxLayout()
+        self.cycle_combo = QComboBox()
+        self.cycle_combo.currentIndexChanged.connect(self._on_cycle_changed)
+        cycle_layout.addWidget(self.cycle_combo)
+        cycle_layout.addStretch()
+        self.cycle_group.setLayout(cycle_layout)
+        self.cycle_group.setVisible(False)
+        controls_layout.addWidget(self.cycle_group, 1)
 
         # Clip Plane: purely "where/whether to cut" - rendering options that
         # apply regardless of clipping (opacity, mesh overlay) live in their
@@ -764,7 +823,7 @@ class FieldViewerWindow(QDialog):
         # view is flat, no faked distance" state is visible at a glance
         # rather than being an invisible side effect of the last axis button
         # pressed.
-        self.orthographic_cb = QCheckBox("Orthographic")
+        self.orthographic_cb = QCheckBox("Parallel projection")
         self.orthographic_cb.setToolTip(
             "Parallel projection: no size distortion by distance from the camera. "
             "Always on for the +/-X/Y/Z views above; check this to also use it for a "
@@ -883,8 +942,25 @@ class FieldViewerWindow(QDialog):
         # control in this window, this is a good reason to re-fit the camera
         # rather than keep the previous file's pan/zoom/rotation.
         self._camera_needs_reset = True
+        # Default to the NEW file's own last cycle - a cycle index picked on
+        # the old file has no guaranteed correspondence here (different files
+        # can have different cycle counts), see __init__'s self._cycle_index.
+        self._cycle_index = None
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
+
+    def _on_cycle_changed(self, index):
+        """Switch which solved cycle (e.g. frequency, for a multi-frequency
+        Palace fdump run) of the SAME result file is displayed. Deliberately
+        does not reset the camera or the clip-plane slider position, unlike
+        _switch_to_file(): mesh geometry is identical across cycles of one
+        file - only the field values differ - so there is nothing to re-fit
+        or re-range."""
+        if index < 0 or index == self._cycle_index:
+            return
+        self._cycle_index = index
+        self._load_mesh(preserve_selection=True)
+        self._schedule_redraw()
 
     def _on_include_iterations_toggled(self, checked):
         """Swap the Result File combo between the default final-pass-only list and
@@ -901,7 +977,16 @@ class FieldViewerWindow(QDialog):
 
     # ---------- Mesh loading ----------
 
-    def _load_mesh(self):
+    def _load_mesh(self, preserve_selection=False):
+        """Load self._full_mesh from self.file_path/self._cycle_index.
+
+        preserve_selection=True (only passed by _on_cycle_changed()) keeps
+        the current array/color-by selection instead of recomputing a
+        default - array names are the same across cycles of one file, only
+        the underlying values/ranges differ per cycle. Every other caller
+        (initial load, _switch_to_file()) leaves this False, unchanged from
+        before this parameter existed.
+        """
         self.setWindowTitle(f"Field Viewer - {self._file_labels[self.file_path]}")
         # Bump the generation before anything else below - see __init__'s
         # self._mesh_generation. A cached/in-flight clip result belongs to the
@@ -916,13 +1001,22 @@ class FieldViewerWindow(QDialog):
         self._clipped_mesh_cache_key = None
         self._full_mesh_for_clip = None
         self._pending_clip_request = None
+        previous_array = self.array_combo.currentText() if preserve_selection else None
         try:
-            self._full_mesh = _load_full_mesh(self.file_path)
+            self._full_mesh, self._cycle_index, self._num_cycles = _load_full_mesh(
+                self.file_path, cycle_index=self._cycle_index)
         except Exception as exc:
             self._load_error = str(exc)
             self.warning_label.setText(f"Failed to load {self.file_path}:\n{exc}")
             self._full_mesh = None
             return
+
+        self.cycle_combo.blockSignals(True)
+        self.cycle_combo.clear()
+        self.cycle_combo.addItems([f"Cycle {i + 1}" for i in range(self._num_cycles)])
+        self.cycle_combo.setCurrentIndex(self._cycle_index)
+        self.cycle_combo.blockSignals(False)
+        self.cycle_group.setVisible(self._num_cycles > 1)
 
         _attach_complex_e_magnitude(self._full_mesh, self.source)
 
@@ -931,6 +1025,12 @@ class FieldViewerWindow(QDialog):
         self.array_combo.clear()
         self.array_combo.addItems(available)
         self.array_combo.blockSignals(False)
+
+        if preserve_selection and previous_array in available:
+            self.array_combo.setCurrentText(previous_array)
+            self._reset_clim_range()
+            self._update_vector_checkbox_state()
+            return
 
         default_array, default_cmap, default_log_scale = _pick_default_array(self._full_mesh, self.source)
         self._current_cmap = default_cmap
@@ -1559,6 +1659,12 @@ def main():
                               "in, instead of passing file_path directly")
     parser.add_argument("--source", choices=[_PALACE, _ELMER_EM, _ELMER_THERMAL], default=_PALACE,
                          help="which default array/colormap preset to use (default: palace)")
+    parser.add_argument("--cycle", type=int,
+                         help="1-based index of which solved cycle to display, for a "
+                              "multi-frequency Palace fdump .pvd with more than one "
+                              "<DataSet>/cycle (one per solved frequency) - default: the "
+                              "last cycle, i.e. unchanged behavior for files/scripts that "
+                              "don't use this. Not a frequency/GHz value, just a position.")
 
     # --- Scripted/agentic use: everything below sets up the view without a
     # human touching the GUI, by driving the same widgets a click would - see
@@ -1616,6 +1722,8 @@ def main():
         parser.error(f"--arrow-size must be between {_ARROW_SIZE_MIN_PERCENT} and {_ARROW_SIZE_MAX_PERCENT}")
     if args.log_range_db is not None and args.log_range_db <= 0:
         parser.error("--log-range-db must be positive")
+    if args.cycle is not None and args.cycle < 1:
+        parser.error("--cycle must be a 1-based cycle number (>= 1)")
 
     file_paths = [args.file_path] if args.file_path else []
     if not file_paths and args.run_path:
@@ -1650,6 +1758,12 @@ def main():
                                 off_screen=bool(args.screenshot))
     if window._full_mesh is None:
         die(window._load_error or "failed to load the field-result file")
+
+    if args.cycle is not None:
+        if args.cycle > window._num_cycles:
+            die(f"--cycle {args.cycle} out of range - this file has "
+                f"{window._num_cycles} cycle(s)")
+        window.cycle_combo.setCurrentIndex(args.cycle - 1)
 
     if args.array:
         if args.array not in window._full_mesh.point_data:
@@ -1695,7 +1809,7 @@ def main():
             # projection from a prior axis-view call on this same window
             # (--orthographic below re-enables it if actually requested).
             # Routed through the checkbox (not the plotter directly) so the
-            # GUI's "Orthographic" state stays truthful when not headless.
+            # GUI's "Parallel projection" state stays truthful when not headless.
             window.orthographic_cb.setChecked(False)
             window.plotter.view_isometric()
         else:
