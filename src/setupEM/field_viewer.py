@@ -61,7 +61,7 @@ from pyvistaqt import QtInteractor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
-    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog,
+    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog, QMenu,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QShortcut, QKeySequence, QColor
@@ -277,7 +277,7 @@ def _attach_complex_e_magnitude(mesh, source):
     mesh["E_magnitude"] = np.linalg.norm(per_component, axis=1)
 
 
-def _exact_clip_by_axis(mesh, axis, position, sign):
+def _exact_clip_by_axis(mesh, axis, position, sign, slice_only=False):
     """Exact geometric clip on an axis-aligned plane (pv.DataSet.clip()) - cuts
     every cell straddling the plane and interpolates new points to build a
     perfectly flat cut face. Precise, but expensive on a large mesh: ~22s on a
@@ -292,9 +292,24 @@ def _exact_clip_by_axis(mesh, axis, position, sign):
     was tried and rejected - it produced a visibly jagged/faceted cut face on
     this mesh's coarser regions instead of a clean flat one, which matters
     more here than raw speed for an inspection tool actually being looked at.
+
+    slice_only=True (the "2D plane only" checkbox) returns pv.DataSet.slice()
+    instead - the bare flat cross-section where the plane intersects the
+    mesh, with nothing else. clip() keeps the entire remaining 3D solid on
+    one side of the plane, so its own far surfaces - and, for a hollow
+    conductor, whatever lies behind the hole where its interior is empty -
+    can render as if they were part of the cut face, misleadingly showing
+    background geometry that plane didn't actually cut through. A slice has
+    no such backdrop: solid where the plane crosses material, a real gap
+    where it crosses empty/hollow space, nothing behind it either way. sign
+    is meaningless for a slice (there's no "side" to keep), so it's ignored
+    in this branch - accepted anyway so callers can pass the same cache
+    key/thread signature regardless of which mode is active.
     """
     base_normal = _AXIS_NORMAL[axis]
     origin = tuple(position if i == list(base_normal).index(1.0) else 0.0 for i in range(3))
+    if slice_only:
+        return mesh.slice(normal=base_normal, origin=origin)
     normal = tuple(n * sign for n in base_normal)
     return mesh.clip(normal=normal, origin=origin)
 
@@ -309,34 +324,38 @@ class _ClipWorker(QThread):
     object either thread can race on, regardless of timing or mesh size.
 
     Emits exactly one of succeeded/failed, tagged with the (axis, position,
-    sign, generation) it was computed for, so a result that's no longer
-    relevant (the user has since moved to a different axis/position/sign, or
-    loaded a different file entirely - see FieldViewerWindow._mesh_generation)
-    can be told apart from one that's still current - see
-    FieldViewerWindow._on_clip_succeeded(), which compares this against the
-    currently-desired key rather than trusting an opaque "is this the latest
-    request" counter, so a result stays usable even if something unrelated
-    (opacity, color scale, ...) redrew in the meantime while this was still
-    computing.
+    sign, slice_only, generation) it was computed for, so a result that's no
+    longer relevant (the user has since moved to a different axis/position/
+    sign/mode, or loaded a different file entirely - see
+    FieldViewerWindow._mesh_generation) can be told apart from one that's
+    still current - see FieldViewerWindow._on_clip_succeeded(), which
+    compares this against the currently-desired key rather than trusting an
+    opaque "is this the latest request" counter, so a result stays usable
+    even if something unrelated (opacity, color scale, ...) redrew in the
+    meantime while this was still computing.
     """
-    succeeded = Signal(object, str, float, int, int)  # (clipped_mesh, axis, position, sign, generation)
-    failed = Signal(str, str, float, int, int)        # (error_message, axis, position, sign, generation)
+    succeeded = Signal(object, str, float, int, bool, int)  # (clipped_mesh, axis, position, sign, slice_only, generation)
+    failed = Signal(str, str, float, int, bool, int)        # (error_message, axis, position, sign, slice_only, generation)
 
-    def __init__(self, mesh, axis, position, sign, generation):
+    def __init__(self, mesh, axis, position, sign, slice_only, generation):
         super().__init__()
         self._mesh = mesh
         self._axis = axis
         self._position = position
         self._sign = sign
+        self._slice_only = slice_only
         self._generation = generation
 
     def run(self):
         try:
-            result = _exact_clip_by_axis(self._mesh, self._axis, self._position, self._sign)
+            result = _exact_clip_by_axis(
+                self._mesh, self._axis, self._position, self._sign, self._slice_only)
         except Exception as exc:
-            self.failed.emit(str(exc), self._axis, self._position, self._sign, self._generation)
+            self.failed.emit(
+                str(exc), self._axis, self._position, self._sign, self._slice_only, self._generation)
             return
-        self.succeeded.emit(result, self._axis, self._position, self._sign, self._generation)
+        self.succeeded.emit(
+            result, self._axis, self._position, self._sign, self._slice_only, self._generation)
 
 
 def _array_magnitudes(values):
@@ -835,6 +854,24 @@ class FieldViewerWindow(QDialog):
             "freely-rotated view.")
         self.orthographic_cb.toggled.connect(self._on_orthographic_toggled)
         view_layout.addWidget(self.orthographic_cb)
+        # "2D plane only" - see _exact_clip_by_axis()'s docstring for why this
+        # exists: the default clip keeps the remaining 3D solid, whose own far
+        # surfaces (and any hollow conductor interior) can render behind the
+        # cut face as if they belonged to it - misleading, since that's
+        # whatever geometry happens to sit further along the view direction,
+        # not anything the plane itself cuts through. Checking this switches
+        # to a true flat cross-section (mesh.slice()) instead, with a real gap
+        # wherever the plane crosses empty/hollow space rather than a
+        # look-through to the background. Only has an effect while Clip
+        # enabled is also checked - see _redraw()'s early return otherwise.
+        self.slice_only_cb = QCheckBox("2D plane only")
+        self.slice_only_cb.setToolTip(
+            "Show only the flat cross-section where the clip plane cuts the mesh, "
+            "instead of the remaining 3D solid - avoids seeing through a hollow "
+            "conductor's interior to whatever geometry is behind it. Requires "
+            "Clip enabled.")
+        self.slice_only_cb.toggled.connect(self._on_redraw_needed)
+        view_layout.addWidget(self.slice_only_cb)
         view_layout.addStretch()
         view_group.setLayout(view_layout)
         controls_layout.addWidget(view_group, 1)
@@ -868,6 +905,11 @@ class FieldViewerWindow(QDialog):
         else:
             self.plotter = QtInteractor(self)
             main_layout.addWidget(self.plotter, 1)
+            # Right-click over the 3D view for a discoverable equivalent of
+            # the Ctrl+C shortcut below - same self.plotter.grab() capture,
+            # just reachable without knowing the shortcut exists.
+            self.plotter.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.plotter.customContextMenuRequested.connect(self._show_plotter_context_menu)
 
         # Ctrl+C copies the 3D view itself (not the control panels) to the
         # clipboard as an image - window-scoped (default QShortcut context) so
@@ -875,6 +917,12 @@ class FieldViewerWindow(QDialog):
         # convention as layout_preview.py/result_viewer.py/stackupEditor.py.
         QShortcut(QKeySequence.Copy, self).activated.connect(
             lambda: QApplication.clipboard().setPixmap(self.plotter.grab()))
+
+    def _show_plotter_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction("Copy to Clipboard")
+        if menu.exec(self.plotter.mapToGlobal(pos)):
+            QApplication.clipboard().setPixmap(self.plotter.grab())
 
     # ---------- Result file picker ----------
 
@@ -1048,8 +1096,15 @@ class FieldViewerWindow(QDialog):
         self.array_combo.blockSignals(False)
 
         if preserve_selection and previous_array in available:
+            # Keep the user's current settings across a cycle-only switch -
+            # not just which array is selected, but also its Min/Max color
+            # range: don't let _on_array_changed's _reset_clim_range() (fired
+            # by setCurrentText() below re-selecting the same array name in
+            # the freshly repopulated combo) clobber a manually-entered range
+            # with this cycle's own data range.
+            self.array_combo.blockSignals(True)
             self.array_combo.setCurrentText(previous_array)
-            self._reset_clim_range()
+            self.array_combo.blockSignals(False)
             self._update_vector_checkbox_state()
             return
 
@@ -1440,7 +1495,8 @@ class FieldViewerWindow(QDialog):
         # was last pointed at.
         position = self._slider_value_to_position()
         sign = self._clip_sign.get(self._current_axis, 1)
-        cache_key = (self._current_axis, position, sign, self._mesh_generation)
+        slice_only = self.slice_only_cb.isChecked()
+        cache_key = (self._current_axis, position, sign, slice_only, self._mesh_generation)
         if cache_key == self._clipped_mesh_cache_key:
             # The clip geometry itself hasn't changed since the last computed
             # result - this redraw is for something else entirely (opacity,
@@ -1454,18 +1510,18 @@ class FieldViewerWindow(QDialog):
 
         self._request_clip(*cache_key)
 
-    def _request_clip(self, axis, position, sign, generation):
-        """Kick off a background clip for this axis/position/sign, unless one
-        is already running - in that case just remember these as the latest
-        desired parameters (_pending_clip_request) instead of starting a
-        second _ClipWorker. _on_clip_succeeded()/_on_clip_failed() start the
+    def _request_clip(self, axis, position, sign, slice_only, generation):
+        """Kick off a background clip for this axis/position/sign/mode, unless
+        one is already running - in that case just remember these as the
+        latest desired parameters (_pending_clip_request) instead of starting
+        a second _ClipWorker. _on_clip_succeeded()/_on_clip_failed() start the
         pending one, if any, right after the current one finishes - so at most
         one clip computation is ever in flight, and rapid slider drags/axis
         switches collapse into "compute the latest state" rather than queuing
         up every intermediate one.
         """
         if self._clip_thread is not None and self._clip_thread.isRunning():
-            if (axis, position, sign, generation) == self._active_clip_key:
+            if (axis, position, sign, slice_only, generation) == self._active_clip_key:
                 # Already computing exactly this geometry - its result will
                 # satisfy this request too once it lands, since
                 # _on_clip_succeeded() checks against the then-current
@@ -1473,13 +1529,13 @@ class FieldViewerWindow(QDialog):
                 # so there's nothing to gain from queuing a duplicate.
                 self._pending_clip_request = None
                 return
-            self._pending_clip_request = (axis, position, sign, generation)
+            self._pending_clip_request = (axis, position, sign, slice_only, generation)
             return
-        self._start_clip_thread(axis, position, sign, generation)
+        self._start_clip_thread(axis, position, sign, slice_only, generation)
 
-    def _start_clip_thread(self, axis, position, sign, generation):
+    def _start_clip_thread(self, axis, position, sign, slice_only, generation):
         self._pending_clip_request = None
-        self._active_clip_key = (axis, position, sign, generation)
+        self._active_clip_key = (axis, position, sign, slice_only, generation)
         # Scoped to this window (not QApplication.setOverrideCursor()) - only
         # this field-viewer window is actually busy; the main setupEM/
         # setupThermal window (and any other open field viewer) stays fully
@@ -1500,7 +1556,7 @@ class FieldViewerWindow(QDialog):
         if self._full_mesh_for_clip is None:
             self._full_mesh_for_clip = self._full_mesh.copy()
         assert self._full_mesh_for_clip is not self._full_mesh
-        thread = _ClipWorker(self._full_mesh_for_clip, axis, position, sign, generation)
+        thread = _ClipWorker(self._full_mesh_for_clip, axis, position, sign, slice_only, generation)
         thread.succeeded.connect(self._on_clip_succeeded)
         thread.failed.connect(self._on_clip_failed)
         self._clip_thread = thread
@@ -1524,15 +1580,16 @@ class FieldViewerWindow(QDialog):
         self._clip_thread.wait()
         self._clip_thread = None
 
-    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign, generation):
+    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign, slice_only, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign, generation)
+        result_key = (axis, position, sign, slice_only, generation)
         # Compare against what's CURRENTLY desired (not "was this the most
         # recent request") - if nothing but the geometry key matters, a
         # result stays usable even if unrelated redraws (opacity, color
         # scale, ...) happened while this was still computing. The generation
         # element also rejects a result computed for a file that's since been
-        # switched away from, even if axis/position/sign happen to coincide.
+        # switched away from, even if axis/position/sign/slice_only happen to
+        # coincide.
         if result_key == self._current_clip_key():
             self.warning_label.setText("")
             self._clipped_mesh_cache = clipped_mesh
@@ -1540,9 +1597,9 @@ class FieldViewerWindow(QDialog):
             self._apply_display_mesh(clipped_mesh)
         self._maybe_start_pending_clip()
 
-    def _on_clip_failed(self, message, axis, position, sign, generation):
+    def _on_clip_failed(self, message, axis, position, sign, slice_only, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign, generation)
+        result_key = (axis, position, sign, slice_only, generation)
         if result_key == self._current_clip_key():
             self.warning_label.setText(f"Clip failed: {message}")
             self._apply_display_mesh(self._full_mesh)
@@ -1555,9 +1612,9 @@ class FieldViewerWindow(QDialog):
             self._clear_busy_cursor()
 
     def _current_clip_key(self):
-        """(axis, position, sign, generation) the clip plane is currently set
-        to, or None if clipping is off - the ground truth a background clip
-        result is checked against before being applied (see
+        """(axis, position, sign, slice_only, generation) the clip plane is
+        currently set to, or None if clipping is off - the ground truth a
+        background clip result is checked against before being applied (see
         _on_clip_succeeded()), recomputed fresh rather than cached, since the
         whole point is to catch cases where the desired state has moved on
         since the result was requested - including a file switch, via
@@ -1568,6 +1625,7 @@ class FieldViewerWindow(QDialog):
             self._current_axis,
             self._slider_value_to_position(),
             self._clip_sign.get(self._current_axis, 1),
+            self.slice_only_cb.isChecked(),
             self._mesh_generation,
         )
 
