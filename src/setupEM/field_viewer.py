@@ -756,6 +756,21 @@ class FieldViewerWindow(QDialog):
                 view_grid.addWidget(btn, row, col)
         view_layout = QVBoxLayout()
         view_layout.addLayout(view_grid)
+        # Orthographic (parallel) projection toggle - independent of which
+        # axis button was last clicked, since an X/Y/Z button always forces
+        # this on anyway (see _set_view()); this checkbox exists so the
+        # *current* view (including a freely-rotated one) can be switched
+        # between perspective and orthographic on demand, and so the "this
+        # view is flat, no faked distance" state is visible at a glance
+        # rather than being an invisible side effect of the last axis button
+        # pressed.
+        self.orthographic_cb = QCheckBox("Orthographic")
+        self.orthographic_cb.setToolTip(
+            "Parallel projection: no size distortion by distance from the camera. "
+            "Always on for the +/-X/Y/Z views above; check this to also use it for a "
+            "freely-rotated view.")
+        self.orthographic_cb.toggled.connect(self._on_orthographic_toggled)
+        view_layout.addWidget(self.orthographic_cb)
         view_layout.addStretch()
         view_group.setLayout(view_layout)
         controls_layout.addWidget(view_group, 1)
@@ -1058,8 +1073,36 @@ class FieldViewerWindow(QDialog):
         distance = max(self._full_mesh.length, 1.0) * 3.0
         camera_position = tuple(center + direction * distance)
         self.plotter.camera_position = [camera_position, tuple(center), _VIEW_UP[axis]]
+        # Axis-aligned views always use orthographic (parallel) projection, not
+        # perspective: looking straight down an axis with a perspective camera
+        # still foreshortens by depth along that same axis (geometry nearer the
+        # camera renders larger than geometry farther away, even though both
+        # are "in" the flat side view being requested) - exactly the "faked
+        # distance" a true CAD/engineering side/front/top view doesn't have.
+        # Unconditional (not gated on --orthographic): this is what makes an
+        # axis-snap view actually flat, independent of the global flag, which
+        # only controls projection for ISO/freely-rotated views instead.
+        self.plotter.enable_parallel_projection()
+        # Keep the checkbox in sync so it reflects reality rather than just
+        # whatever it was last manually set to - blockSignals() so this
+        # doesn't re-enter _on_orthographic_toggled() and render twice.
+        self.orthographic_cb.blockSignals(True)
+        self.orthographic_cb.setChecked(True)
+        self.orthographic_cb.blockSignals(False)
         self.plotter.reset_camera()
         self._schedule_redraw()  # re-clips using the (possibly just-changed) sign for this axis, then renders
+
+    def _on_orthographic_toggled(self, checked):
+        """Manual override for the *current* view (including a freely-rotated
+        one) - the +/-X/Y/Z buttons always force this on regardless (see
+        _set_view()), so unchecking here only matters after clicking one of
+        those buttons and then wanting perspective back, or when rotating
+        freely and wanting orthographic without snapping to an axis."""
+        if checked:
+            self.plotter.enable_parallel_projection()
+        else:
+            self.plotter.disable_parallel_projection()
+        self.plotter.render()
 
     def _move_slider_to_max(self):
         """Move the clip slider, along the currently selected axis, to the
@@ -1552,6 +1595,12 @@ def main():
     parser.add_argument("--view-axis", choices=["X+", "X-", "Y+", "Y-", "Z+", "Z-", "ISO"],
                          help="camera direction: look down +/-X/Y/Z, or ISO for a default "
                               "isometric view. Not the same as --clip-axis.")
+    parser.add_argument("--orthographic", action="store_true",
+                         help="use orthographic (parallel) projection instead of perspective, "
+                              "so geometry isn't scaled by distance from the camera. The "
+                              "X+/X-/Y+/Y-/Z+/Z- --view-axis choices already use this "
+                              "automatically (that's what makes them true flat side/front/top "
+                              "views); this flag forces it for ISO or any freely-rotated view too.")
     parser.add_argument("--screenshot",
                          help="render off-screen and save a PNG here instead of opening an "
                               "interactive window, then exit - works with no display")
@@ -1641,9 +1690,23 @@ def main():
 
     if args.view_axis:
         if args.view_axis == "ISO":
+            # Explicit reset to perspective: ISO is a freely-rotatable 3D view,
+            # not a flat axis view, so it shouldn't inherit orthographic
+            # projection from a prior axis-view call on this same window
+            # (--orthographic below re-enables it if actually requested).
+            # Routed through the checkbox (not the plotter directly) so the
+            # GUI's "Orthographic" state stays truthful when not headless.
+            window.orthographic_cb.setChecked(False)
             window.plotter.view_isometric()
         else:
             window._set_view(args.view_axis[0], 1 if args.view_axis[1] == "+" else -1)
+
+    if args.orthographic:
+        # Applied after --view-axis so it always wins, including forcing
+        # orthographic on ISO/a freely-rotated view (axis views are already
+        # orthographic unconditionally - see _set_view()). Routed through the
+        # checkbox for the same reason as the ISO branch above.
+        window.orthographic_cb.setChecked(True)
 
     if args.clip_axis:
         axis_radio = {"X": window.axis_radio_x, "Y": window.axis_radio_y,
