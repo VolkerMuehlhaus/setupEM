@@ -462,6 +462,11 @@ class FieldViewerWindow(QDialog):
         # may have a different (or no) cycle at that position.
         self._cycle_index = None
         self._num_cycles = 1
+        # Indices (0-based) of cycles already discovered to have no
+        # point-data at all (see _load_mesh()) - labeled "geometry" in
+        # self.cycle_combo instead of "Cycle N" once visited. Reset in
+        # _switch_to_file() since a different file's cycles are unrelated.
+        self._cycles_without_data = set()
         # Which side of the clip plane is kept, per axis - +1 (default, matches
         # the original behavior) keeps the negative side; -1 keeps the positive
         # side instead. Updated by _set_view() to match whichever axis-view
@@ -946,6 +951,7 @@ class FieldViewerWindow(QDialog):
         # the old file has no guaranteed correspondence here (different files
         # can have different cycle counts), see __init__'s self._cycle_index.
         self._cycle_index = None
+        self._cycles_without_data = set()
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
 
@@ -1010,17 +1016,32 @@ class FieldViewerWindow(QDialog):
             self.warning_label.setText(f"Failed to load {self.file_path}:\n{exc}")
             self._full_mesh = None
             return
-
-        self.cycle_combo.blockSignals(True)
-        self.cycle_combo.clear()
-        self.cycle_combo.addItems([f"Cycle {i + 1}" for i in range(self._num_cycles)])
-        self.cycle_combo.setCurrentIndex(self._cycle_index)
-        self.cycle_combo.blockSignals(False)
-        self.cycle_group.setVisible(self._num_cycles > 1)
+        self.warning_label.setText("")
 
         _attach_complex_e_magnitude(self._full_mesh, self.source)
 
         available = list(self._full_mesh.point_data.keys())
+        # A cycle with no point-data at all is a legitimate, non-error case -
+        # e.g. Palace appends an AMR error-indicator/rank dump as an extra
+        # cycle alongside the real per-frequency solves, carrying only
+        # cell-data (Indicator/Rank/attribute), not a point-data field to
+        # color by. Label it "geometry" in the combo (once encountered - see
+        # __init__'s self._cycles_without_data) instead of a plain "Cycle N",
+        # and just render the bare mesh with nothing selected to color by,
+        # rather than warning about it as if something went wrong.
+        if not available:
+            self._cycles_without_data.add(self._cycle_index)
+
+        self.cycle_combo.blockSignals(True)
+        self.cycle_combo.clear()
+        self.cycle_combo.addItems([
+            "geometry" if i in self._cycles_without_data else f"Cycle {i + 1}"
+            for i in range(self._num_cycles)
+        ])
+        self.cycle_combo.setCurrentIndex(self._cycle_index)
+        self.cycle_combo.blockSignals(False)
+        self.cycle_group.setVisible(self._num_cycles > 1)
+
         self.array_combo.blockSignals(True)
         self.array_combo.clear()
         self.array_combo.addItems(available)
@@ -1046,10 +1067,6 @@ class FieldViewerWindow(QDialog):
             # checkbox_state() get called.
             self._reset_clim_range()
             self._update_vector_checkbox_state()
-        elif not available:
-            self.warning_label.setText(
-                f"No point-data arrays found in {self.file_path} - nothing to color by."
-            )
 
     # ---------- Axis / clip plane ----------
 
