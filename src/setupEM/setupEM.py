@@ -2552,6 +2552,8 @@ class ModelEditorTab(QWidget):
             # it here too, same as 'iterative' is excluded under Palace mode above,
             # rather than let a value set earlier in Palace mode leak into an Elmer script.
             ignore_list.append('filled_metals')
+            # via fill factor correction is Palace-only in gds2palace itself
+            ignore_list.append('fill_factor_correction')
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
@@ -2716,7 +2718,8 @@ class PreferencesDialog(QDialog):
             label.setFixedWidth(label_width)
             row.addWidget(label)
             edit = QLineEdit(str(get_preference(self.app_name, key, default)))
-            edit.setStyleSheet(EDIT_STYLE_REQUIRED)
+            # every preference is a default, not a required project input, so all fields look alike
+            edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
             row.addWidget(edit)
             if tooltip:
                 label.setToolTip(tooltip)
@@ -2787,7 +2790,6 @@ class PreferencesDialog(QDialog):
         self.margin_edit = add_row(mesh_form, "Dielectric stackup oversize margin (µm)", "margin", "200")
         self.air_around_edit = add_row(mesh_form, "Air layer thickness around stackup (µm)", "air_around", "")
         self.air_around_edit.setPlaceholderText("same as dielectric margin")
-        self.air_around_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         mesh_form.addStretch()
         self.tabs.addTab(mesh_widget, "Mesh")
 
@@ -2833,6 +2835,7 @@ class PreferencesDialog(QDialog):
         viewer_label.setFixedWidth(label_width)
         viewer_row.addWidget(viewer_label)
         self.viewer_3d_combo = QComboBox()
+        self.viewer_3d_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.viewer_3d_combo.addItem("Built-in", "builtin")
         self.viewer_3d_combo.addItem("ParaView", "paraview")
         current_viewer = get_preference(self.app_name, "viewer_3d", "builtin")
@@ -2852,15 +2855,12 @@ class PreferencesDialog(QDialog):
         self.simplify_max_hole_area_edit = add_row(
             simplify_form, "Maximum cutout area to remove (µm²)", "simplify_max_hole_area", "1")
         self.simplify_max_hole_area_edit.setPlaceholderText("blank = remove all cutouts")
-        self.simplify_max_hole_area_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_fill_maxsize_edit = add_row(
             simplify_form, "Maximum floating fill size (µm)", "simplify_fill_maxsize", "20")
         self.simplify_fill_maxsize_edit.setPlaceholderText("blank = no size limit")
-        self.simplify_fill_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_excluded_layers_edit = add_row(
             simplify_form, "Layers excluded from simplification", "simplify_excluded_layers", "")
         self.simplify_excluded_layers_edit.setPlaceholderText("e.g. 10,11 - blank = none")
-        self.simplify_excluded_layers_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_merge_per_layer_checkbox = QCheckBox("Merge polygons per layer (final step)")
         self.simplify_merge_per_layer_checkbox.setChecked(
             get_preference_bool(self.app_name, "simplify_merge_per_layer", True))
@@ -3103,6 +3103,7 @@ class MainWindow(MainWindowBase):
         self.mesh_tab.Elmer_group.setVisible(False)
         self.mesh_tab.label_filled_metals.setVisible(True)
         self.mesh_tab.filled_metals_box.setVisible(True)
+        self.file_tab.show_fill_factor_correction(True)
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible
@@ -3126,6 +3127,7 @@ class MainWindow(MainWindowBase):
         self.mesh_tab.Elmer_group.setVisible(True)
         self.mesh_tab.label_filled_metals.setVisible(False)
         self.mesh_tab.filled_metals_box.setVisible(False)
+        self.file_tab.show_fill_factor_correction(False)
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible

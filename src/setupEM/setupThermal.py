@@ -1129,7 +1129,8 @@ class PreferencesDialog(QDialog):
             label.setFixedWidth(label_width)
             row.addWidget(label)
             edit = QLineEdit(str(get_preference(self.app_name, key, default)))
-            edit.setStyleSheet(EDIT_STYLE_REQUIRED)
+            # every preference is a default, not a required project input, so all fields look alike
+            edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
             row.addWidget(edit)
             form_layout.addLayout(row)
             self._reset_targets.append((edit, key, default, "text"))
@@ -1199,6 +1200,7 @@ class PreferencesDialog(QDialog):
         viewer_label.setFixedWidth(label_width)
         viewer_row.addWidget(viewer_label)
         self.viewer_3d_combo = QComboBox()
+        self.viewer_3d_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.viewer_3d_combo.addItem("Built-in", "builtin")
         self.viewer_3d_combo.addItem("ParaView", "paraview")
         current_viewer = get_preference(self.app_name, "viewer_3d", "builtin")
@@ -1217,15 +1219,12 @@ class PreferencesDialog(QDialog):
         self.simplify_max_hole_area_edit = add_row(
             simplify_form, "Maximum cutout area to remove (µm²)", "simplify_max_hole_area", "1")
         self.simplify_max_hole_area_edit.setPlaceholderText("blank = remove all cutouts")
-        self.simplify_max_hole_area_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_fill_maxsize_edit = add_row(
             simplify_form, "Maximum floating fill size (µm)", "simplify_fill_maxsize", "20")
         self.simplify_fill_maxsize_edit.setPlaceholderText("blank = no size limit")
-        self.simplify_fill_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_excluded_layers_edit = add_row(
             simplify_form, "Layers excluded from simplification", "simplify_excluded_layers", "")
         self.simplify_excluded_layers_edit.setPlaceholderText("e.g. 10,11 - blank = none")
-        self.simplify_excluded_layers_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_merge_per_layer_checkbox = QCheckBox("Merge polygons per layer (final step)")
         self.simplify_merge_per_layer_checkbox.setChecked(
             get_preference_bool(self.app_name, "simplify_merge_per_layer", True))

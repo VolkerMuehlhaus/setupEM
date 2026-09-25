@@ -1,5 +1,9 @@
 
 
+# What's New - September 25, 2026
+
+Added a **Correction for via array cross section** option (Palace only) on the Input Files tab, below via array merging. Merging fills the gaps between vias with via material, which overestimates the conductivity of a via array; when enabled, the conductivity of each merged via polygon is multiplied by its fill factor (original via area / merged polygon area). This option requires gds2palace v0.7.0 or later and is hidden with an older version, which would silently ignore it.  
+
 # What's New - September 22-24, 2026
 
 Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies. This option requires gds2palace v0.6.0 or later, earlier version silently ignore this setting.  
