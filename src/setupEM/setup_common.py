@@ -85,9 +85,13 @@ GDS2PALACE_HAS_VARIABLES_LIST = hasattr(stackup_reader, "variables_list") and ha
 GDS2PALACE_SUPPORTS_STACKUP_EDITOR = GDS2PALACE_HAS_PARSE_SUBSTRATE
 GDS2PALACE_SUPPORTS_FILE_DESCRIPTION = GDS2PALACE_HAS_FILE_DESCRIPTION
 GDS2PALACE_OUTDATED = not (GDS2PALACE_SUPPORTS_STACKUP_EDITOR and GDS2PALACE_SUPPORTS_FILE_DESCRIPTION)
-# settings['fill_factor_correction'] needs gds2palace 0.7.0 or later; an older one silently
-# ignores the unknown setting, so only offer it when the installed gds2palace can act on it
-GDS2PALACE_SUPPORTS_FILL_FACTOR_CORRECTION = hasattr(gds_reader.all_polygons_list, "compute_via_fill_factors")
+# Solvers ("palace", "elmer", "elmer_thermal") for which the installed gds2palace applies
+# settings['fill_factor_correction']; an older gds2palace silently ignores the setting, so
+# only offer it where it has an effect. gds2palace declares this list itself since Elmer
+# support was added; before that, the feature existed for Palace only.
+FILL_FACTOR_CORRECTION_SOLVERS = getattr(
+    simulation_setup, "FILL_FACTOR_CORRECTION_SOLVERS",
+    ("palace",) if hasattr(gds_reader.all_polygons_list, "compute_via_fill_factors") else ())
 
 
 # QSettings scope for the File menu's "Load Recent Config"/"Import Recent Model" lists -
@@ -682,8 +686,8 @@ class FileInputTab(QWidget):
         self.viamerge_layout.addStretch()
         self.gds_layout.addLayout(self.viamerge_layout)
 
-        # Palace-only: settings['fill_factor_correction'], shown only in setupEM's Palace mode
-        # (see show_fill_factor_correction()) and only with a gds2palace that supports it
+        # settings['fill_factor_correction'], shown only for solvers where the installed
+        # gds2palace supports it, see show_fill_factor_correction()
         self.fill_factor_layout = QHBoxLayout()
         self.fill_factor_label1 = QLabel("Correction for via array cross section is ")
         # minimum instead of fixed width: lines up with the rows above, but grows rather
@@ -696,15 +700,16 @@ class FileInputTab(QWidget):
         self.fill_factor_box.setToolTip(
             "Via array merging fills the gaps between vias with via material, so a merged\n"
             "via array conducts better than the real one. When enabled, the conductivity of\n"
-            "each merged via polygon is multiplied by its fill factor (original via area /\n"
-            "merged polygon area). Only has an effect when via array merging is enabled.")
+            "each merged via polygon (heat conductivity for thermal models) is multiplied by\n"
+            "its fill factor (original via area / merged polygon area). Only has an effect\n"
+            "when via array merging is enabled.")
         self.fill_factor_label2 = QLabel(" (conductivity × via fill factor)")
         self.fill_factor_layout.addWidget(self.fill_factor_label1)
         self.fill_factor_layout.addWidget(self.fill_factor_box)
         self.fill_factor_layout.addWidget(self.fill_factor_label2)
         self.fill_factor_layout.addStretch()
         self.gds_layout.addLayout(self.fill_factor_layout)
-        self.show_fill_factor_correction(getattr(MainWindow, "PalaceMode", False))
+        self.show_fill_factor_correction()
 
         self.preprocess_layout = QHBoxLayout()
         self.preprocess_gds_checkbox = QCheckBox()
@@ -1036,10 +1041,20 @@ class FileInputTab(QWidget):
                 overrides[name_item.text()] = override_text
         return overrides
 
-    def show_fill_factor_correction(self, palace_mode):
-        """Show the via fill factor correction row in Palace mode only, and only if the
-        installed gds2palace supports settings['fill_factor_correction']."""
-        visible = palace_mode and GDS2PALACE_SUPPORTS_FILL_FACTOR_CORRECTION
+    def _current_solver(self):
+        """"palace"/"elmer" in setupEM (depending on mode), "elmer_thermal" in setupThermal."""
+        if hasattr(self.MainWindow, "PalaceMode"):
+            return "palace" if self.MainWindow.PalaceMode else "elmer"
+        return "elmer_thermal"
+
+    def _app_solvers(self):
+        """Solvers this application can generate models for."""
+        return ("palace", "elmer") if hasattr(self.MainWindow, "PalaceMode") else ("elmer_thermal",)
+
+    def show_fill_factor_correction(self):
+        """Show the via fill factor correction row only if the installed gds2palace supports
+        settings['fill_factor_correction'] for the current solver."""
+        visible = self._current_solver() in FILL_FACTOR_CORRECTION_SOLVERS
         self.fill_factor_label1.setVisible(visible)
         self.fill_factor_box.setVisible(visible)
         self.fill_factor_label2.setVisible(visible)
@@ -1094,12 +1109,12 @@ class FileInputTab(QWidget):
             return False
         saved_values["merge_polygon_size"] = float(merge_polygon_size)
 
-        if hasattr(self.MainWindow, "PalaceMode") and GDS2PALACE_SUPPORTS_FILL_FACTOR_CORRECTION:
-            # kept in Elmer mode too (so switching modes doesn't lose it), but only
-            # written into Palace model scripts, see create_model_text()
+        if any(solver in FILL_FACTOR_CORRECTION_SOLVERS for solver in self._app_solvers()):
+            # kept even if the current mode doesn't support it (so switching modes doesn't
+            # lose it); setupEM's create_model_text() leaves it out for such a mode
             saved_values["fill_factor_correction"] = self.fill_factor_box.currentText() == "enabled"
         else:
-            # setupThermal, or a gds2palace that doesn't know this setting
+            # a gds2palace that doesn't support this setting for this application
             saved_values.pop("fill_factor_correction", None)
 
         text = self.purpose_edit.text()

@@ -144,7 +144,7 @@ On this tab, you configure the two input files every model needs:
 
 Both fields support drag & drop or the **Browse...** button.
 
-Some layout pre-processing is defined here too: **Merge via arrays with spacing** merges nearby vias on `Type="via"` layers into one larger via box (speeds up meshing). Merging fills the gaps between the vias with via material, so the merged box conducts better than the real via array; with **Correction for via array cross section** enabled (Palace only), the conductivity of each merged via box is multiplied by its fill factor (original via area / merged box area). This option only appears in Palace mode, with gds2palace 0.7.0 or later. Layouts with **polygons with holes/cutouts** need "Preprocess GDSII file" checked - this option only appears with an outdated gds2palace install; a current one handles cutouts natively.
+Some layout pre-processing is defined here too: **Merge via arrays with spacing** merges nearby vias on `Type="via"` layers into one larger via box (speeds up meshing). Merging fills the gaps between the vias with via material, so the merged box conducts better than the real via array; with **Correction for via array cross section** enabled, the conductivity of each merged via box (heat conductivity in setupThermal) is multiplied by its fill factor (original via area / merged box area). This option needs gds2palace 0.7.0 or later and is hidden otherwise. Layouts with **polygons with holes/cutouts** need "Preprocess GDSII file" checked - this option only appears with an outdated gds2palace install; a current one handles cutouts natively.
 
 <img src="./png/inputfiles1.png" alt="input files" width="700">
 

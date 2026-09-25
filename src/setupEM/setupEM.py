@@ -59,7 +59,7 @@ if __package__ in (None, ""):
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -72,7 +72,7 @@ else:
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -2552,8 +2552,9 @@ class ModelEditorTab(QWidget):
             # it here too, same as 'iterative' is excluded under Palace mode above,
             # rather than let a value set earlier in Palace mode leak into an Elmer script.
             ignore_list.append('filled_metals')
-            # via fill factor correction is Palace-only in gds2palace itself
-            ignore_list.append('fill_factor_correction')
+            # an older gds2palace supports the via fill factor correction for Palace only
+            if 'elmer' not in FILL_FACTOR_CORRECTION_SOLVERS:
+                ignore_list.append('fill_factor_correction')
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
@@ -3128,7 +3129,7 @@ class MainWindow(MainWindowBase):
         self.mesh_tab.Elmer_group.setVisible(False)
         self.mesh_tab.label_filled_metals.setVisible(True)
         self.mesh_tab.filled_metals_box.setVisible(True)
-        self.file_tab.show_fill_factor_correction(True)
+        self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible
@@ -3152,7 +3153,7 @@ class MainWindow(MainWindowBase):
         self.mesh_tab.Elmer_group.setVisible(True)
         self.mesh_tab.label_filled_metals.setVisible(False)
         self.mesh_tab.filled_metals_box.setVisible(False)
-        self.file_tab.show_fill_factor_correction(False)
+        self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible

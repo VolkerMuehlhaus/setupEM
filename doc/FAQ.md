@@ -35,7 +35,7 @@ No. The Palace/Elmer FEM stackup and the openEMS FDTD stackup encode different m
 
 Because geometry comes straight from GDSII, a large via array is hundreds of individual via boxes, and meshing each one individually is slow. This setting oversizes and merges nearby via polygons on `Type="via"` layers into one larger via box before meshing, then undersizes back. A commercial tool with native via-array primitives does this automatically at the layout level; here it is an explicit pre-processing step.
 
-Merging also fills the gaps between the vias with via material, so the merged box has a larger conducting cross section than the real via array. In Palace mode, set **Correction for via array cross section** to "enabled" to multiply the conductivity of each merged via box by its fill factor (original via area / merged box area).
+Merging also fills the gaps between the vias with via material, so the merged box has a larger conducting cross section than the real via array. Set **Correction for via array cross section** to "enabled" to multiply the conductivity of each merged via box (heat conductivity in setupThermal) by its fill factor (original via area / merged box area).
 
 ### Do I still need "Preprocess GDSII file" for polygons with holes?
 
