@@ -2559,9 +2559,34 @@ class ModelEditorTab(QWidget):
             # these commands are only used within this GUI application to control gmsh
             ignore_list.extend(['preview_only','no_preview'])
 
-        for key in saved_values.keys():
-            if not key in special_keylist:
-                if not key in ignore_list:
+        # AMR settings only matter for Palace with at least one AMR iteration
+        if self.MainWindow.ElmerMode:
+            ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof'])
+        elif int(saved_values.get('adaptive_mesh_iterations', 0)) == 0:
+            ignore_list.extend(['amr_tol', 'amr_max_dof'])
+
+        # write settings grouped by topic; keys not listed here end up in "Other",
+        # so a new setting is never silently dropped from the script
+        setting_groups = [
+            ("Input files", ['GdsFile', 'SubstrateFile', 'variable_overrides', 'cellname', 'purpose',
+                             'preprocess_gds', 'merge_polygon_size', 'fill_factor_correction']),
+            ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
+            ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
+                      'meshsize_max', 'order', 'filled_metals']),
+            ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around']),
+            ("Solver", ['iterative', 'ELMER_MPI_THREADS']),
+            ("Script control", ['preview_only', 'no_preview']),
+        ]
+        grouped_keys = {key for _, keys in setting_groups for key in keys}
+        setting_groups.append(("Other", [key for key in saved_values if key not in grouped_keys]))
+
+        for group_name, keys in setting_groups:
+            keys = [key for key in keys
+                    if key in saved_values and key not in special_keylist and key not in ignore_list]
+            if keys:
+                add_text(f"\n# ---- {group_name} ----")
+                for key in keys:
                     add_key(key)
 
         if self.MainWindow.ElmerMode and bool(saved_values.get('fdump_enabled')):
