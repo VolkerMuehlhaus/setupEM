@@ -223,8 +223,8 @@ def _load_full_mesh(file_path, cycle_index=None):
     cycle unreachable before cycle_index existed.
 
     cycle_index (0-based) selects which cycle to return; None (the default)
-    picks the LAST one - a deliberate choice (the final/most-recently-solved
-    state), independent of whatever pv.read() happened to default to.
+    picks the FIRST one, matching the "Cycle 1" default the Cycle combo/
+    --cycle both start from.
 
     Raises ValueError if cycle_index is out of range for the file's actual
     number of cycles.
@@ -236,7 +236,7 @@ def _load_full_mesh(file_path, cycle_index=None):
         if num_cycles == 0:
             raise ValueError(f"No cycles found in {file_path}")
         if cycle_index is None:
-            cycle_index = num_cycles - 1
+            cycle_index = 0
         elif not (0 <= cycle_index < num_cycles):
             raise ValueError(
                 f"cycle {cycle_index + 1} out of range for {file_path} "
@@ -475,10 +475,10 @@ class FieldViewerWindow(QDialog):
         self._load_error = None
         # Which cycle of a multi-cycle .pvd (one per solved frequency, for a
         # multi-frequency Palace fdump run) to display - see _load_full_mesh().
-        # None means "this file's own last cycle", the same default as before
-        # this selector existed. Reset to None in _switch_to_file() so a
-        # cycle index from one file never leaks into a different file that
-        # may have a different (or no) cycle at that position.
+        # None means "this file's own first cycle" (Cycle 1). Reset to None in
+        # _switch_to_file() so a cycle index from one file never leaks into a
+        # different file that may have a different (or no) cycle at that
+        # position.
         self._cycle_index = None
         self._num_cycles = 1
         # Indices (0-based) of cycles already discovered to have no
@@ -995,7 +995,7 @@ class FieldViewerWindow(QDialog):
         # control in this window, this is a good reason to re-fit the camera
         # rather than keep the previous file's pan/zoom/rotation.
         self._camera_needs_reset = True
-        # Default to the NEW file's own last cycle - a cycle index picked on
+        # Default to the NEW file's own first cycle - a cycle index picked on
         # the old file has no guaranteed correspondence here (different files
         # can have different cycle counts), see __init__'s self._cycle_index.
         self._cycle_index = None
@@ -1738,8 +1738,7 @@ def main():
                          help="1-based index of which solved cycle to display, for a "
                               "multi-frequency Palace fdump .pvd with more than one "
                               "<DataSet>/cycle (one per solved frequency) - default: the "
-                              "last cycle, i.e. unchanged behavior for files/scripts that "
-                              "don't use this. Not a frequency/GHz value, just a position.")
+                              "first cycle. Not a frequency/GHz value, just a position.")
 
     # --- Scripted/agentic use: everything below sets up the view without a
     # human touching the GUI, by driving the same widgets a click would - see
