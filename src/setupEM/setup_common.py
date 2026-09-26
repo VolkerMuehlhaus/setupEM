@@ -1248,6 +1248,10 @@ VIA_COLOR = QColor(136, 192, 200, 80)
 # red, so it reads at a glance as "dielectric fill", not "via"
 DIELECTRIC_VIA_COLOR = QColor(230, 200, 130, 100)
 
+# via-style box labels sit near the box's upper end: text baseline this many px below
+# the top edge (about one line of the default font)
+VIA_LABEL_TOP_OFFSET = 14
+
 # a Reference=<metal>-anchored dielectric-fill Layer (see fill_layers_by_ref_metal in
 # compute_stackup_layout()) whose real z-range genuinely overlaps another real conductor/
 # sheet metal, not just a dielectric slab - a materially different, more serious situation
@@ -1301,7 +1305,11 @@ def default_stackup_dielectric_label(dielectric, material):
 
 def default_stackup_metal_label(metal, material, is_sheet):
     if is_sheet:
-        return f'Rs={material.Rs*1e3:.1f}mΩ'
+        # sheet Rs is given in Ohm (per square) - same mΩ/Ω formatting as below
+        if material.Rs < 1:
+            return f'Rs={material.Rs*1e3:.1f} mΩ'
+        else:
+            return f'Rs={material.Rs:.2f} Ω'
     else:
         if (material.sigma > 0) and (metal.thickness > 0):
             Rs = 1 / (material.sigma*metal.thickness*1e-6)
@@ -1754,7 +1762,18 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
         # height for one dielectric segment including one metal is part_height
         if len(metals_inside) > 0:
 
-            # there could be multiple metals starting at the same zmin
+            # there could be multiple metals starting at the same zmin: group them, so
+            # that 3 or more of them (e.g. several resistor sheets on top of Activ) can
+            # be drawn side by side in equal slots instead of on top of each other.
+            # 1 or 2 per zmin keep their original full-width/left-right-half layout.
+            same_zmin_slot = []  # (slot index, group size) per metals_inside entry
+            group_start = 0
+            for n in range(1, len(metals_inside) + 1):
+                if n == len(metals_inside) or abs(metals_inside[n].zmin - metals_inside[group_start].zmin) >= 0.001:
+                    for i in range(n - group_start):
+                        same_zmin_slot.append((i, n - group_start))
+                    group_start = n
+            crowded_detail_level = {}  # group's first index -> (label detail level, text width)
 
             # draw planar metals, one after another
             ymetal = y
@@ -1800,6 +1819,17 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                         xmetal = xmin + int(w / 2) + 20
                         wmetal = int(w / 2) - 100
                         previous_at_same_zmin = True
+
+                # 3 or more metals at this zmin: equal slots across the span a single
+                # full-width box uses, with a small gap between them
+                slot_index, slot_count = same_zmin_slot[n]
+                crowded = slot_count >= 3
+                if crowded:
+                    slot_gap = 20
+                    span_start = xmin + metal_box_left_margin
+                    span = (xmin + w - 80) - span_start
+                    wmetal = (span - slot_gap * (slot_count - 1)) / slot_count
+                    xmetal = span_start + slot_index * (wmetal + slot_gap)
 
                 # a metal is registered "inside" a dielectric by its zmin alone (see
                 # util_stackup_reader.register_metals_inside()) - its zmax can legitimately
@@ -1924,11 +1954,48 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                         "tooltip": _build_layer_tooltip(fill_layer),
                         "chiplet_id": entry_chiplet_id(fill_layer),
                     })
-                    drawTextAt(same_x + 5, flipy(ymetal + 5), fill_layer.name)
+                    drawTextAt(same_x + 5, flipy(ymetal + max(height_box - VIA_LABEL_TOP_OFFSET, 5)),
+                               fill_layer.name)
                     same_range_entries.append((same_x, same_w, interactive_entries[-1]))
 
+                name_string = f"{metal.name} ({metal.layernum})"
+                if crowded:
+                    # narrow slot: give up detail until the text fits - the material
+                    # label first, then the layer number, then shorten the name itself.
+                    # Decided once for the whole group, so all slots in the row show the
+                    # same level of detail. Everything dropped here is still in the hover
+                    # tooltip. Width is a character-count estimate, like name_width above
+                    # (no QFontMetrics, see there).
+                    group_first = n - slot_index
+                    if group_first not in crowded_detail_level:
+                        def _text_width(text):
+                            return len(text) * 6 + 10
+                        available = wmetal - 20
+                        level = 0  # 0: name, layer number and label; 1: no label; 2: name only
+                        for member in metals_inside[group_first:group_first + slot_count]:
+                            member_material = materials_list.get_by_name(member.material)
+                            if member_material is not None:
+                                member_label = metal_label_fn(member, member_material, member.is_sheet)
+                            elif _is_pec_material(member.material):
+                                member_label = 'PEC (ideal conductor)'
+                            else:
+                                member_label = 'INVALID MATERIAL REFERENCE: ' + member.material
+                            member_name = f"{member.name} ({member.layernum})"
+                            if _text_width(member_name) > available:
+                                level = 2
+                            elif _text_width(member_name) + _text_width(member_label) > available:
+                                level = max(level, 1)
+                        crowded_detail_level[group_first] = (level, available)
+                    level, available = crowded_detail_level[group_first]
+                    if level >= 1:
+                        label_string = ""
+                    if level == 2:
+                        name_string = metal.name
+                        max_chars = int((available - 10) / 6)
+                        if len(name_string) > max_chars:
+                            name_string = name_string[:max(1, max_chars - 1)] + "…"
                 setPen(penBlack)
-                drawText_left(xmetal + 10, flipy(ymetal), wmetal, part_height / 2, f"{metal.name} ({metal.layernum})")
+                drawText_left(xmetal + 10, flipy(ymetal), wmetal, part_height / 2, name_string)
                 setPen(penGray)
                 drawText_right(xmetal, flipy(ymetal), wmetal - 10, part_height / 2, label_string)
                 # store the drawing position, because vias will refer to that
@@ -1946,10 +2013,14 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     stored_z = np.append(stored_z, metal.zmax)
                     stored_y = np.append(stored_y, ymetal + height_box)
 
+                # left-side tick lines/thickness text: only for the first slot of a
+                # crowded row - for the others, xmetal - 60 lands inside the slot left of it
+                draw_side_ticks = not (crowded and slot_index > 0)
                 setPen(penGray)
-                drawLine(xmetal - 60, flipy(ymetal), xmetal - 10, flipy(ymetal))
+                if draw_side_ticks:
+                    drawLine(xmetal - 60, flipy(ymetal), xmetal - 10, flipy(ymetal))
                 # draw line at top side of metal
-                if not metal.is_sheet:
+                if draw_side_ticks and not metal.is_sheet:
                     drawLine(xmetal - 60, flipy(ymetal + height_box), xmetal - 10, flipy(ymetal + height_box))
                     heightstring = f'{metal.thickness:.3f}µm'
                     setPen(penDarkGray)
@@ -1998,7 +2069,8 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                         else:
                             heightstring = f'{dz:.3f}µm'
                         setPen(penGray)
-                        drawTextAt(xmetal - 60, flipy(ymetal + height_box + 5), heightstring)
+                        if draw_side_ticks:
+                            drawTextAt(xmetal - 60, flipy(ymetal + height_box + 5), heightstring)
                     else:
                         # intruding case: same signed distance-to-boundary value, but drawn
                         # in the deferred pass instead of here (see pending_intrusions.append
@@ -2437,7 +2509,10 @@ def compute_stackup_layout(materials_list, dielectrics_list, metals_list, width,
                     "tooltip": _build_layer_tooltip(metal),
                     "chiplet_id": entry_chiplet_id(metal),
                 })
-                drawTextAt(xvia + 5, flipy(y1 + 5), f"{metal.name} ({metal.layernum})" + label_suffix)
+                # label near the via's upper end (baseline one text height below the top
+                # edge); a box too short for that keeps it near the lower end, as before
+                drawTextAt(xvia + 5, flipy(y1 + max(h - VIA_LABEL_TOP_OFFSET, 5)),
+                           f"{metal.name} ({metal.layernum})" + label_suffix)
 
     return draw_calls, interactive_entries
 
