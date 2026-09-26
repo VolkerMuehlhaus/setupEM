@@ -119,7 +119,65 @@ def simulation_ports_to_struct (simulation_ports):
 
 
 
+# Palace peak memory (summed over all MPI ranks) vs. degrees of freedom, least-squares
+# fit over 92 existing order-2 Palace runs (8 and 16 MPI ranks) in the gds2palace repo's
+# palace.json results: typical = offset + slope * MDOF; worst case uses the largest
+# per-MDOF ratio seen among those runs. Order 1 needs more memory per DOF, order 3 less
+# (too few runs of either to fit separately).
+_RAM_FIT_OFFSET_GB = 0.5
+_RAM_FIT_GB_PER_MDOF = 11.7
+_RAM_WORST_GB_PER_MDOF = 15.4
+
+# readable on both the light and the dark Windows palette; the note also starts with a
+# warning sign so the over-limit state isn't signalled by color alone. The normal style
+# is explicit rather than "": clearing a widget's stylesheet doesn't reliably undo the
+# color/bold it had set, so the note stayed orange after the warning went away.
+_RAM_NOTE_STYLE_OVER_LIMIT = "color: #d35400; font-weight: bold;"
+_RAM_NOTE_STYLE_NORMAL = "color: palette(window-text); font-weight: normal;"
+
+
+def amr_ram_estimate_gb(max_dof_text):
+    """(typical, worst case) estimated Palace peak RAM in GB for an AMR maximum DOF
+    value, or None if max_dof_text isn't an integer."""
+    try:
+        mdof = int(max_dof_text) / 1e6
+    except ValueError:
+        return None
+    return (_RAM_FIT_OFFSET_GB + _RAM_FIT_GB_PER_MDOF * mdof,
+            _RAM_FIT_OFFSET_GB + _RAM_WORST_GB_PER_MDOF * mdof)
+
+
+def amr_ram_note_text(max_dof_text):
+    """Short one-line RAM estimate for an AMR maximum DOF value ("" if not an integer)."""
+    estimate = amr_ram_estimate_gb(max_dof_text)
+    if estimate is None:
+        return ""
+    typical, worst = estimate
+    return f"~{typical:.0f} GB RAM (up to {worst:.0f} GB)"
+
+
+def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2):
+    """Show the estimated Palace peak RAM for an AMR maximum DOF value in note_label,
+    as a warning if the worst case exceeds the "Stop Palace if memory exceeds" limit."""
+    estimate = amr_ram_estimate_gb(max_dof_text)
+    try:
+        limit = float(ram_limit_text)
+    except ValueError:
+        limit = None
+    over_limit = estimate is not None and limit is not None and estimate[1] > limit
+
+    note = amr_ram_note_text(max_dof_text)
+    order_hint = {1: "more", 3: "less"}.get(order)
+    if note and order_hint:
+        note += f" for N=2, N={order} needs {order_hint}"
+    if over_limit:
+        note = f"⚠ {note} - above {limit:g} GB memory stop limit"
+    note_label.setText(note)
+    note_label.setStyleSheet(_RAM_NOTE_STYLE_OVER_LIMIT if over_limit else _RAM_NOTE_STYLE_NORMAL)
+
+
 # ---------- OTHER TABS ----------
+
 class FrequenciesTab(QWidget):
     def __init__(self, MainWindow):
         super().__init__()
@@ -1116,13 +1174,18 @@ class MeshTab(QWidget):
         self.amr_maxdof_edit.setFixedWidth(edit_width)
         self.amr_maxdof_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.amr_maxdof_layout.addWidget(self.amr_maxdof_edit)
+        self.amr_ram_note = QLabel()
+        self.amr_maxdof_layout.addWidget(self.amr_ram_note)
         self.amr_maxdof_layout.addStretch()
         self.AMR_layout.addLayout(self.amr_maxdof_layout)
+        self.amr_maxdof_edit.textChanged.connect(self.update_amr_ram_note)
+        self.mesh_order_box.currentIndexChanged.connect(self.update_amr_ram_note)
+        self.update_amr_ram_note()
 
         def on_show_advanced_changed(value):
             show = (value == "Yes")
             for item in [self.labelAMRgoal1, self.amr_goal_edit,
-                         self.labelAMRmaxdof1, self.amr_maxdof_edit]:
+                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note]:
                 item.setVisible(show)
 
         self.show_advanced_box.currentTextChanged.connect(on_show_advanced_changed)
@@ -1300,6 +1363,15 @@ class MeshTab(QWidget):
         if dialog.exec() == QDialog.Accepted:
             self._refined_cellsize_override = dialog.get_overrides()
             self._update_refined_override_button_label()
+
+    def update_amr_ram_note(self, *_):
+        # the memory stop limit is a preference, so re-read it on every update
+        # (MainWindow also calls this after the Preferences dialog closes)
+        update_amr_ram_estimate(
+            self.amr_maxdof_edit.text(),
+            get_preference(self.MainWindow.APP_NAME, "palace_max_ram_gb", "100"),
+            self.amr_ram_note,
+            order=self.mesh_order_box.currentIndex() + 1)
 
     def on_meshorder_changed(self, value):
     # callback when mesh order changed, so that we can show/hide edit fields
@@ -2829,10 +2901,17 @@ class PreferencesDialog(QDialog):
                      "(Norm/Max/Mean indicators) - not a change in S-parameters "
                      "between AMR iterations"))
         self.amr_maxdof_edit = add_row(palace_form, "AMR maximum DOF", "amr_max_dof", "2000000")
+        # own line, right-aligned under the edit field - sharing the row squeezed the edit
+        self.amr_ram_note = QLabel()
+        self.amr_ram_note.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        palace_form.addWidget(self.amr_ram_note)
+        self.amr_maxdof_edit.textChanged.connect(
+            lambda text: self.amr_ram_note.setText(amr_ram_note_text(text)))
+        self.amr_ram_note.setText(amr_ram_note_text(self.amr_maxdof_edit.text()))
         self.palace_max_ram_edit = add_row(
             palace_form, "Stop Palace if memory exceeds (GB)", "palace_max_ram_gb", "100",
-            tooltip=("Terminates the solver once its reported memory usage exceeds this, "
-                     "then runs S-parameter postprocessing on whatever results were "
+            tooltip=("Terminates the solver once its reported memory usage exceeds this,\n"
+                     "then runs S-parameter postprocessing on whatever results were\n"
                      "already computed, same as a normal completed run."))
         palace_form.addStretch()
         self.tabs.addTab(palace_widget, "Palace")
@@ -3271,6 +3350,7 @@ class MainWindow(MainWindowBase):
     def open_preferences_dialog(self):
         dialog = PreferencesDialog(self)
         dialog.exec()
+        self.mesh_tab.update_amr_ram_note()  # the memory stop limit may have changed
 
 
     # ---------- Stackup preview hooks (permittivity / sheet resistance) ----------
