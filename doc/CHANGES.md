@@ -1,5 +1,13 @@
 
 
+# What's New - September 26, 2026
+
+The **AMR maximum DOF** setting now shows an estimate of the RAM that Palace will need at that mesh size, both on the Mesh tab and in Preferences > Palace. The estimate is based on existing Palace results (about 12 GB per million DOF, up to 15 GB). On the Mesh tab, it turns into a warning when the worst case exceeds the **"Stop Palace if memory exceeds"** limit.
+
+**Stackup Preview**: three or more layers at the same height (e.g. resistor sheets on top of Activ) are now drawn side by side instead of on top of each other, via labels sit near the upper end of the via, and sheet resistance labels show the correct unit (e.g. RHIGH: Rs=1360 Ω, was shown as 1360000 mΩ).
+
+The bundled stackup files now include the latest parameterized gds2palace stackups for EM and thermal simulation: **SG13G2_FEM_200um.xml**, **SG13G2_FEM_200um_passi3D.xml** (conformal passivation around TopMetal2) and **SG13CMOS5L_200um.xml**. Chip and air height can be changed with the **Override stackup Variables** table. The previous SG13G2_100um.xml, SG13G2_200um.xml and SG13G2_nosub.xml are still included, so existing models keep working.
+
 # What's New - September 25, 2026
 
 Added a **Correction for via array cross section** option on the Input Files tab, below via array merging, in setupEM (Palace and Elmer) and setupThermal. Merging fills the gaps between vias with via material, which overestimates the conductivity of a via array; when enabled, the conductivity of each merged via polygon (heat conductivity for thermal models) is multiplied by its fill factor (original via area / merged polygon area). This option requires gds2palace v0.7.0 or later and is hidden with an older version, which would silently ignore it.  
