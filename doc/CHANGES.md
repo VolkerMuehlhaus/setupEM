@@ -2,6 +2,8 @@
 
 # What's New - September 26, 2026
 
+**Result Viewer**: new frequency **Marker** that reads out all curves at the same frequency, shown on the plots and in a table below. Set it by clicking a plot, typing a frequency or using the Left/Right arrow keys; right-click a plot to jump to the (next) min/max.
+
 The **AMR maximum DOF** setting now shows an estimate of the RAM that Palace will need at that mesh size, both on the Mesh tab and in Preferences > Palace. The estimate is based on existing Palace results (about 12 GB per million DOF, up to 15 GB). On the Mesh tab, it turns into a warning when the worst case exceeds the **"Stop Palace if memory exceeds"** limit.
 
 **Stackup Preview**: three or more layers at the same height (e.g. resistor sheets on top of Activ) are now drawn side by side instead of on top of each other, via labels sit near the upper end of the via, and sheet resistance labels show the correct unit (e.g. RHIGH: Rs=1360 Ω, was shown as 1360000 mΩ).
