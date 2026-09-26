@@ -59,7 +59,7 @@ if __package__ in (None, ""):
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -72,7 +72,7 @@ else:
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -119,7 +119,65 @@ def simulation_ports_to_struct (simulation_ports):
 
 
 
+# Palace peak memory (summed over all MPI ranks) vs. degrees of freedom, least-squares
+# fit over 92 existing order-2 Palace runs (8 and 16 MPI ranks) in the gds2palace repo's
+# palace.json results: typical = offset + slope * MDOF; worst case uses the largest
+# per-MDOF ratio seen among those runs. Order 1 needs more memory per DOF, order 3 less
+# (too few runs of either to fit separately).
+_RAM_FIT_OFFSET_GB = 0.5
+_RAM_FIT_GB_PER_MDOF = 11.7
+_RAM_WORST_GB_PER_MDOF = 15.4
+
+# readable on both the light and the dark Windows palette; the note also starts with a
+# warning sign so the over-limit state isn't signalled by color alone. The normal style
+# is explicit rather than "": clearing a widget's stylesheet doesn't reliably undo the
+# color/bold it had set, so the note stayed orange after the warning went away.
+_RAM_NOTE_STYLE_OVER_LIMIT = "color: #d35400; font-weight: bold;"
+_RAM_NOTE_STYLE_NORMAL = "color: palette(window-text); font-weight: normal;"
+
+
+def amr_ram_estimate_gb(max_dof_text):
+    """(typical, worst case) estimated Palace peak RAM in GB for an AMR maximum DOF
+    value, or None if max_dof_text isn't an integer."""
+    try:
+        mdof = int(max_dof_text) / 1e6
+    except ValueError:
+        return None
+    return (_RAM_FIT_OFFSET_GB + _RAM_FIT_GB_PER_MDOF * mdof,
+            _RAM_FIT_OFFSET_GB + _RAM_WORST_GB_PER_MDOF * mdof)
+
+
+def amr_ram_note_text(max_dof_text):
+    """Short one-line RAM estimate for an AMR maximum DOF value ("" if not an integer)."""
+    estimate = amr_ram_estimate_gb(max_dof_text)
+    if estimate is None:
+        return ""
+    typical, worst = estimate
+    return f"~{typical:.0f} GB RAM (up to {worst:.0f} GB)"
+
+
+def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2):
+    """Show the estimated Palace peak RAM for an AMR maximum DOF value in note_label,
+    as a warning if the worst case exceeds the "Stop Palace if memory exceeds" limit."""
+    estimate = amr_ram_estimate_gb(max_dof_text)
+    try:
+        limit = float(ram_limit_text)
+    except ValueError:
+        limit = None
+    over_limit = estimate is not None and limit is not None and estimate[1] > limit
+
+    note = amr_ram_note_text(max_dof_text)
+    order_hint = {1: "more", 3: "less"}.get(order)
+    if note and order_hint:
+        note += f" for N=2, N={order} needs {order_hint}"
+    if over_limit:
+        note = f"⚠ {note} - above {limit:g} GB memory stop limit"
+    note_label.setText(note)
+    note_label.setStyleSheet(_RAM_NOTE_STYLE_OVER_LIMIT if over_limit else _RAM_NOTE_STYLE_NORMAL)
+
+
 # ---------- OTHER TABS ----------
+
 class FrequenciesTab(QWidget):
     def __init__(self, MainWindow):
         super().__init__()
@@ -712,6 +770,8 @@ class PortsTab(QWidget):
         self.target_box.clear()
         self.from_box.clear()
         self.to_box.clear()
+        if metals_list is None:
+            return
         for metal in metals_list.metals:
             self.target_box.addItems([metal.name])
             self.from_box.addItems([metal.name])
@@ -909,6 +969,42 @@ class MeshTab(QWidget):
         self.mesh_group = QGroupBox("Mesh settings")
         self.mesh_layout = QVBoxLayout()
 
+        # Palace-only: settings['filled_metals'] - model conductors as solid
+        # bulk-conductivity volumes instead of the default surface-impedance boundary
+        # condition. Hidden under Elmer mode (setPalaceMode()/setElmerMode() below),
+        # and excluded from Elmer's generated settings dict in create_model_text(),
+        # since gds2palace's filled_metals_em also covers Elmer EM - untested there
+        # so not exposed yet.
+        self.filled_metals_layout = QHBoxLayout()
+        self.label_filled_metals = QLabel("Conductor meshing")
+        self.label_filled_metals.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_filled_metals)
+        self.filled_metals_layout.addWidget(self.label_filled_metals)
+
+        self.filled_metals_box = QComboBox()
+        # wider than the usual edit_width (170) - "Surface impedance (recommended)"/
+        # "Solve inside (volume mesh)" don't fit that without clipping. 254 (not
+        # edit_width) so its right edge lines up with the "Advanced..." button's
+        # right edge on the row below (measured: edit_width 170 + that button's
+        # own ~79px + inter-widget spacing = 254).
+        self.filled_metals_box.setFixedWidth(254)
+        self.filled_metals_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.filled_metals_box.addItems(["Surface impedance (recommended)", "Solve inside (volume mesh)"])
+        self.filled_metals_box.setCurrentIndex(0)
+        self.filled_metals_box.setToolTip(
+            # Qt tooltips don't auto-wrap plain text - only explicit "\n" breaks
+            # a line, so this is wrapped by hand rather than left as one long line.
+            "Surface mesh is the recommended default for microwave frequencies.\n"
+            "Volume mesh gives more accurate conductor loss at low frequency, where\n"
+            "skin depth is no longer small compared to the conductor cross section.\n"
+            "Not recommended as a default: it costs more RAM and simulation time,\n"
+            "and becomes inaccurate at higher frequencies unless the mesh actually\n"
+            "resolves the skin effect."
+        )
+        self.filled_metals_layout.addWidget(self.filled_metals_box)
+        self.filled_metals_layout.addStretch()
+        self.mesh_layout.addLayout(self.filled_metals_layout)
+
         self.refinement_layout = QHBoxLayout()
         self.label2 = QLabel("Mesh refinement at metal edges (µm)")
         self.label2.setFixedWidth(label_width)
@@ -1078,13 +1174,18 @@ class MeshTab(QWidget):
         self.amr_maxdof_edit.setFixedWidth(edit_width)
         self.amr_maxdof_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.amr_maxdof_layout.addWidget(self.amr_maxdof_edit)
+        self.amr_ram_note = QLabel()
+        self.amr_maxdof_layout.addWidget(self.amr_ram_note)
         self.amr_maxdof_layout.addStretch()
         self.AMR_layout.addLayout(self.amr_maxdof_layout)
+        self.amr_maxdof_edit.textChanged.connect(self.update_amr_ram_note)
+        self.mesh_order_box.currentIndexChanged.connect(self.update_amr_ram_note)
+        self.update_amr_ram_note()
 
         def on_show_advanced_changed(value):
             show = (value == "Yes")
             for item in [self.labelAMRgoal1, self.amr_goal_edit,
-                         self.labelAMRmaxdof1, self.amr_maxdof_edit]:
+                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note]:
                 item.setVisible(show)
 
         self.show_advanced_box.currentTextChanged.connect(on_show_advanced_changed)
@@ -1263,6 +1364,15 @@ class MeshTab(QWidget):
             self._refined_cellsize_override = dialog.get_overrides()
             self._update_refined_override_button_label()
 
+    def update_amr_ram_note(self, *_):
+        # the memory stop limit is a preference, so re-read it on every update
+        # (MainWindow also calls this after the Preferences dialog closes)
+        update_amr_ram_estimate(
+            self.amr_maxdof_edit.text(),
+            get_preference(self.MainWindow.APP_NAME, "palace_max_ram_gb", "100"),
+            self.amr_ram_note,
+            order=self.mesh_order_box.currentIndex() + 1)
+
     def on_meshorder_changed(self, value):
     # callback when mesh order changed, so that we can show/hide edit fields
         try:
@@ -1302,6 +1412,7 @@ class MeshTab(QWidget):
         saved_values ["refined_cellsize_override"] = self._refined_cellsize_override
 
         saved_values ["order"] = self.mesh_order_box.currentIndex()+1
+        saved_values ["filled_metals"] = self.filled_metals_box.currentIndex() == 1
 
         try:
             value = float(self.cells_lambda_edit.text())
@@ -1428,6 +1539,7 @@ class MeshTab(QWidget):
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
+        self.filled_metals_box.setCurrentIndex(1 if saved_values.get("filled_metals", False) else 0)
 
         if saved_values.get("iterative", False):
             self.solver_box.setCurrentIndex(1)
@@ -1548,6 +1660,15 @@ class CreateModelTab(CreateModelTabBase):
         self._init_status_state()
         self.apply_preference_visibility()
 
+        # Polls the real memory footprint of the running Palace process(es) - see
+        # _poll_palace_memory()/_measure_palace_memory_gb() below. Started in run_model()
+        # right after the Palace process launches; self-stops (in _poll_palace_memory())
+        # once self.process is no longer running, so no separate wiring is needed in
+        # on_finished()/on_process_error()/terminate_run().
+        self._ram_poll_timer = QTimer(self)
+        self._ram_poll_timer.setInterval(5000)
+        self._ram_poll_timer.timeout.connect(self._poll_palace_memory)
+
     def apply_preference_visibility(self):
         # Called from __init__, from MainWindow.setPalaceMode()/setElmerMode() (mode
         # switch also affects status_line visibility), and from MainWindow's Preferences
@@ -1563,28 +1684,21 @@ class CreateModelTab(CreateModelTabBase):
     # Regexes matched against real Palace 0.16.0 stdout (see palace-x86_64.bin console
     # output), one AMR iteration's worth of an 8-port sweep:
     #   "Running with 16 MPI processes"
-    #   "Estimated current per-rank memory usage is: Min. 84.8M, Max. 87.1M, Avg. 85.7M, Total 1.3G"
-    #   "Estimated peak per-rank memory usage is: Min. 1.5G, Max. 1.6G, Avg. 1.5G, Total 24.2G"
     #   "Sweeping excitation index 2 (2/8):"
     #   "It 1/1: ω/2π = 9.300e+01 GHz (total elapsed time = 1.52e+01 s, solve 1/8)"
     #   "Completed 1 iteration of adaptive mesh refinement (AMR):"
-    # "Estimated ... memory usage" appears both early (current, post mesh-partition) and
-    # again per AMR iteration (peak); the parser just keeps the latest value seen, whichever
-    # wording it came from. Deliberately per-rank, not per-node: per-rank Total is the sum
-    # of every individual rank's own estimate, i.e. the actual total memory footprint of the
-    # whole job, regardless of how ranks are distributed across nodes (per-node Total is only
-    # numerically the same thing when everything happens to run on a single node).
     # "Sweeping excitation" marks a port in a uniform sweep; "Adding excitation" is the
     # equivalent during PROM/adaptive offline construction (Beginning PROM construction
     # offline phase: / Adding excitation index 1 (1/2):) - both mean "now on port N/M".
+    #
+    # Memory ("Est. memory" on the status line, and the "Stop Palace if memory exceeds"
+    # kill switch) is NOT parsed from Palace's own self-reported "Estimated .../rank
+    # memory usage" log lines - real-world comparisons showed that figure can be
+    # inaccurate. Instead self._status_mem_gb is measured directly from the OS by
+    # _poll_palace_memory()/_measure_palace_memory_gb() (below), on a QTimer, summing the
+    # real RSS of the actual palace-x86_64 process(es) (one per MPI rank) - the same
+    # process name _kill_palace_process_for_ram_limit() already pkills by.
     _RE_MPI = re.compile(r"Running with (\d+) MPI processes")
-    # "current" vs "peak" is NOT current-vs-forecast: real testing (AMR run, limit set
-    # to 4GB) showed "current" stays low while "peak" reports each iteration's real,
-    # already-incurred high-water mark (3.79 -> 5.08 -> 9.85 GB) - a current-only RAM
-    # check never saw those numbers and never fired. _check_ram_limit() now checks
-    # self._status_mem_gb, the same latest-of-either-kind value already shown on the
-    # live status line, instead of singling out one kind - see _parse_palace_status_line().
-    _RE_MEM_TOTAL = re.compile(r"Estimated (?:current|peak) per-rank memory usage is:.*Total\s+([\d.]+)([MG])")
     _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
@@ -1664,14 +1778,6 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
-        m = self._RE_MEM_TOTAL.search(line)
-        if m:
-            value, unit = float(m.group(1)), m.group(2)
-            self._status_mem_gb = value / 1024 if unit == "M" else value
-            self._check_ram_limit()
-            self._update_status_line()
-            return
-
         m = self._RE_EXCITATION.search(line)
         if m:
             self._status_port_cur = int(m.group(1))
@@ -1725,16 +1831,83 @@ class CreateModelTab(CreateModelTabBase):
                 self._update_status_line()
                 return
 
+    def _poll_palace_memory(self):
+        """QTimer callback (self._ram_poll_timer, every 5s) started in run_model()
+        right after the Palace process launches. Self-stopping: once self.process is
+        no longer running, stops the timer and returns, so on_finished()/
+        on_process_error()/terminate_run() don't need to separately stop it.
+
+        Measures the real RSS of the running palace-x86_64 process(es) via
+        _measure_palace_memory_gb() instead of trusting Palace's own self-reported
+        "Estimated .../rank memory usage" log lines, which real-world comparisons
+        showed can be inaccurate. If no such process can be found right now (e.g.
+        Palace is actually running on a remote host via run_palace_remote, where this
+        machine has no visibility into its process tree at all), self._status_mem_gb
+        is simply left as-is - the status line shows "n/a" rather than a guessed or
+        stale number, and _check_ram_limit() is not called for that tick.
+        """
+        if self.process.state() != QProcess.Running:
+            self._ram_poll_timer.stop()
+            return
+        mem_gb = self._measure_palace_memory_gb()
+        if mem_gb is not None:
+            self._status_mem_gb = mem_gb
+            self._check_ram_limit()
+            self._update_status_line()
+
+    def _measure_palace_memory_gb(self):
+        """Return the summed RSS, in GB, of every palace-x86_64 process currently
+        running (one per MPI rank - apptainer exec ~/palace_NNN.sif palace -np N
+        config.json), or None if none can be found or the query itself fails.
+        Matches on the process's full command line ("args"), the same way
+        _kill_palace_process_for_ram_limit() already pkills it (pkill -f
+        palace-x86_64), rather than the kernel-truncated 15-char "comm" name (real
+        binary name observed on a live run: palace-x86_64.bin under
+        /opt/palace/bin/, launched via mpirun -n N under hydra_pmi_proxy).
+
+        Deliberately does NOT filter with awk/grep on the ps command line itself:
+        wsl.exe reconstructs and re-parses everything after "--" through an extra
+        shell layer, which silently drops "$"-prefixed tokens like awk's "$1"
+        before awk ever sees them (confirmed directly - even single-quoted "$1"
+        came back empty). So ps's raw, unfiltered output is fetched instead, and
+        the per-process filtering/summing happens here in Python instead, which
+        sidesteps that quoting layer entirely.
+
+        Never raises: a failed/timed-out query just means this poll tick reports
+        nothing, the same as no matching process being found.
+        """
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["wsl.exe", "--", "bash", "-lc", "ps -eo rss,args --no-headers"],
+                    capture_output=True, text=True, timeout=5, check=False)
+            else:
+                result = subprocess.run(
+                    ["ps", "-eo", "rss,args", "--no-headers"],
+                    capture_output=True, text=True, timeout=5, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+        total_kb = 0
+        for line in result.stdout.splitlines():
+            rss_str, _, args = line.strip().partition(" ")
+            if "palace-x86_64" not in args:
+                continue
+            try:
+                total_kb += int(rss_str)
+            except ValueError:
+                continue
+        return total_kb / 1024 / 1024 if total_kb > 0 else None
+
     def _check_ram_limit(self):
-        """Called every time self._status_mem_gb updates - the same latest-
-        of-either-("current"-or-"peak")-kind value already shown on the live
-        status line (see _parse_palace_status_line()/_update_status_line()).
-        If it exceeds Preferences > Palace's "Stop Palace if memory exceeds"
-        limit, kill the solver and let run_sim's own postprocessing step run
-        on whatever it already computed (see
-        _kill_palace_process_for_ram_limit()). Guarded by _ram_kill_triggered
-        so this only ever fires once per run, even though more memory lines
-        may still arrive before the kill actually takes effect.
+        """Called every time _poll_palace_memory() gets a real measurement (see
+        _measure_palace_memory_gb()) - the same latest value already shown on the
+        live status line (see _update_status_line()). If it exceeds Preferences >
+        Palace's "Stop Palace if memory exceeds" limit, kill the solver and let
+        run_sim's own postprocessing step run on whatever it already computed (see
+        _kill_palace_process_for_ram_limit()). Guarded by _ram_kill_triggered so this
+        only ever fires once per run, even though more polls may still land before
+        the kill actually takes effect.
         """
         if self._ram_kill_triggered or self._status_mem_gb is None:
             return
@@ -2297,6 +2470,10 @@ class CreateModelTab(CreateModelTabBase):
                     # start simulation
                     self.process.start(".//run_sim")
 
+                # Start polling the real Palace process memory now that it's launched -
+                # see _poll_palace_memory()/_measure_palace_memory_gb().
+                self._ram_poll_timer.start()
+
             else:
                 # Elmer mode
                 self.log_area.appendPlainText('Setting work directory ' + run_path)
@@ -2441,14 +2618,48 @@ class ModelEditorTab(QWidget):
             # leak into an Elmer-mode script; the synthesized settings['fdump'] line
             # (below, after special_keylist) is emitted instead when the checkbox is on.
             ignore_list.append('fdump')
+            # filled_metals (Conductor meshing) is Palace-only in the GUI (its combo box
+            # is hidden under Elmer mode) - gds2palace's filled_metals_em actually also
+            # covers Elmer EM, but that path is untested from setupEM so far, so exclude
+            # it here too, same as 'iterative' is excluded under Palace mode above,
+            # rather than let a value set earlier in Palace mode leak into an Elmer script.
+            ignore_list.append('filled_metals')
+            # an older gds2palace supports the via fill factor correction for Palace only
+            if 'elmer' not in FILL_FACTOR_CORRECTION_SOLVERS:
+                ignore_list.append('fill_factor_correction')
 
         if forExport:
             # these commands are only used within this GUI application to control gmsh
             ignore_list.extend(['preview_only','no_preview'])
 
-        for key in saved_values.keys():
-            if not key in special_keylist:
-                if not key in ignore_list:
+        # AMR settings only matter for Palace with at least one AMR iteration
+        if self.MainWindow.ElmerMode:
+            ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof'])
+        elif int(saved_values.get('adaptive_mesh_iterations', 0)) == 0:
+            ignore_list.extend(['amr_tol', 'amr_max_dof'])
+
+        # write settings grouped by topic; keys not listed here end up in "Other",
+        # so a new setting is never silently dropped from the script
+        setting_groups = [
+            ("Input files", ['GdsFile', 'SubstrateFile', 'variable_overrides', 'cellname', 'purpose',
+                             'preprocess_gds', 'merge_polygon_size', 'fill_factor_correction']),
+            ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
+            ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
+                      'meshsize_max', 'order', 'filled_metals']),
+            ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around']),
+            ("Solver", ['iterative', 'ELMER_MPI_THREADS']),
+            ("Script control", ['preview_only', 'no_preview']),
+        ]
+        grouped_keys = {key for _, keys in setting_groups for key in keys}
+        setting_groups.append(("Other", [key for key in saved_values if key not in grouped_keys]))
+
+        for group_name, keys in setting_groups:
+            keys = [key for key in keys
+                    if key in saved_values and key not in special_keylist and key not in ignore_list]
+            if keys:
+                add_text(f"\n# ---- {group_name} ----")
+                for key in keys:
                     add_key(key)
 
         if self.MainWindow.ElmerMode and bool(saved_values.get('fdump_enabled')):
@@ -2605,7 +2816,8 @@ class PreferencesDialog(QDialog):
             label.setFixedWidth(label_width)
             row.addWidget(label)
             edit = QLineEdit(str(get_preference(self.app_name, key, default)))
-            edit.setStyleSheet(EDIT_STYLE_REQUIRED)
+            # every preference is a default, not a required project input, so all fields look alike
+            edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
             row.addWidget(edit)
             if tooltip:
                 label.setToolTip(tooltip)
@@ -2676,7 +2888,6 @@ class PreferencesDialog(QDialog):
         self.margin_edit = add_row(mesh_form, "Dielectric stackup oversize margin (µm)", "margin", "200")
         self.air_around_edit = add_row(mesh_form, "Air layer thickness around stackup (µm)", "air_around", "")
         self.air_around_edit.setPlaceholderText("same as dielectric margin")
-        self.air_around_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         mesh_form.addStretch()
         self.tabs.addTab(mesh_widget, "Mesh")
 
@@ -2690,10 +2901,17 @@ class PreferencesDialog(QDialog):
                      "(Norm/Max/Mean indicators) - not a change in S-parameters "
                      "between AMR iterations"))
         self.amr_maxdof_edit = add_row(palace_form, "AMR maximum DOF", "amr_max_dof", "2000000")
+        # own line, right-aligned under the edit field - sharing the row squeezed the edit
+        self.amr_ram_note = QLabel()
+        self.amr_ram_note.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        palace_form.addWidget(self.amr_ram_note)
+        self.amr_maxdof_edit.textChanged.connect(
+            lambda text: self.amr_ram_note.setText(amr_ram_note_text(text)))
+        self.amr_ram_note.setText(amr_ram_note_text(self.amr_maxdof_edit.text()))
         self.palace_max_ram_edit = add_row(
             palace_form, "Stop Palace if memory exceeds (GB)", "palace_max_ram_gb", "100",
-            tooltip=("Terminates the solver once its reported memory usage exceeds this, "
-                     "then runs S-parameter postprocessing on whatever results were "
+            tooltip=("Terminates the solver once its reported memory usage exceeds this,\n"
+                     "then runs S-parameter postprocessing on whatever results were\n"
                      "already computed, same as a normal completed run."))
         palace_form.addStretch()
         self.tabs.addTab(palace_widget, "Palace")
@@ -2722,6 +2940,7 @@ class PreferencesDialog(QDialog):
         viewer_label.setFixedWidth(label_width)
         viewer_row.addWidget(viewer_label)
         self.viewer_3d_combo = QComboBox()
+        self.viewer_3d_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.viewer_3d_combo.addItem("Built-in", "builtin")
         self.viewer_3d_combo.addItem("ParaView", "paraview")
         current_viewer = get_preference(self.app_name, "viewer_3d", "builtin")
@@ -2741,15 +2960,12 @@ class PreferencesDialog(QDialog):
         self.simplify_max_hole_area_edit = add_row(
             simplify_form, "Maximum cutout area to remove (µm²)", "simplify_max_hole_area", "1")
         self.simplify_max_hole_area_edit.setPlaceholderText("blank = remove all cutouts")
-        self.simplify_max_hole_area_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_fill_maxsize_edit = add_row(
             simplify_form, "Maximum floating fill size (µm)", "simplify_fill_maxsize", "20")
         self.simplify_fill_maxsize_edit.setPlaceholderText("blank = no size limit")
-        self.simplify_fill_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_excluded_layers_edit = add_row(
             simplify_form, "Layers excluded from simplification", "simplify_excluded_layers", "")
         self.simplify_excluded_layers_edit.setPlaceholderText("e.g. 10,11 - blank = none")
-        self.simplify_excluded_layers_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.simplify_merge_per_layer_checkbox = QCheckBox("Merge polygons per layer (final step)")
         self.simplify_merge_per_layer_checkbox.setChecked(
             get_preference_bool(self.app_name, "simplify_merge_per_layer", True))
@@ -2990,6 +3206,9 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
         self.mesh_tab.Elmer_group.setVisible(False)
+        self.mesh_tab.label_filled_metals.setVisible(True)
+        self.mesh_tab.filled_metals_box.setVisible(True)
+        self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible
@@ -3011,6 +3230,9 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
+        self.mesh_tab.label_filled_metals.setVisible(False)
+        self.mesh_tab.filled_metals_box.setVisible(False)
+        self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
         # update mesh settings that are not always visible
@@ -3071,7 +3293,7 @@ class MainWindow(MainWindowBase):
     # ---------- Native config (*.simcfg) / Python import hooks ----------
     def apply_native_config_data(self, data):
         # update ports, they are separate from the other internal data
-        self.ports_tab.update_port_from_import(data.get("ports"))
+        self.ports_tab.update_port_from_import(data.get("ports", []))
         # restore simulator mode (not part of saved_values, see native_config_extra_struct)
         if data.get("elmer_mode", False):
             self.setElmerMode()
@@ -3128,6 +3350,7 @@ class MainWindow(MainWindowBase):
     def open_preferences_dialog(self):
         dialog = PreferencesDialog(self)
         dialog.exec()
+        self.mesh_tab.update_amr_ram_note()  # the memory stop limit may have changed
 
 
     # ---------- Stackup preview hooks (permittivity / sheet resistance) ----------
@@ -3225,6 +3448,16 @@ def parse_python_ports_definitions (file_path):
 
 def main():
     app = QApplication(sys.argv)
+
+    # Pin a light color scheme so the explicit light backgrounds set on
+    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
+    # auto-palette on accounts where Windows' per-user dark-mode setting is
+    # on (PySide6 6.5+ only; older versions just skip this and rely on the
+    # explicit "color:" rules already set on those field stylesheets).
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:
+        pass
 
     if sys.platform.startswith("win"):
         app.setStyle(QStyleFactory.create("Windows"))

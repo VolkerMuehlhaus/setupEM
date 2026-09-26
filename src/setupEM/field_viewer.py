@@ -61,10 +61,10 @@ from pyvistaqt import QtInteractor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
-    QSlider, QComboBox, QLineEdit, QStyleFactory,
+    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog, QMenu,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QColor
 
 # __package__ is None/"" when this file is run directly rather than imported as part
 # of the setupEM package, so relative import fails - same dual-mode pattern used
@@ -201,25 +201,60 @@ _VECTOR_ARROW_MIN_LENGTH_RATIO = 0.15
 _VECTOR_ARROW_DECIMATION_RATIO = 0.25
 
 
-def _load_full_mesh(file_path):
-    """Read file_path (.pvd/.pvtu/.vtu) into one pv.UnstructuredGrid/PolyData.
+def _load_full_mesh(file_path, cycle_index=None):
+    """Read file_path (.pvd/.pvtu/.vtu) into one pv.UnstructuredGrid/PolyData,
+    plus which cycle (0-based) was used and how many cycles the file has.
 
-    pv.read() on a .pvtu/.vtu returns the dataset directly. On a .pvd (Palace's
-    field-dump time/cycle collection), it returns a pv.MultiBlock instead - one
-    block per cycle it decided to expose (confirmed empirically: Palace's own
-    .pvd only ever carries the most recent solved cycle, so this is a 1-block
-    MultiBlock in practice, not a true spatial multi-block split). Take the last
-    block (most recent cycle) rather than combining blocks, since different
-    cycles are different solve states, not spatial partitions - combining them
-    would be physically meaningless.
+    pv.read() on a .pvtu/.vtu returns the dataset directly - always exactly
+    one cycle (cycle_index 0, num_cycles 1).
+
+    A .pvd (Palace's field-dump time/cycle collection) is a small XML index
+    of one <DataSet>/timestep per solved cycle - a multi-frequency Palace
+    "fdump" run (Solver.Driven.Samples with more than one Freq entry) writes
+    one cycle per solved frequency (confirmed empirically against a real
+    2-frequency run: 2 <DataSet> entries, 2 pv.get_reader().time_values).
+    Reading a .pvd needs pv.get_reader()'s explicit time-series API
+    (PVDReader.time_values / set_active_time_value()) - NOT plain pv.read(),
+    which silently collapses a .pvd to whichever single time step happens to
+    be a freshly constructed reader's default (confirmed empirically: the
+    FIRST cycle, not the last, and not configurable through pv.read() at
+    all). That silent, unconfigurable collapse - not a genuine "1-block
+    MultiBlock" as this function used to assume - is what made every other
+    cycle unreachable before cycle_index existed.
+
+    cycle_index (0-based) selects which cycle to return; None (the default)
+    picks the FIRST one, matching the "Cycle 1" default the Cycle combo/
+    --cycle both start from.
+
+    Raises ValueError if cycle_index is out of range for the file's actual
+    number of cycles.
     """
-    data = pv.read(file_path)
-    if isinstance(data, pv.MultiBlock):
-        for block in reversed(data):
-            if block is not None:
-                return block
-        raise ValueError(f"No readable block found in {file_path}")
-    return data
+    if os.path.splitext(file_path)[1].lower() == ".pvd":
+        reader = pv.get_reader(file_path)
+        time_values = reader.time_values
+        num_cycles = len(time_values)
+        if num_cycles == 0:
+            raise ValueError(f"No cycles found in {file_path}")
+        if cycle_index is None:
+            cycle_index = 0
+        elif not (0 <= cycle_index < num_cycles):
+            raise ValueError(
+                f"cycle {cycle_index + 1} out of range for {file_path} "
+                f"(has {num_cycles} cycle(s))")
+        reader.set_active_time_value(time_values[cycle_index])
+        data = reader.read()
+        if isinstance(data, pv.MultiBlock):
+            for block in reversed(data):
+                if block is not None:
+                    return block, cycle_index, num_cycles
+            raise ValueError(
+                f"No readable block found in {file_path} at cycle {cycle_index + 1}")
+        return data, cycle_index, num_cycles
+
+    if cycle_index not in (None, 0):
+        raise ValueError(
+            f"cycle {cycle_index + 1} out of range for {file_path} (has 1 cycle)")
+    return pv.read(file_path), 0, 1
 
 
 def _attach_complex_e_magnitude(mesh, source):
@@ -242,7 +277,7 @@ def _attach_complex_e_magnitude(mesh, source):
     mesh["E_magnitude"] = np.linalg.norm(per_component, axis=1)
 
 
-def _exact_clip_by_axis(mesh, axis, position, sign):
+def _exact_clip_by_axis(mesh, axis, position, sign, slice_only=False):
     """Exact geometric clip on an axis-aligned plane (pv.DataSet.clip()) - cuts
     every cell straddling the plane and interpolates new points to build a
     perfectly flat cut face. Precise, but expensive on a large mesh: ~22s on a
@@ -257,9 +292,24 @@ def _exact_clip_by_axis(mesh, axis, position, sign):
     was tried and rejected - it produced a visibly jagged/faceted cut face on
     this mesh's coarser regions instead of a clean flat one, which matters
     more here than raw speed for an inspection tool actually being looked at.
+
+    slice_only=True (the "2D plane only" checkbox) returns pv.DataSet.slice()
+    instead - the bare flat cross-section where the plane intersects the
+    mesh, with nothing else. clip() keeps the entire remaining 3D solid on
+    one side of the plane, so its own far surfaces - and, for a hollow
+    conductor, whatever lies behind the hole where its interior is empty -
+    can render as if they were part of the cut face, misleadingly showing
+    background geometry that plane didn't actually cut through. A slice has
+    no such backdrop: solid where the plane crosses material, a real gap
+    where it crosses empty/hollow space, nothing behind it either way. sign
+    is meaningless for a slice (there's no "side" to keep), so it's ignored
+    in this branch - accepted anyway so callers can pass the same cache
+    key/thread signature regardless of which mode is active.
     """
     base_normal = _AXIS_NORMAL[axis]
     origin = tuple(position if i == list(base_normal).index(1.0) else 0.0 for i in range(3))
+    if slice_only:
+        return mesh.slice(normal=base_normal, origin=origin)
     normal = tuple(n * sign for n in base_normal)
     return mesh.clip(normal=normal, origin=origin)
 
@@ -274,34 +324,38 @@ class _ClipWorker(QThread):
     object either thread can race on, regardless of timing or mesh size.
 
     Emits exactly one of succeeded/failed, tagged with the (axis, position,
-    sign, generation) it was computed for, so a result that's no longer
-    relevant (the user has since moved to a different axis/position/sign, or
-    loaded a different file entirely - see FieldViewerWindow._mesh_generation)
-    can be told apart from one that's still current - see
-    FieldViewerWindow._on_clip_succeeded(), which compares this against the
-    currently-desired key rather than trusting an opaque "is this the latest
-    request" counter, so a result stays usable even if something unrelated
-    (opacity, color scale, ...) redrew in the meantime while this was still
-    computing.
+    sign, slice_only, generation) it was computed for, so a result that's no
+    longer relevant (the user has since moved to a different axis/position/
+    sign/mode, or loaded a different file entirely - see
+    FieldViewerWindow._mesh_generation) can be told apart from one that's
+    still current - see FieldViewerWindow._on_clip_succeeded(), which
+    compares this against the currently-desired key rather than trusting an
+    opaque "is this the latest request" counter, so a result stays usable
+    even if something unrelated (opacity, color scale, ...) redrew in the
+    meantime while this was still computing.
     """
-    succeeded = Signal(object, str, float, int, int)  # (clipped_mesh, axis, position, sign, generation)
-    failed = Signal(str, str, float, int, int)        # (error_message, axis, position, sign, generation)
+    succeeded = Signal(object, str, float, int, bool, int)  # (clipped_mesh, axis, position, sign, slice_only, generation)
+    failed = Signal(str, str, float, int, bool, int)        # (error_message, axis, position, sign, slice_only, generation)
 
-    def __init__(self, mesh, axis, position, sign, generation):
+    def __init__(self, mesh, axis, position, sign, slice_only, generation):
         super().__init__()
         self._mesh = mesh
         self._axis = axis
         self._position = position
         self._sign = sign
+        self._slice_only = slice_only
         self._generation = generation
 
     def run(self):
         try:
-            result = _exact_clip_by_axis(self._mesh, self._axis, self._position, self._sign)
+            result = _exact_clip_by_axis(
+                self._mesh, self._axis, self._position, self._sign, self._slice_only)
         except Exception as exc:
-            self.failed.emit(str(exc), self._axis, self._position, self._sign, self._generation)
+            self.failed.emit(
+                str(exc), self._axis, self._position, self._sign, self._slice_only, self._generation)
             return
-        self.succeeded.emit(result, self._axis, self._position, self._sign, self._generation)
+        self.succeeded.emit(
+            result, self._axis, self._position, self._sign, self._slice_only, self._generation)
 
 
 def _array_magnitudes(values):
@@ -419,6 +473,19 @@ class FieldViewerWindow(QDialog):
         self._vector_actor = None
         self._current_axis = "Z"
         self._load_error = None
+        # Which cycle of a multi-cycle .pvd (one per solved frequency, for a
+        # multi-frequency Palace fdump run) to display - see _load_full_mesh().
+        # None means "this file's own first cycle" (Cycle 1). Reset to None in
+        # _switch_to_file() so a cycle index from one file never leaks into a
+        # different file that may have a different (or no) cycle at that
+        # position.
+        self._cycle_index = None
+        self._num_cycles = 1
+        # Indices (0-based) of cycles already discovered to have no
+        # point-data at all (see _load_mesh()) - labeled "geometry" in
+        # self.cycle_combo instead of "Cycle N" once visited. Reset in
+        # _switch_to_file() since a different file's cycles are unrelated.
+        self._cycles_without_data = set()
         # Which side of the clip plane is kept, per axis - +1 (default, matches
         # the original behavior) keeps the negative side; -1 keeps the positive
         # side instead. Updated by _set_view() to match whichever axis-view
@@ -437,6 +504,19 @@ class FieldViewerWindow(QDialog):
         # leaves the scene briefly actor-less, and PyVista's own "reset camera if
         # this looks like the first mesh" heuristic was firing on every redraw.
         self._camera_needs_reset = True
+
+        # Colors for mesh edges / vector arrows / scalar-bar (legend) text,
+        # each changeable via a small swatch button next to its checkbox in
+        # the Display group (see _build_ui()/_pick_color()) - independent of
+        # the per-mesh state above, so they stay put across result-file
+        # switches. Defaults: black matches PyVista's own default edge_color
+        # (unchanged look for "Overlay mesh"); dimgray matches this viewer's
+        # original hardcoded arrow color (see _add_vector_glyphs()); black
+        # for legend text since the Display group's white control backgrounds
+        # make black the more legible default here.
+        self._edge_color = "black"
+        self._arrow_color = "dimgray"
+        self._legend_text_color = "black"
 
         # Background clip computation state - see _exact_clip_by_axis()/
         # _ClipWorker's docstrings for why the clip itself always runs off the
@@ -558,6 +638,22 @@ class FieldViewerWindow(QDialog):
             self.file_combo = None
             self.include_iterations_cb = None
 
+        # Only shown when the currently loaded file actually has >1 cycles
+        # (e.g. a multi-frequency Palace fdump .pvd, one <DataSet> per solved
+        # frequency) - see _load_full_mesh()'s (cycle_index, num_cycles)
+        # return values. Built unconditionally, unlike file_group above,
+        # since different Result Files can have different cycle counts -
+        # visibility is toggled in _load_mesh() on every load.
+        self.cycle_group = QGroupBox("Cycle")
+        cycle_layout = QVBoxLayout()
+        self.cycle_combo = QComboBox()
+        self.cycle_combo.currentIndexChanged.connect(self._on_cycle_changed)
+        cycle_layout.addWidget(self.cycle_combo)
+        cycle_layout.addStretch()
+        self.cycle_group.setLayout(cycle_layout)
+        self.cycle_group.setVisible(False)
+        controls_layout.addWidget(self.cycle_group, 1)
+
         # Clip Plane: purely "where/whether to cut" - rendering options that
         # apply regardless of clipping (opacity, mesh overlay) live in their
         # own Display group instead, rather than being bundled in here just
@@ -638,18 +734,46 @@ class FieldViewerWindow(QDialog):
         self.arrow_size_slider.sliderReleased.connect(self._schedule_redraw)
         display_layout.addWidget(self.arrow_size_slider)
 
+        # Each row below pairs a checkbox with a small swatch button (in front
+        # of it, per the requested layout) that opens a color picker for the
+        # thing that checkbox toggles - mesh edges, vector arrows, and the
+        # scalar-bar legend text, respectively. All three swatches share
+        # _pick_color()/_style_swatch_button(); only the swatch and the state
+        # attribute it edits differ per row.
+        def _swatch_row(attr_name, initial_color, checkbox):
+            swatch = QPushButton()
+            swatch.setFixedSize(18, 18)
+            swatch.setToolTip("Choose color")
+            # Without these, Qt treats this as the dialog's default button and
+            # fires it on Enter from any focused widget - same issue/fix as
+            # clim_reset_btn above.
+            swatch.setAutoDefault(False)
+            swatch.setDefault(False)
+            self._style_swatch_button(swatch, initial_color)
+            swatch.clicked.connect(lambda: self._pick_color(attr_name, swatch))
+            row = QHBoxLayout()
+            row.addWidget(swatch)
+            row.addWidget(checkbox)
+            row.addStretch()
+            display_layout.addLayout(row)
+
         # Only meaningful (and enabled) when the selected Field array is itself
         # a vector (e.g. E_real/E_imag/B_real/B_imag/S) rather than a scalar
         # (e.g. E_magnitude/U_e/temperature) - see _update_vector_checkbox_state().
         self.show_vectors_cb = QCheckBox("Show arrows")
         self.show_vectors_cb.setEnabled(False)
         self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
-        display_layout.addWidget(self.show_vectors_cb)
+        _swatch_row("_arrow_color", self._arrow_color, self.show_vectors_cb)
 
         self.show_edges_cb = QCheckBox("Overlay mesh")
         self.show_edges_cb.setChecked(False)
         self.show_edges_cb.toggled.connect(self._on_redraw_needed)
-        display_layout.addWidget(self.show_edges_cb)
+        _swatch_row("_edge_color", self._edge_color, self.show_edges_cb)
+
+        self.show_legend_cb = QCheckBox("Show legend")
+        self.show_legend_cb.setChecked(True)
+        self.show_legend_cb.toggled.connect(self._on_redraw_needed)
+        _swatch_row("_legend_text_color", self._legend_text_color, self.show_legend_cb)
 
         display_layout.addStretch()
         display_group.setLayout(display_layout)
@@ -715,6 +839,39 @@ class FieldViewerWindow(QDialog):
                 view_grid.addWidget(btn, row, col)
         view_layout = QVBoxLayout()
         view_layout.addLayout(view_grid)
+        # Orthographic (parallel) projection toggle - independent of which
+        # axis button was last clicked, since an X/Y/Z button always forces
+        # this on anyway (see _set_view()); this checkbox exists so the
+        # *current* view (including a freely-rotated one) can be switched
+        # between perspective and orthographic on demand, and so the "this
+        # view is flat, no faked distance" state is visible at a glance
+        # rather than being an invisible side effect of the last axis button
+        # pressed.
+        self.orthographic_cb = QCheckBox("Parallel projection")
+        self.orthographic_cb.setToolTip(
+            "Parallel projection: no size distortion by distance from the camera. "
+            "Always on for the +/-X/Y/Z views above; check this to also use it for a "
+            "freely-rotated view.")
+        self.orthographic_cb.toggled.connect(self._on_orthographic_toggled)
+        view_layout.addWidget(self.orthographic_cb)
+        # "2D plane only" - see _exact_clip_by_axis()'s docstring for why this
+        # exists: the default clip keeps the remaining 3D solid, whose own far
+        # surfaces (and any hollow conductor interior) can render behind the
+        # cut face as if they belonged to it - misleading, since that's
+        # whatever geometry happens to sit further along the view direction,
+        # not anything the plane itself cuts through. Checking this switches
+        # to a true flat cross-section (mesh.slice()) instead, with a real gap
+        # wherever the plane crosses empty/hollow space rather than a
+        # look-through to the background. Only has an effect while Clip
+        # enabled is also checked - see _redraw()'s early return otherwise.
+        self.slice_only_cb = QCheckBox("2D plane only")
+        self.slice_only_cb.setToolTip(
+            "Show only the flat cross-section where the clip plane cuts the mesh, "
+            "instead of the remaining 3D solid - avoids seeing through a hollow "
+            "conductor's interior to whatever geometry is behind it. Requires "
+            "Clip enabled.")
+        self.slice_only_cb.toggled.connect(self._on_redraw_needed)
+        view_layout.addWidget(self.slice_only_cb)
         view_layout.addStretch()
         view_group.setLayout(view_layout)
         controls_layout.addWidget(view_group, 1)
@@ -748,6 +905,11 @@ class FieldViewerWindow(QDialog):
         else:
             self.plotter = QtInteractor(self)
             main_layout.addWidget(self.plotter, 1)
+            # Right-click over the 3D view for a discoverable equivalent of
+            # the Ctrl+C shortcut below - same self.plotter.grab() capture,
+            # just reachable without knowing the shortcut exists.
+            self.plotter.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.plotter.customContextMenuRequested.connect(self._show_plotter_context_menu)
 
         # Ctrl+C copies the 3D view itself (not the control panels) to the
         # clipboard as an image - window-scoped (default QShortcut context) so
@@ -755,6 +917,12 @@ class FieldViewerWindow(QDialog):
         # convention as layout_preview.py/result_viewer.py/stackupEditor.py.
         QShortcut(QKeySequence.Copy, self).activated.connect(
             lambda: QApplication.clipboard().setPixmap(self.plotter.grab()))
+
+    def _show_plotter_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction("Copy to Clipboard")
+        if menu.exec(self.plotter.mapToGlobal(pos)):
+            QApplication.clipboard().setPixmap(self.plotter.grab())
 
     # ---------- Result file picker ----------
 
@@ -827,8 +995,26 @@ class FieldViewerWindow(QDialog):
         # control in this window, this is a good reason to re-fit the camera
         # rather than keep the previous file's pan/zoom/rotation.
         self._camera_needs_reset = True
+        # Default to the NEW file's own first cycle - a cycle index picked on
+        # the old file has no guaranteed correspondence here (different files
+        # can have different cycle counts), see __init__'s self._cycle_index.
+        self._cycle_index = None
+        self._cycles_without_data = set()
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
+
+    def _on_cycle_changed(self, index):
+        """Switch which solved cycle (e.g. frequency, for a multi-frequency
+        Palace fdump run) of the SAME result file is displayed. Deliberately
+        does not reset the camera or the clip-plane slider position, unlike
+        _switch_to_file(): mesh geometry is identical across cycles of one
+        file - only the field values differ - so there is nothing to re-fit
+        or re-range."""
+        if index < 0 or index == self._cycle_index:
+            return
+        self._cycle_index = index
+        self._load_mesh(preserve_selection=True)
+        self._schedule_redraw()
 
     def _on_include_iterations_toggled(self, checked):
         """Swap the Result File combo between the default final-pass-only list and
@@ -845,7 +1031,16 @@ class FieldViewerWindow(QDialog):
 
     # ---------- Mesh loading ----------
 
-    def _load_mesh(self):
+    def _load_mesh(self, preserve_selection=False):
+        """Load self._full_mesh from self.file_path/self._cycle_index.
+
+        preserve_selection=True (only passed by _on_cycle_changed()) keeps
+        the current array/color-by selection instead of recomputing a
+        default - array names are the same across cycles of one file, only
+        the underlying values/ranges differ per cycle. Every other caller
+        (initial load, _switch_to_file()) leaves this False, unchanged from
+        before this parameter existed.
+        """
         self.setWindowTitle(f"Field Viewer - {self._file_labels[self.file_path]}")
         # Bump the generation before anything else below - see __init__'s
         # self._mesh_generation. A cached/in-flight clip result belongs to the
@@ -860,21 +1055,58 @@ class FieldViewerWindow(QDialog):
         self._clipped_mesh_cache_key = None
         self._full_mesh_for_clip = None
         self._pending_clip_request = None
+        previous_array = self.array_combo.currentText() if preserve_selection else None
         try:
-            self._full_mesh = _load_full_mesh(self.file_path)
+            self._full_mesh, self._cycle_index, self._num_cycles = _load_full_mesh(
+                self.file_path, cycle_index=self._cycle_index)
         except Exception as exc:
             self._load_error = str(exc)
             self.warning_label.setText(f"Failed to load {self.file_path}:\n{exc}")
             self._full_mesh = None
             return
+        self.warning_label.setText("")
 
         _attach_complex_e_magnitude(self._full_mesh, self.source)
 
         available = list(self._full_mesh.point_data.keys())
+        # A cycle with no point-data at all is a legitimate, non-error case -
+        # e.g. Palace appends an AMR error-indicator/rank dump as an extra
+        # cycle alongside the real per-frequency solves, carrying only
+        # cell-data (Indicator/Rank/attribute), not a point-data field to
+        # color by. Label it "geometry" in the combo (once encountered - see
+        # __init__'s self._cycles_without_data) instead of a plain "Cycle N",
+        # and just render the bare mesh with nothing selected to color by,
+        # rather than warning about it as if something went wrong.
+        if not available:
+            self._cycles_without_data.add(self._cycle_index)
+
+        self.cycle_combo.blockSignals(True)
+        self.cycle_combo.clear()
+        self.cycle_combo.addItems([
+            "geometry" if i in self._cycles_without_data else f"Cycle {i + 1}"
+            for i in range(self._num_cycles)
+        ])
+        self.cycle_combo.setCurrentIndex(self._cycle_index)
+        self.cycle_combo.blockSignals(False)
+        self.cycle_group.setVisible(self._num_cycles > 1)
+
         self.array_combo.blockSignals(True)
         self.array_combo.clear()
         self.array_combo.addItems(available)
         self.array_combo.blockSignals(False)
+
+        if preserve_selection and previous_array in available:
+            # Keep the user's current settings across a cycle-only switch -
+            # not just which array is selected, but also its Min/Max color
+            # range: don't let _on_array_changed's _reset_clim_range() (fired
+            # by setCurrentText() below re-selecting the same array name in
+            # the freshly repopulated combo) clobber a manually-entered range
+            # with this cycle's own data range.
+            self.array_combo.blockSignals(True)
+            self.array_combo.setCurrentText(previous_array)
+            self.array_combo.blockSignals(False)
+            self._update_vector_checkbox_state()
+            return
 
         default_array, default_cmap, default_log_scale = _pick_default_array(self._full_mesh, self.source)
         self._current_cmap = default_cmap
@@ -890,10 +1122,6 @@ class FieldViewerWindow(QDialog):
             # checkbox_state() get called.
             self._reset_clim_range()
             self._update_vector_checkbox_state()
-        elif not available:
-            self.warning_label.setText(
-                f"No point-data arrays found in {self.file_path} - nothing to color by."
-            )
 
     # ---------- Axis / clip plane ----------
 
@@ -949,6 +1177,22 @@ class FieldViewerWindow(QDialog):
     def _on_redraw_needed(self, _value=None):
         self._schedule_redraw()
 
+    def _pick_color(self, attr_name, button):
+        """Open a color picker for the state attribute attr_name (one of
+        _edge_color/_arrow_color/_legend_text_color), and apply it on accept.
+        Shared by the three small swatch buttons in the Display group - see
+        _build_ui()."""
+        current = QColor(getattr(self, attr_name))
+        color = QColorDialog.getColor(current, self, "Choose color")
+        if color.isValid():
+            setattr(self, attr_name, color.name())
+            self._style_swatch_button(button, color.name())
+            self._schedule_redraw()
+
+    @staticmethod
+    def _style_swatch_button(button, color_hex):
+        button.setStyleSheet(f"background-color: {color_hex}; border: 1px solid #666;")
+
     def _on_clip_slider_changed(self, _value=None):
         # Live label feedback on every tick, but only actually rebuild/render
         # the mesh once the drag ends (sliderReleased, connected in
@@ -1001,8 +1245,36 @@ class FieldViewerWindow(QDialog):
         distance = max(self._full_mesh.length, 1.0) * 3.0
         camera_position = tuple(center + direction * distance)
         self.plotter.camera_position = [camera_position, tuple(center), _VIEW_UP[axis]]
+        # Axis-aligned views always use orthographic (parallel) projection, not
+        # perspective: looking straight down an axis with a perspective camera
+        # still foreshortens by depth along that same axis (geometry nearer the
+        # camera renders larger than geometry farther away, even though both
+        # are "in" the flat side view being requested) - exactly the "faked
+        # distance" a true CAD/engineering side/front/top view doesn't have.
+        # Unconditional (not gated on --orthographic): this is what makes an
+        # axis-snap view actually flat, independent of the global flag, which
+        # only controls projection for ISO/freely-rotated views instead.
+        self.plotter.enable_parallel_projection()
+        # Keep the checkbox in sync so it reflects reality rather than just
+        # whatever it was last manually set to - blockSignals() so this
+        # doesn't re-enter _on_orthographic_toggled() and render twice.
+        self.orthographic_cb.blockSignals(True)
+        self.orthographic_cb.setChecked(True)
+        self.orthographic_cb.blockSignals(False)
         self.plotter.reset_camera()
         self._schedule_redraw()  # re-clips using the (possibly just-changed) sign for this axis, then renders
+
+    def _on_orthographic_toggled(self, checked):
+        """Manual override for the *current* view (including a freely-rotated
+        one) - the +/-X/Y/Z buttons always force this on regardless (see
+        _set_view()), so unchecking here only matters after clicking one of
+        those buttons and then wanting perspective back, or when rotating
+        freely and wanting orthographic without snapping to an axis."""
+        if checked:
+            self.plotter.enable_parallel_projection()
+        else:
+            self.plotter.disable_parallel_projection()
+        self.plotter.render()
 
     def _move_slider_to_max(self):
         """Move the clip slider, along the currently selected axis, to the
@@ -1171,7 +1443,7 @@ class FieldViewerWindow(QDialog):
             # Internal-only helper array - don't leave it in the mesh's array
             # list (would otherwise show up in the Field dropdown's arrays).
             del mesh.point_data[scale_key]
-        return self.plotter.add_mesh(glyphs, color="dimgray", reset_camera=False)
+        return self.plotter.add_mesh(glyphs, color=self._arrow_color, reset_camera=False)
 
     # ---------- Redraw ----------
 
@@ -1223,7 +1495,8 @@ class FieldViewerWindow(QDialog):
         # was last pointed at.
         position = self._slider_value_to_position()
         sign = self._clip_sign.get(self._current_axis, 1)
-        cache_key = (self._current_axis, position, sign, self._mesh_generation)
+        slice_only = self.slice_only_cb.isChecked()
+        cache_key = (self._current_axis, position, sign, slice_only, self._mesh_generation)
         if cache_key == self._clipped_mesh_cache_key:
             # The clip geometry itself hasn't changed since the last computed
             # result - this redraw is for something else entirely (opacity,
@@ -1237,18 +1510,18 @@ class FieldViewerWindow(QDialog):
 
         self._request_clip(*cache_key)
 
-    def _request_clip(self, axis, position, sign, generation):
-        """Kick off a background clip for this axis/position/sign, unless one
-        is already running - in that case just remember these as the latest
-        desired parameters (_pending_clip_request) instead of starting a
-        second _ClipWorker. _on_clip_succeeded()/_on_clip_failed() start the
+    def _request_clip(self, axis, position, sign, slice_only, generation):
+        """Kick off a background clip for this axis/position/sign/mode, unless
+        one is already running - in that case just remember these as the
+        latest desired parameters (_pending_clip_request) instead of starting
+        a second _ClipWorker. _on_clip_succeeded()/_on_clip_failed() start the
         pending one, if any, right after the current one finishes - so at most
         one clip computation is ever in flight, and rapid slider drags/axis
         switches collapse into "compute the latest state" rather than queuing
         up every intermediate one.
         """
         if self._clip_thread is not None and self._clip_thread.isRunning():
-            if (axis, position, sign, generation) == self._active_clip_key:
+            if (axis, position, sign, slice_only, generation) == self._active_clip_key:
                 # Already computing exactly this geometry - its result will
                 # satisfy this request too once it lands, since
                 # _on_clip_succeeded() checks against the then-current
@@ -1256,13 +1529,13 @@ class FieldViewerWindow(QDialog):
                 # so there's nothing to gain from queuing a duplicate.
                 self._pending_clip_request = None
                 return
-            self._pending_clip_request = (axis, position, sign, generation)
+            self._pending_clip_request = (axis, position, sign, slice_only, generation)
             return
-        self._start_clip_thread(axis, position, sign, generation)
+        self._start_clip_thread(axis, position, sign, slice_only, generation)
 
-    def _start_clip_thread(self, axis, position, sign, generation):
+    def _start_clip_thread(self, axis, position, sign, slice_only, generation):
         self._pending_clip_request = None
-        self._active_clip_key = (axis, position, sign, generation)
+        self._active_clip_key = (axis, position, sign, slice_only, generation)
         # Scoped to this window (not QApplication.setOverrideCursor()) - only
         # this field-viewer window is actually busy; the main setupEM/
         # setupThermal window (and any other open field viewer) stays fully
@@ -1283,7 +1556,7 @@ class FieldViewerWindow(QDialog):
         if self._full_mesh_for_clip is None:
             self._full_mesh_for_clip = self._full_mesh.copy()
         assert self._full_mesh_for_clip is not self._full_mesh
-        thread = _ClipWorker(self._full_mesh_for_clip, axis, position, sign, generation)
+        thread = _ClipWorker(self._full_mesh_for_clip, axis, position, sign, slice_only, generation)
         thread.succeeded.connect(self._on_clip_succeeded)
         thread.failed.connect(self._on_clip_failed)
         self._clip_thread = thread
@@ -1307,15 +1580,16 @@ class FieldViewerWindow(QDialog):
         self._clip_thread.wait()
         self._clip_thread = None
 
-    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign, generation):
+    def _on_clip_succeeded(self, clipped_mesh, axis, position, sign, slice_only, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign, generation)
+        result_key = (axis, position, sign, slice_only, generation)
         # Compare against what's CURRENTLY desired (not "was this the most
         # recent request") - if nothing but the geometry key matters, a
         # result stays usable even if unrelated redraws (opacity, color
         # scale, ...) happened while this was still computing. The generation
         # element also rejects a result computed for a file that's since been
-        # switched away from, even if axis/position/sign happen to coincide.
+        # switched away from, even if axis/position/sign/slice_only happen to
+        # coincide.
         if result_key == self._current_clip_key():
             self.warning_label.setText("")
             self._clipped_mesh_cache = clipped_mesh
@@ -1323,9 +1597,9 @@ class FieldViewerWindow(QDialog):
             self._apply_display_mesh(clipped_mesh)
         self._maybe_start_pending_clip()
 
-    def _on_clip_failed(self, message, axis, position, sign, generation):
+    def _on_clip_failed(self, message, axis, position, sign, slice_only, generation):
         self._retire_clip_thread()
-        result_key = (axis, position, sign, generation)
+        result_key = (axis, position, sign, slice_only, generation)
         if result_key == self._current_clip_key():
             self.warning_label.setText(f"Clip failed: {message}")
             self._apply_display_mesh(self._full_mesh)
@@ -1338,9 +1612,9 @@ class FieldViewerWindow(QDialog):
             self._clear_busy_cursor()
 
     def _current_clip_key(self):
-        """(axis, position, sign, generation) the clip plane is currently set
-        to, or None if clipping is off - the ground truth a background clip
-        result is checked against before being applied (see
+        """(axis, position, sign, slice_only, generation) the clip plane is
+        currently set to, or None if clipping is off - the ground truth a
+        background clip result is checked against before being applied (see
         _on_clip_succeeded()), recomputed fresh rather than cached, since the
         whole point is to catch cases where the desired state has moved on
         since the result was requested - including a file switch, via
@@ -1351,6 +1625,7 @@ class FieldViewerWindow(QDialog):
             self._current_axis,
             self._slider_value_to_position(),
             self._clip_sign.get(self._current_axis, 1),
+            self.slice_only_cb.isChecked(),
             self._mesh_generation,
         )
 
@@ -1385,15 +1660,18 @@ class FieldViewerWindow(QDialog):
             show_edges = self.show_edges_cb.isChecked()
             self._mesh_actor = self.plotter.add_mesh(
                 display_mesh, scalars=array_name, cmap=self._current_cmap,
-                show_edges=show_edges, log_scale=use_log, clim=clim, opacity=opacity,
-                scalar_bar_args={"title": array_name}, reset_camera=False,
+                show_edges=show_edges, edge_color=self._edge_color,
+                log_scale=use_log, clim=clim, opacity=opacity,
+                show_scalar_bar=self.show_legend_cb.isChecked(),
+                scalar_bar_args={"title": array_name, "color": self._legend_text_color},
+                reset_camera=False,
             )
         else:
             opacity = self.opacity_slider.value() / 100.0
             show_edges = self.show_edges_cb.isChecked()
             self._mesh_actor = self.plotter.add_mesh(
                 display_mesh, color="lightgrey", opacity=opacity, show_edges=show_edges,
-                reset_camera=False)
+                edge_color=self._edge_color, reset_camera=False)
 
         if self._vector_actor is not None:
             self.plotter.remove_actor(self._vector_actor, render=False)
@@ -1431,6 +1709,17 @@ class _StandaloneMainWindow:
 
 def main():
     app = QApplication(sys.argv)
+
+    # Pin a light color scheme so the explicit light backgrounds set on
+    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
+    # auto-palette on accounts where Windows' per-user dark-mode setting is
+    # on (PySide6 6.5+ only; older versions just skip this and rely on the
+    # explicit "color:" rules already set on those field stylesheets).
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:
+        pass
+
     if sys.platform.startswith("win"):
         # matches setupEM.py's/setupThermal.py's/result_viewer.py's main() - without
         # this, Qt's default style on Windows looks visibly different from the full app
@@ -1445,6 +1734,11 @@ def main():
                               "in, instead of passing file_path directly")
     parser.add_argument("--source", choices=[_PALACE, _ELMER_EM, _ELMER_THERMAL], default=_PALACE,
                          help="which default array/colormap preset to use (default: palace)")
+    parser.add_argument("--cycle", type=int,
+                         help="1-based index of which solved cycle to display, for a "
+                              "multi-frequency Palace fdump .pvd with more than one "
+                              "<DataSet>/cycle (one per solved frequency) - default: the "
+                              "first cycle. Not a frequency/GHz value, just a position.")
 
     # --- Scripted/agentic use: everything below sets up the view without a
     # human touching the GUI, by driving the same widgets a click would - see
@@ -1481,6 +1775,12 @@ def main():
     parser.add_argument("--view-axis", choices=["X+", "X-", "Y+", "Y-", "Z+", "Z-", "ISO"],
                          help="camera direction: look down +/-X/Y/Z, or ISO for a default "
                               "isometric view. Not the same as --clip-axis.")
+    parser.add_argument("--orthographic", action="store_true",
+                         help="use orthographic (parallel) projection instead of perspective, "
+                              "so geometry isn't scaled by distance from the camera. The "
+                              "X+/X-/Y+/Y-/Z+/Z- --view-axis choices already use this "
+                              "automatically (that's what makes them true flat side/front/top "
+                              "views); this flag forces it for ISO or any freely-rotated view too.")
     parser.add_argument("--screenshot",
                          help="render off-screen and save a PNG here instead of opening an "
                               "interactive window, then exit - works with no display")
@@ -1496,6 +1796,8 @@ def main():
         parser.error(f"--arrow-size must be between {_ARROW_SIZE_MIN_PERCENT} and {_ARROW_SIZE_MAX_PERCENT}")
     if args.log_range_db is not None and args.log_range_db <= 0:
         parser.error("--log-range-db must be positive")
+    if args.cycle is not None and args.cycle < 1:
+        parser.error("--cycle must be a 1-based cycle number (>= 1)")
 
     file_paths = [args.file_path] if args.file_path else []
     if not file_paths and args.run_path:
@@ -1530,6 +1832,12 @@ def main():
                                 off_screen=bool(args.screenshot))
     if window._full_mesh is None:
         die(window._load_error or "failed to load the field-result file")
+
+    if args.cycle is not None:
+        if args.cycle > window._num_cycles:
+            die(f"--cycle {args.cycle} out of range - this file has "
+                f"{window._num_cycles} cycle(s)")
+        window.cycle_combo.setCurrentIndex(args.cycle - 1)
 
     if args.array:
         if args.array not in window._full_mesh.point_data:
@@ -1570,9 +1878,23 @@ def main():
 
     if args.view_axis:
         if args.view_axis == "ISO":
+            # Explicit reset to perspective: ISO is a freely-rotatable 3D view,
+            # not a flat axis view, so it shouldn't inherit orthographic
+            # projection from a prior axis-view call on this same window
+            # (--orthographic below re-enables it if actually requested).
+            # Routed through the checkbox (not the plotter directly) so the
+            # GUI's "Parallel projection" state stays truthful when not headless.
+            window.orthographic_cb.setChecked(False)
             window.plotter.view_isometric()
         else:
             window._set_view(args.view_axis[0], 1 if args.view_axis[1] == "+" else -1)
+
+    if args.orthographic:
+        # Applied after --view-axis so it always wins, including forcing
+        # orthographic on ISO/a freely-rotated view (axis views are already
+        # orthographic unconditionally - see _set_view()). Routed through the
+        # checkbox for the same reason as the ISO branch above.
+        window.orthographic_cb.setChecked(True)
 
     if args.clip_axis:
         axis_radio = {"X": window.axis_radio_x, "Y": window.axis_radio_y,

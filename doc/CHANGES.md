@@ -1,4 +1,30 @@
 
+
+# What's New - September 26, 2026
+
+The **AMR maximum DOF** setting now shows an estimate of the RAM that Palace will need at that mesh size, both on the Mesh tab and in Preferences > Palace. The estimate is based on existing Palace results (about 12 GB per million DOF, up to 15 GB). On the Mesh tab, it turns into a warning when the worst case exceeds the **"Stop Palace if memory exceeds"** limit.
+
+**Stackup Preview**: three or more layers at the same height (e.g. resistor sheets on top of Activ) are now drawn side by side instead of on top of each other, via labels sit near the upper end of the via, and sheet resistance labels show the correct unit (e.g. RHIGH: Rs=1360 Ω, was shown as 1360000 mΩ).
+
+The bundled stackup files now include the latest parameterized gds2palace stackups for EM and thermal simulation: **SG13G2_FEM_200um.xml**, **SG13G2_FEM_200um_passi3D.xml** (conformal passivation around TopMetal2) and **SG13CMOS5L_200um.xml**. Chip and air height can be changed with the **Override stackup Variables** table. The previous SG13G2_100um.xml, SG13G2_200um.xml and SG13G2_nosub.xml are still included, so existing models keep working.
+
+# What's New - September 25, 2026
+
+Added a **Correction for via array cross section** option on the Input Files tab, below via array merging, in setupEM (Palace and Elmer) and setupThermal. Merging fills the gaps between vias with via material, which overestimates the conductivity of a via array; when enabled, the conductivity of each merged via polygon (heat conductivity for thermal models) is multiplied by its fill factor (original via area / merged polygon area). This option requires gds2palace v0.7.0 or later and is hidden with an older version, which would silently ignore it.  
+
+# What's New - September 22-24, 2026
+
+Added a **Conductor meshing** option (Palace only) on the Mesh and Boundaries tab: **Surface impedance** (default, as before) or **Solve inside (volume mesh)**, which models conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, at the cost of more RAM/simulation time and reduced accuracy at higher frequencies. This option requires gds2palace v0.6.0 or later, earlier version silently ignore this setting.  
+
+Better display in **Stackup Preview**'s for metals/vias that push outside their base dieelectric.  
+
+Palace's real memory usage is now measured directly from the running solver process(es) instead of parsed from its own log output, which could be inaccurate - this also makes the **"Stop Palace if memory exceeds"** kill switch more reliable.
+
+The built-in **3D field viewer** can now switch between the results of a multi-frequency Palace field-dump ("fdump") run: a new **Cycle** picker appears whenever the loaded result file has more than one solved frequency, and `field_viewer.py --cycle <N>` selects one from the command line. Previously the viewer could only ever show one fixed cycle of such a file, with no way to see the others.
+
+Added **File > New**, which resets setupEM/setupThermal to the same blank state as a freshly started application - useful for starting a new model without restarting the app.
+
+
 # What's New - September 16-20, 2026
 
 Fixed a native crash in the 3D field viewer that could occur when dragging the clip-plane position or opacity slider, especially on large/complex fields (mainly reported on Linux). The clip-plane, opacity, and arrow-size sliders now only update the view once you release the slider, rather than redrawing on every tick while dragging.

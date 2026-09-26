@@ -1,9 +1,8 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-09-14
+Document version: 2026-09-22
 
 ## Contents
-[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [What's New](#whats-new)  
 [About setupEM and setupThermal](#about-setupem-and-setupthermal)  
 [Installation](#installation)  
@@ -20,10 +19,11 @@ Document version: 2026-09-14
 [Ports tab](#ports-tab)  
 [Mesh and Boundaries tab](#mesh-and-boundaries-tab)  
 [Create Model tab](#create-model-tab)  
+[Code tab](#code-tab)  
+[Result Viewer and Model Fit](#result-viewer-and-model-fit)  
 [Result Viewer](#result-viewer)  
 [Model Fit](#model-fit)  
 [3D Field Viewer](#3d-field-viewer)  
-[Code tab](#code-tab)  
 [File menu](#file-menu)  
 [Help menu and version check](#help-menu-and-version-check)  
 [KLayout integration](#klayout-integration)  
@@ -46,13 +46,6 @@ Document version: 2026-09-14
 &ensp;[Undo and Recent Files](#undo-and-recent-files)  
 [See also](#see-also)  
 
-## Result Viewer and Model Fit
-
-setupEM includes two built-in tools for working with simulation results directly, without external scripts:
-
-- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
-- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
-
 ## What's New
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
@@ -63,6 +56,7 @@ This chapter gives a brief overview of major features added since the previous e
 - **Overriding stackup Variables from the Input Files tab.** If the chosen XML file declares `<Variable>`s (e.g. `total_thickness`, `air_thickness`), an editable grid now lets you override their values for this run, without touching the XML file or the generated script — see "[File description and overriding stackup Variables](#file-description-and-overriding-stackup-variables)".
 - **Start Simulation on Windows runs Palace directly and shows results automatically.** No more opening a terminal and typing `./run_sim` yourself - output streams live into the Log panel, Terminate actually works, and a results summary (degrees of freedom, simulation time, peak RAM, mesh-adaptation error indicators) appears automatically once a run finishes - see "[Create Model tab](#create-model-tab)".
 - **Start Simulation now checks for leftover results from a previous run** before launching the solver, and offers to delete them (default) or keep them — see "[Create Model tab](#create-model-tab)".
+- **Conductor meshing option (Palace only)**: choose **Surface impedance** (default, as before) or **Solve inside (volume mesh)** for more accurate low-frequency conductor loss — see "[Mesh and Boundaries tab](#mesh-and-boundaries-tab)".
 
 
 ## About setupEM and setupThermal
@@ -150,7 +144,7 @@ On this tab, you configure the two input files every model needs:
 
 Both fields support drag & drop or the **Browse...** button.
 
-Some layout pre-processing is defined here too: **Merge via arrays with spacing** merges nearby vias on `Type="via"` layers into one larger via box (speeds up meshing). Layouts with **polygons with holes/cutouts** need "Preprocess GDSII file" checked - this option only appears with an outdated gds2palace install; a current one handles cutouts natively.
+Some layout pre-processing is defined here too: **Merge via arrays with spacing** merges nearby vias on `Type="via"` layers into one larger via box (speeds up meshing). Merging fills the gaps between the vias with via material, so the merged box conducts better than the real via array; with **Correction for via array cross section** enabled, the conductivity of each merged via box (heat conductivity in setupThermal) is multiplied by its fill factor (original via area / merged box area). This option needs gds2palace 0.7.0 or later and is hidden otherwise. Layouts with **polygons with holes/cutouts** need "Preprocess GDSII file" checked - this option only appears with an outdated gds2palace install; a current one handles cutouts natively.
 
 <img src="./png/inputfiles1.png" alt="input files" width="700">
 
@@ -201,7 +195,7 @@ Controls the mesh used for simulation, trading off accuracy against simulation t
 
 **Mesh refinement at the edges** (`refined_cellsize`) sets the mesh size along polygon edges. This is not a global lower bound on mesh size (unlike the IHP openEMS flow) - smaller geometry just gets a locally smaller mesh. 2-5 µm is a good starting point for most IHP SG13G2 models.
 
-**In this FEM workflow, conductors use surface impedance on their side walls - there's no need to mesh into skin effect**, unlike the openEMS flow (`gds2openEMS`), where solid conductors are meshed and `refined_cellsize` partially controls skin-effect resolution. This lets the FEM flow use a much coarser mesh.
+**Conductor meshing** defaults to **Surface impedance**: conductors use surface impedance on their side walls, no need to mesh into skin effect, unlike the openEMS flow (`gds2openEMS`), where solid conductors are meshed and `refined_cellsize` partially controls skin-effect resolution. This lets the FEM flow use a much coarser mesh. The alternative, **Solve inside (volume mesh)**, meshes conductors as solid bulk-conductivity volumes instead - more accurate at low frequency, where skin depth is no longer small compared to conductor cross section, but not recommended as a general default: it costs more RAM and simulation time, and becomes inaccurate at higher frequencies unless the mesh actually resolves the skin effect.
 
 <img src="./png/mesh1.png" alt="mesh" width="700">
 
@@ -232,6 +226,21 @@ This needs a `run_sim` script configured as described in the [gds2palace documen
 When a Palace simulation finishes, a **results summary** is appended to the Log panel automatically: degrees of freedom, mesh elements, simulation time, peak RAM, and the mesh-adaptation error indicators (Norm/Max/Mean), read from Palace's own `palace.json`/`error-indicators.csv` output. For a run using adaptive mesh refinement, this is a table with one row per refinement iteration.
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
+
+## Code tab
+
+The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.
+
+<img src="./png/code1.png" alt="code" width="700">
+
+Use **File > Export to \*.py model** to save the current code to disk without running it (only available while this tab is active). The Create Model tab's Preview/Create Mesh/Start Simulation buttons also save the script to the target directory before running it.
+
+## Result Viewer and Model Fit
+
+setupEM includes two built-in tools for working with simulation results directly, without external scripts:
+
+- **Result Viewer** (Create Model tab > **View Results...**) plots Touchstone S-parameter results — dB/phase, Smith chart, zoomed Smith chart — for one or many result files at once, right inside setupEM. See chapter "[Result Viewer](#result-viewer)".
+- **Model Fit** (Create Model tab > **Model Fit...**) launches [snp2le](https://github.com/iic-jku/snp2le), an external open-source tool that extracts a lumped-element SPICE/Spectre netlist from S-parameter results — offering to install it via pip automatically if it isn't already present. See chapter "[Model Fit](#model-fit)".
 
 ## Result Viewer
 
@@ -282,14 +291,6 @@ Once field-dump results are available, click **View fields (...)...** on the Cre
 The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
 
 Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If ParaView is selected but not found on your system, setupEM falls back to the built-in viewer automatically.
-
-## Code tab
-
-The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.
-
-<img src="./png/code1.png" alt="code" width="700">
-
-Use **File > Export to \*.py model** to save the current code to disk without running it (only available while this tab is active). The Create Model tab's Preview/Create Mesh/Start Simulation buttons also save the script to the target directory before running it.
 
 ## File menu
 
