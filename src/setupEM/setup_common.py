@@ -92,6 +92,10 @@ GDS2PALACE_OUTDATED = not (GDS2PALACE_SUPPORTS_STACKUP_EDITOR and GDS2PALACE_SUP
 FILL_FACTOR_CORRECTION_SOLVERS = getattr(
     simulation_setup, "FILL_FACTOR_CORRECTION_SOLVERS",
     ("palace",) if hasattr(gds_reader.all_polygons_list, "compute_via_fill_factors") else ())
+# Palace linear solver settings (settings['complex_coarse_solve'/'solver_maxits'/'solver_tol'])
+# the installed gds2palace understands - empty for an older gds2palace, which hardcodes them
+# and would silently ignore these keys, so the Mesh tab hides its "Linear solver" group then.
+PALACE_LINEAR_SOLVER_SETTINGS = tuple(getattr(simulation_setup, "PALACE_LINEAR_SOLVER_SETTINGS", ()))
 
 
 # QSettings scope for the File menu's "Load Recent Config"/"Import Recent Model" lists -
@@ -4195,6 +4199,9 @@ class MainWindowBase(QMainWindow):
                     "filled_metals": "filled_metals",
                     "fill_factor_correction": "fill_factor_correction",
                     "iterative": "iterative",
+                    "complex_coarse_solve": "complex_coarse_solve",
+                    "solver_maxits": "solver_maxits",
+                    "solver_tol": "solver_tol",
                     "ELMER_MPI_THREADS": "ELMER_MPI_THREADS"
                 }
 

@@ -1,5 +1,11 @@
 
 
+# What's New - September 30, 2026
+
+New **Linear solver (Palace)** group on the Mesh and Boundaries tab. **Complex coarse solve** (default **Yes**) lets Palace's direct coarse solver factorize the full complex system instead of only its real part, which makes the iterative solver converge in far fewer iterations at higher frequencies. In a D-band test case, iterations went from 180-440 (failing at 170 GHz) down to 1-30, with 3.5-6x shorter run times and identical results, at the cost of about 1.9x RAM at order 1 and 1.2x at order 2; the AMR RAM estimate includes this. **Maximum solver iterations** (400) and **Solver tolerance** (1e-6) can now be changed too. This group requires a gds2palace release later than v0.7.0 and is hidden with an older version.
+
+setupEM now warns when Palace's linear solver does **not converge**: Palace carries on and writes S-parameters for that frequency anyway, but they are unreliable. Each case gets a ⚠ warning in the Log panel with its frequency, and all of them are listed again at the end of the run.
+
 # What's New - September 29, 2026
 
 The built-in **3D field viewer** now shows frequencies instead of bare numbers: the **Cycle** picker of a multi-frequency Palace field dump lists e.g. "6 GHz (cycle 1)", and Palace's extra error-indicator dump is listed as "geometry" right away. For Elmer (EM), each result file in the **Result File** picker shows its frequency, e.g. "fields_t0002.vtu - 7.5 GHz". The cycle number is kept in the label, so it still matches `field_viewer.py --cycle <N>`.

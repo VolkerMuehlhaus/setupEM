@@ -59,7 +59,7 @@ if __package__ in (None, ""):
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -72,7 +72,7 @@ else:
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
-        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS,
+        find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -128,6 +128,14 @@ _RAM_FIT_OFFSET_GB = 0.5
 _RAM_FIT_GB_PER_MDOF = 11.7
 _RAM_WORST_GB_PER_MDOF = 15.4
 
+# The fit above predates settings['complex_coarse_solve'] (all those runs factorized only
+# the real part of the system). Factorizing the complex system instead raises peak RAM by
+# these factors, measured on the gds2palace maxits_repro GCPW study (hpz2, 16 ranks):
+# order 1: 15.1 -> 28.9 GB for the same 0.5 M DOF model; order 2: 37.0 GB at 2.6 M DOF
+# vs. 30.9 GB from the fit. Only the order-1 coarse level is factorized, so its share of
+# the total shrinks with order - order 3 (not measured) reuses the order-2 factor.
+_RAM_COMPLEX_COARSE_FACTOR = {1: 1.9, 2: 1.2, 3: 1.2}
+
 # readable on both the light and the dark Windows palette; the note also starts with a
 # warning sign so the over-limit state isn't signalled by color alone. The normal style
 # is explicit rather than "": clearing a widget's stylesheet doesn't reliably undo the
@@ -136,38 +144,42 @@ _RAM_NOTE_STYLE_OVER_LIMIT = "color: #d35400; font-weight: bold;"
 _RAM_NOTE_STYLE_NORMAL = "color: palette(window-text); font-weight: normal;"
 
 
-def amr_ram_estimate_gb(max_dof_text):
+def amr_ram_estimate_gb(max_dof_text, factor=1.0):
     """(typical, worst case) estimated Palace peak RAM in GB for an AMR maximum DOF
-    value, or None if max_dof_text isn't an integer."""
+    value, or None if max_dof_text isn't an integer. factor scales both, e.g. for the
+    complex coarse solve (see _RAM_COMPLEX_COARSE_FACTOR)."""
     try:
         mdof = int(max_dof_text) / 1e6
     except ValueError:
         return None
-    return (_RAM_FIT_OFFSET_GB + _RAM_FIT_GB_PER_MDOF * mdof,
-            _RAM_FIT_OFFSET_GB + _RAM_WORST_GB_PER_MDOF * mdof)
+    return (factor * (_RAM_FIT_OFFSET_GB + _RAM_FIT_GB_PER_MDOF * mdof),
+            factor * (_RAM_FIT_OFFSET_GB + _RAM_WORST_GB_PER_MDOF * mdof))
 
 
-def amr_ram_note_text(max_dof_text):
+def amr_ram_note_text(max_dof_text, factor=1.0):
     """Short one-line RAM estimate for an AMR maximum DOF value ("" if not an integer)."""
-    estimate = amr_ram_estimate_gb(max_dof_text)
+    estimate = amr_ram_estimate_gb(max_dof_text, factor)
     if estimate is None:
         return ""
     typical, worst = estimate
     return f"~{typical:.0f} GB RAM (up to {worst:.0f} GB)"
 
 
-def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2):
+def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2, complex_coarse_solve=False):
     """Show the estimated Palace peak RAM for an AMR maximum DOF value in note_label,
     as a warning if the worst case exceeds the "Stop Palace if memory exceeds" limit."""
-    estimate = amr_ram_estimate_gb(max_dof_text)
+    factor = _RAM_COMPLEX_COARSE_FACTOR.get(order, 1.2) if complex_coarse_solve else 1.0
+    estimate = amr_ram_estimate_gb(max_dof_text, factor)
     try:
         limit = float(ram_limit_text)
     except ValueError:
         limit = None
     over_limit = estimate is not None and limit is not None and estimate[1] > limit
 
-    note = amr_ram_note_text(max_dof_text)
+    note = amr_ram_note_text(max_dof_text, factor)
     order_hint = {1: "more", 3: "less"}.get(order)
+    if note and complex_coarse_solve:
+        note += " incl. complex coarse solve"
     if note and order_hint:
         note += f" for N=2, N={order} needs {order_hint}"
     if over_limit:
@@ -1193,6 +1205,70 @@ class MeshTab(QWidget):
 
         self.AMR_group.setLayout(self.AMR_layout)
         self.main_layout.addWidget(self.AMR_group)
+
+        # ---------- PALACE LINEAR SOLVER GROUP ----------
+        # settings['complex_coarse_solve'/'solver_maxits'/'solver_tol'] - Palace-only
+        # (hidden under Elmer mode, see setPalaceMode()/setElmerMode()), and hidden
+        # entirely with an older gds2palace that hardcodes these (PALACE_LINEAR_SOLVER_SETTINGS
+        # empty), since it would silently ignore them.
+        self.palace_solver_group = QGroupBox("Linear solver (Palace)")
+        self.palace_solver_layout = QVBoxLayout()
+
+        self.complex_coarse_layout = QHBoxLayout()
+        self.label_complex_coarse = QLabel("Complex coarse solve")
+        self.label_complex_coarse.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_complex_coarse)
+        self.complex_coarse_layout.addWidget(self.label_complex_coarse)
+        self.complex_coarse_box = QComboBox()
+        self.complex_coarse_box.setFixedWidth(edit_width)
+        self.complex_coarse_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.complex_coarse_box.addItems(["Yes (recommended)", "No"])
+        self.complex_coarse_box.setToolTip(
+            "Yes: the sparse direct coarse solve factorizes the full complex system.\n"
+            "No: only its real part (Palace default), which ignores absorbing boundaries,\n"
+            "port resistances and losses - the iterative solver then needs more and more\n"
+            "iterations as radiation grows with frequency, up to not converging at all.\n"
+            "Yes converges in far fewer iterations and runs several times faster, but\n"
+            "needs more RAM: about 1.9x at order 1, 1.2x at order 2."
+        )
+        self.complex_coarse_layout.addWidget(self.complex_coarse_box)
+        self.complex_coarse_layout.addStretch()
+        self.palace_solver_layout.addLayout(self.complex_coarse_layout)
+
+        self.solver_maxits_layout = QHBoxLayout()
+        self.label_solver_maxits = QLabel("Maximum solver iterations")
+        self.label_solver_maxits.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_solver_maxits)
+        self.solver_maxits_layout.addWidget(self.label_solver_maxits)
+        self.solver_maxits_edit = QLineEdit("400")
+        self.solver_maxits_edit.setFixedWidth(edit_width)
+        self.solver_maxits_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+        self.solver_maxits_edit.setToolTip(
+            "Iteration limit of Palace's linear solver (GMRES) per frequency.\n"
+            "If it is reached, that frequency's result is unreliable - setupEM\n"
+            "then shows a warning in the log.")
+        self.solver_maxits_layout.addWidget(self.solver_maxits_edit)
+        self.solver_maxits_layout.addStretch()
+        self.palace_solver_layout.addLayout(self.solver_maxits_layout)
+
+        self.solver_tol_layout = QHBoxLayout()
+        self.label_solver_tol = QLabel("Solver tolerance (relative residual)")
+        self.label_solver_tol.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_solver_tol)
+        self.solver_tol_layout.addWidget(self.label_solver_tol)
+        self.solver_tol_edit = QLineEdit("1e-6")
+        self.solver_tol_edit.setFixedWidth(edit_width)
+        self.solver_tol_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+        self.solver_tol_layout.addWidget(self.solver_tol_edit)
+        self.solver_tol_layout.addStretch()
+        self.palace_solver_layout.addLayout(self.solver_tol_layout)
+
+        self.palace_solver_group.setLayout(self.palace_solver_layout)
+        self.palace_solver_group.setVisible(bool(PALACE_LINEAR_SOLVER_SETTINGS))
+        self.main_layout.addWidget(self.palace_solver_group)
+        # the RAM estimate next to "AMR maximum DOF" depends on this choice
+        self.complex_coarse_box.currentIndexChanged.connect(self.update_amr_ram_note)
+        self.update_amr_ram_note()
         self.main_layout.addSpacing(20)
 
 
@@ -1367,11 +1443,18 @@ class MeshTab(QWidget):
     def update_amr_ram_note(self, *_):
         # the memory stop limit is a preference, so re-read it on every update
         # (MainWindow also calls this after the Preferences dialog closes)
+        # complex_coarse_box doesn't exist yet on the first call during __init__
+        # (the AMR group is built before the linear solver group), and only counts
+        # when the installed gds2palace actually applies the setting
+        complex_coarse_box = getattr(self, "complex_coarse_box", None)
+        complex_coarse = (bool(PALACE_LINEAR_SOLVER_SETTINGS) and complex_coarse_box is not None
+                          and complex_coarse_box.currentIndex() == 0)
         update_amr_ram_estimate(
             self.amr_maxdof_edit.text(),
             get_preference(self.MainWindow.APP_NAME, "palace_max_ram_gb", "100"),
             self.amr_ram_note,
-            order=self.mesh_order_box.currentIndex() + 1)
+            order=self.mesh_order_box.currentIndex() + 1,
+            complex_coarse_solve=complex_coarse)
 
     def on_meshorder_changed(self, value):
     # callback when mesh order changed, so that we can show/hide edit fields
@@ -1453,6 +1536,27 @@ class MeshTab(QWidget):
             self.amr_maxdof_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "amr_max_dof", "2000000")))
             return False
         saved_values ["amr_max_dof"] = int(value)
+
+        # Palace linear solver
+        saved_values ["complex_coarse_solve"] = self.complex_coarse_box.currentIndex() == 0
+        try:
+            value = int(self.solver_maxits_edit.text())
+            if value < 1:
+                raise ValueError
+        except Exception:
+            QMessageBox.warning(self, "Error", "Not a valid value for maximum solver iterations (integer >= 1)")
+            self.solver_maxits_edit.setText("400")
+            return False
+        saved_values ["solver_maxits"] = value
+        try:
+            value = float(self.solver_tol_edit.text())
+            if not (0 < value < 1):
+                raise ValueError
+        except Exception:
+            QMessageBox.warning(self, "Error", "Not a valid value for solver tolerance (between 0 and 1)")
+            self.solver_tol_edit.setText("1e-6")
+            return False
+        saved_values ["solver_tol"] = value
 
 
         # iterative or direct solver for Elmer
@@ -1540,6 +1644,10 @@ class MeshTab(QWidget):
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
         self.filled_metals_box.setCurrentIndex(1 if saved_values.get("filled_metals", False) else 0)
+        # older .simcfg files predate these keys - fall back to gds2palace's defaults
+        self.complex_coarse_box.setCurrentIndex(0 if saved_values.get("complex_coarse_solve", True) else 1)
+        self.solver_maxits_edit.setText(str(saved_values.get("solver_maxits", 400)))
+        self.solver_tol_edit.setText(f'{float(saved_values.get("solver_tol", 1e-6)):g}')
 
         if saved_values.get("iterative", False):
             self.solver_box.setCurrentIndex(1)
@@ -1726,6 +1834,13 @@ class CreateModelTab(CreateModelTabBase):
     _RE_AMR_ITER_A = re.compile(r"Completed (\d+) iteration.*adaptive mesh refinement \(AMR\)")
     _RE_AMR_ITER_B = re.compile(r"Adaptive mesh refinement \(AMR\) iteration (\d+):")
     _RE_AMR_PROCEEDING = re.compile(r"Proceeding with solve/estimate iteration (\d+)")
+    # Frequency of the solve that follows: "It 7/7: ω/2π = 1.700e+02 GHz (...)" in a uniform
+    # sweep, "Greedy iteration 1 (n = 4): ω* = 2.716e+01 GHz (...)" while PROM builds its model.
+    _RE_SOLVE_FREQ = re.compile(r"(?:ω/2π|ω\*) = ([0-9.eE+-]+) GHz")
+    # Palace keeps going after an unconverged linear solve and only logs it, e.g.
+    #   "GMRES solver did NOT converge in 400 iterations (avg. reduction factor: ...)"
+    # - that frequency's result is unreliable. Wording is independent of the KSP type.
+    _RE_NOT_CONVERGED = re.compile(r"solver did NOT converge in (\d+) iterations?")
 
     def _init_status_state(self):
         """Reset the tracked fields to unknown ('n/a'). Split out from
@@ -1741,6 +1856,10 @@ class CreateModelTab(CreateModelTabBase):
         self._status_amr_max = None
         self._ram_kill_triggered = False
         self._ram_kill_message = None
+        # frequency (GHz) of the solve currently in progress, and one description per
+        # unconverged solve seen in this run - see _report_nonconvergence()
+        self._status_solve_freq_ghz = None
+        self._nonconverged = []
         self._update_status_line()
 
     def _reset_status_for_run(self):
@@ -1772,6 +1891,16 @@ class CreateModelTab(CreateModelTabBase):
         self._init_status_state()
 
     def _parse_palace_status_line(self, line):
+        m = self._RE_NOT_CONVERGED.search(line)
+        if m:
+            self._report_nonconvergence(int(m.group(1)))
+            return
+
+        # no return: the same line is also a progress line (_RE_FREQ/_RE_GREEDY below)
+        m = self._RE_SOLVE_FREQ.search(line)
+        if m:
+            self._status_solve_freq_ghz = float(m.group(1))
+
         m = self._RE_MPI.search(line)
         if m:
             self._status_mpi = int(m.group(1))
@@ -1785,6 +1914,7 @@ class CreateModelTab(CreateModelTabBase):
             # New port: the previous port's frequency/solve position no longer applies.
             self._status_freq_display = None
             self._status_solve_display = ""
+            self._status_solve_freq_ghz = None
             self._update_status_line()
             return
 
@@ -1830,6 +1960,40 @@ class CreateModelTab(CreateModelTabBase):
                 self._status_amr_cur = int(m.group(1)) - 1
                 self._update_status_line()
                 return
+
+    def _report_nonconvergence(self, iterations):
+        """Flag an unconverged Palace linear solve right away in the log, and remember
+        it for the end-of-run summary (_nonconvergence_summary(), from on_finished()).
+        Palace itself keeps going and still writes S-parameters for that frequency, so
+        without this the only trace is one easily missed line in a long log."""
+        if self._status_solve_freq_ghz is not None:
+            where = f"at {self._status_solve_freq_ghz:g} GHz"
+        else:
+            where = "at a frequency not identified in the log"
+        details = []
+        if self._status_port_cur is not None and self._status_port_total is not None:
+            details.append(f"excitation {self._status_port_cur}/{self._status_port_total}")
+        if self._status_amr_max and self._status_amr_cur is not None:
+            details.append(f"AMR pass {self._status_amr_cur}")
+        if details:
+            where += f" ({', '.join(details)})"
+        self._nonconverged.append(where)
+        self.log_area.appendPlainText(
+            f"⚠ Palace linear solver did NOT converge {where} after {iterations} iterations"
+            " - results at this frequency are unreliable.")
+
+    def _nonconvergence_summary(self):
+        """End-of-run repeat of every unconverged solve, with what to change."""
+        if saved_values.get("complex_coarse_solve", True) or not PALACE_LINEAR_SOLVER_SETTINGS:
+            hint = ('Raise "Maximum solver iterations" (Mesh tab > Linear solver) and run again,'
+                    " or check the model and mesh.")
+        else:
+            hint = ('Set "Complex coarse solve" to Yes (Mesh tab > Linear solver) and run again:'
+                    " it usually converges in far fewer iterations.")
+        lines = [f"⚠ Palace's linear solver did NOT converge in {len(self._nonconverged)} solve(s):"]
+        lines += [f"   - {where}" for where in self._nonconverged]
+        lines.append("S-parameters at these frequencies are unreliable. " + hint)
+        return "\n" + "\n".join(lines) + "\n"
 
     def _poll_palace_memory(self):
         """QTimer callback (self._ram_poll_timer, every 5s) started in run_model()
@@ -2208,6 +2372,9 @@ class CreateModelTab(CreateModelTabBase):
                 # followed it, so it's not lost above everything else logged
                 # since the kill actually happened
                 self.log_area.appendPlainText(f"\n{self._ram_kill_message}\n")
+            if self._nonconverged:
+                # same idea: the per-solve warnings are far up in the log by now
+                self.log_area.appendPlainText(self._nonconvergence_summary())
         elif self._process_purpose == "install_snp2le":
             importlib.invalidate_caches()
             if exit_code == 0 and importlib.util.find_spec("snp2le") is not None:
@@ -2632,6 +2799,11 @@ class ModelEditorTab(QWidget):
             # these commands are only used within this GUI application to control gmsh
             ignore_list.extend(['preview_only','no_preview'])
 
+        # Palace linear solver settings: Palace-only, and only for a gds2palace that
+        # applies them (an older one hardcodes them and would silently ignore the keys)
+        if self.MainWindow.ElmerMode or not PALACE_LINEAR_SOLVER_SETTINGS:
+            ignore_list.extend(['complex_coarse_solve', 'solver_maxits', 'solver_tol'])
+
         # AMR settings only matter for Palace with at least one AMR iteration
         if self.MainWindow.ElmerMode:
             ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof'])
@@ -2648,7 +2820,7 @@ class ModelEditorTab(QWidget):
                       'meshsize_max', 'order', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof']),
             ("Simulation boundary", ['boundary', 'margin', 'air_around']),
-            ("Solver", ['iterative', 'ELMER_MPI_THREADS']),
+            ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
         ]
         grouped_keys = {key for _, keys in setting_groups for key in keys}
@@ -3205,6 +3377,7 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_edit.setVisible(True)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
+        self.mesh_tab.palace_solver_group.setVisible(bool(PALACE_LINEAR_SOLVER_SETTINGS))
         self.mesh_tab.Elmer_group.setVisible(False)
         self.mesh_tab.label_filled_metals.setVisible(True)
         self.mesh_tab.filled_metals_box.setVisible(True)
@@ -3229,6 +3402,7 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_edit.setVisible(False)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
+        self.mesh_tab.palace_solver_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
         self.mesh_tab.label_filled_metals.setVisible(False)
         self.mesh_tab.filled_metals_box.setVisible(False)
