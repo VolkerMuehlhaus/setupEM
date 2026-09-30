@@ -188,6 +188,24 @@ def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2, c
     note_label.setStyleSheet(_RAM_NOTE_STYLE_OVER_LIMIT if over_limit else _RAM_NOTE_STYLE_NORMAL)
 
 
+def palace_solver_preferences(app_name):
+    """(solver_maxits, solver_tol) from Preferences > Palace, each falling back to
+    gds2palace's default (400, 1e-6) if the stored value is not valid."""
+    try:
+        maxits = int(get_preference(app_name, "solver_maxits", "400"))
+        if maxits < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        maxits = 400
+    try:
+        tol = float(get_preference(app_name, "solver_tol", "1e-6"))
+        if not (0 < tol < 1):
+            raise ValueError
+    except (TypeError, ValueError):
+        tol = 1e-6
+    return maxits, tol
+
+
 # ---------- OTHER TABS ----------
 
 class FrequenciesTab(QWidget):
@@ -1126,13 +1144,14 @@ class MeshTab(QWidget):
         self.Elmer_group.setLayout(self.Elmer_layout)
         self.main_layout.addWidget(self.Elmer_group)
 
-        # ---------- MESH GROUP ----------
-        self.AMR_group = QGroupBox("Adaptive mesh refinement (AMR)")
+        # ---------- SOLVER & AMR GROUP ----------
+        self.AMR_group = QGroupBox("Solver && Adaptive Mesh Refinement (AMR)")
         self.AMR_layout = QVBoxLayout()
 
-        # AMR goal/maximum DOF are rarely tuned away from their defaults -
-        # hidden until this is set to "Yes", to keep the common case
-        # (just choosing how many AMR iterations to run) uncluttered.
+        # AMR goal/maximum DOF and the Palace linear solver settings are rarely
+        # tuned away from their defaults - hidden until this is set to "Yes",
+        # to keep the common case (just choosing how many AMR iterations to
+        # run) uncluttered.
         # Resets to "No" every time this tab is (re)constructed, same as
         # e.g. the "at xmin, xmax/..." air-margin fields below, which also
         # aren't persisted - this is a display toggle, not a simulation
@@ -1194,26 +1213,10 @@ class MeshTab(QWidget):
         self.mesh_order_box.currentIndexChanged.connect(self.update_amr_ram_note)
         self.update_amr_ram_note()
 
-        def on_show_advanced_changed(value):
-            show = (value == "Yes")
-            for item in [self.labelAMRgoal1, self.amr_goal_edit,
-                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note]:
-                item.setVisible(show)
-
-        self.show_advanced_box.currentTextChanged.connect(on_show_advanced_changed)
-        on_show_advanced_changed(self.show_advanced_box.currentText())
-
-        self.AMR_group.setLayout(self.AMR_layout)
-        self.main_layout.addWidget(self.AMR_group)
-
-        # ---------- PALACE LINEAR SOLVER GROUP ----------
-        # settings['complex_coarse_solve'/'solver_maxits'/'solver_tol'] - Palace-only
-        # (hidden under Elmer mode, see setPalaceMode()/setElmerMode()), and hidden
-        # entirely with an older gds2palace that hardcodes these (PALACE_LINEAR_SOLVER_SETTINGS
-        # empty), since it would silently ignore them.
-        self.palace_solver_group = QGroupBox("Linear solver (Palace)")
-        self.palace_solver_layout = QVBoxLayout()
-
+        # Palace linear solver: settings['complex_coarse_solve'] (solver_maxits/solver_tol
+        # are preferences only). Advanced row, never shown with an older gds2palace that hardcodes these
+        # (PALACE_LINEAR_SOLVER_SETTINGS empty), since it would silently ignore them.
+        # The whole group is Palace-only (hidden under Elmer mode, see setElmerMode()).
         self.complex_coarse_layout = QHBoxLayout()
         self.label_complex_coarse = QLabel("Complex coarse solve")
         self.label_complex_coarse.setFixedWidth(label_width)
@@ -1223,6 +1226,8 @@ class MeshTab(QWidget):
         self.complex_coarse_box.setFixedWidth(edit_width)
         self.complex_coarse_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.complex_coarse_box.addItems(["Yes (recommended)", "No"])
+        self.complex_coarse_box.setCurrentIndex(
+            0 if get_preference_bool(self.MainWindow.APP_NAME, "complex_coarse_solve", True) else 1)
         self.complex_coarse_box.setToolTip(
             "Yes: the sparse direct coarse solve factorizes the full complex system.\n"
             "No: only its real part (Palace default), which ignores absorbing boundaries,\n"
@@ -1233,42 +1238,29 @@ class MeshTab(QWidget):
         )
         self.complex_coarse_layout.addWidget(self.complex_coarse_box)
         self.complex_coarse_layout.addStretch()
-        self.palace_solver_layout.addLayout(self.complex_coarse_layout)
+        self.AMR_layout.addLayout(self.complex_coarse_layout)
+        # solver_maxits/solver_tol have no widgets here - they come from
+        # Preferences > Palace, see save_values()
 
-        self.solver_maxits_layout = QHBoxLayout()
-        self.label_solver_maxits = QLabel("Maximum solver iterations")
-        self.label_solver_maxits.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label_solver_maxits)
-        self.solver_maxits_layout.addWidget(self.label_solver_maxits)
-        self.solver_maxits_edit = QLineEdit("400")
-        self.solver_maxits_edit.setFixedWidth(edit_width)
-        self.solver_maxits_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
-        self.solver_maxits_edit.setToolTip(
-            "Iteration limit of Palace's linear solver (GMRES) per frequency.\n"
-            "If it is reached, that frequency's result is unreliable - setupEM\n"
-            "then shows a warning in the log.")
-        self.solver_maxits_layout.addWidget(self.solver_maxits_edit)
-        self.solver_maxits_layout.addStretch()
-        self.palace_solver_layout.addLayout(self.solver_maxits_layout)
-
-        self.solver_tol_layout = QHBoxLayout()
-        self.label_solver_tol = QLabel("Solver tolerance (relative residual)")
-        self.label_solver_tol.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label_solver_tol)
-        self.solver_tol_layout.addWidget(self.label_solver_tol)
-        self.solver_tol_edit = QLineEdit("1e-6")
-        self.solver_tol_edit.setFixedWidth(edit_width)
-        self.solver_tol_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
-        self.solver_tol_layout.addWidget(self.solver_tol_edit)
-        self.solver_tol_layout.addStretch()
-        self.palace_solver_layout.addLayout(self.solver_tol_layout)
-
-        self.palace_solver_group.setLayout(self.palace_solver_layout)
-        self.palace_solver_group.setVisible(bool(PALACE_LINEAR_SOLVER_SETTINGS))
-        self.main_layout.addWidget(self.palace_solver_group)
         # the RAM estimate next to "AMR maximum DOF" depends on this choice
         self.complex_coarse_box.currentIndexChanged.connect(self.update_amr_ram_note)
         self.update_amr_ram_note()
+
+        def on_show_advanced_changed(value):
+            show = (value == "Yes")
+            for item in [self.labelAMRgoal1, self.amr_goal_edit,
+                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note]:
+                item.setVisible(show)
+            show_solver = show and bool(PALACE_LINEAR_SOLVER_SETTINGS)
+            for item in [self.label_complex_coarse, self.complex_coarse_box]:
+                item.setVisible(show_solver)
+
+        self.show_advanced_box.currentTextChanged.connect(on_show_advanced_changed)
+        on_show_advanced_changed(self.show_advanced_box.currentText())
+
+        self.AMR_group.setLayout(self.AMR_layout)
+        self.main_layout.addWidget(self.AMR_group)
+
         self.main_layout.addSpacing(20)
 
 
@@ -1444,7 +1436,7 @@ class MeshTab(QWidget):
         # the memory stop limit is a preference, so re-read it on every update
         # (MainWindow also calls this after the Preferences dialog closes)
         # complex_coarse_box doesn't exist yet on the first call during __init__
-        # (the AMR group is built before the linear solver group), and only counts
+        # (built after the "AMR maximum DOF" row), and only counts
         # when the installed gds2palace actually applies the setting
         complex_coarse_box = getattr(self, "complex_coarse_box", None)
         complex_coarse = (bool(PALACE_LINEAR_SOLVER_SETTINGS) and complex_coarse_box is not None
@@ -1539,24 +1531,11 @@ class MeshTab(QWidget):
 
         # Palace linear solver
         saved_values ["complex_coarse_solve"] = self.complex_coarse_box.currentIndex() == 0
-        try:
-            value = int(self.solver_maxits_edit.text())
-            if value < 1:
-                raise ValueError
-        except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for maximum solver iterations (integer >= 1)")
-            self.solver_maxits_edit.setText("400")
-            return False
-        saved_values ["solver_maxits"] = value
-        try:
-            value = float(self.solver_tol_edit.text())
-            if not (0 < value < 1):
-                raise ValueError
-        except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for solver tolerance (between 0 and 1)")
-            self.solver_tol_edit.setText("1e-6")
-            return False
-        saved_values ["solver_tol"] = value
+        # iteration limit and tolerance are user preferences, not project settings
+        # (Preferences > Palace validates them; fall back to gds2palace's defaults
+        # should the stored value still be unusable)
+        saved_values ["solver_maxits"], saved_values ["solver_tol"] = palace_solver_preferences(
+            self.MainWindow.APP_NAME)
 
 
         # iterative or direct solver for Elmer
@@ -1644,10 +1623,10 @@ class MeshTab(QWidget):
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
         self.filled_metals_box.setCurrentIndex(1 if saved_values.get("filled_metals", False) else 0)
-        # older .simcfg files predate these keys - fall back to gds2palace's defaults
-        self.complex_coarse_box.setCurrentIndex(0 if saved_values.get("complex_coarse_solve", True) else 1)
-        self.solver_maxits_edit.setText(str(saved_values.get("solver_maxits", 400)))
-        self.solver_tol_edit.setText(f'{float(saved_values.get("solver_tol", 1e-6)):g}')
+        # older .simcfg files predate these keys - fall back to the preference
+        # (complex coarse solve) or gds2palace's defaults
+        self.complex_coarse_box.setCurrentIndex(0 if saved_values.get(
+            "complex_coarse_solve", get_preference_bool(app_name, "complex_coarse_solve", True)) else 1)
 
         if saved_values.get("iterative", False):
             self.solver_box.setCurrentIndex(1)
@@ -1985,10 +1964,11 @@ class CreateModelTab(CreateModelTabBase):
     def _nonconvergence_summary(self):
         """End-of-run repeat of every unconverged solve, with what to change."""
         if saved_values.get("complex_coarse_solve", True) or not PALACE_LINEAR_SOLVER_SETTINGS:
-            hint = ('Raise "Maximum solver iterations" (Mesh tab > Linear solver) and run again,'
+            hint = ('Raise "Maximum solver iterations" (File > Preferences > Palace) and run again,'
                     " or check the model and mesh.")
         else:
-            hint = ('Set "Complex coarse solve" to Yes (Mesh tab > Linear solver) and run again:'
+            hint = ('Set "Complex coarse solve" to Yes (Mesh and Boundaries tab > Solver & Adaptive'
+                    ' Mesh Refinement (AMR), advanced configuration) and run again:'
                     " it usually converges in far fewer iterations.")
         lines = [f"⚠ Palace's linear solver did NOT converge in {len(self._nonconverged)} solve(s):"]
         lines += [f"   - {where}" for where in self._nonconverged]
@@ -3067,6 +3047,17 @@ class PreferencesDialog(QDialog):
         palace_widget = QWidget()
         palace_form = QVBoxLayout(palace_widget)
         palace_form.setAlignment(Qt.AlignTop)
+        self.solver_maxits_edit = add_row(
+            palace_form, "Maximum solver iterations", "solver_maxits", "400",
+            tooltip=("Iteration limit of Palace's linear solver (GMRES) per frequency.\n"
+                     "If it is reached, that frequency's result is unreliable - setupEM\n"
+                     "then shows a warning in the log."))
+        self.solver_tol_edit = add_row(
+            palace_form, "Solver tolerance (relative residual)", "solver_tol", "1e-6",
+            tooltip="Relative residual tolerance of Palace's linear solver.")
+        # an older gds2palace hardcodes these, so changing them would have no effect
+        for edit in (self.solver_maxits_edit, self.solver_tol_edit):
+            edit.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
         self.amr_goal_edit = add_row(
             palace_form, "AMR goal (relative error tolerance)", "amr_tol", "0.01",
             tooltip=("Target relative error of Palace's own mesh error estimator "
@@ -3085,6 +3076,16 @@ class PreferencesDialog(QDialog):
             tooltip=("Terminates the solver once its reported memory usage exceeds this,\n"
                      "then runs S-parameter postprocessing on whatever results were\n"
                      "already computed, same as a normal completed run."))
+        self.complex_coarse_checkbox = QCheckBox("Complex coarse solve (recommended)")
+        self.complex_coarse_checkbox.setChecked(get_preference_bool(self.app_name, "complex_coarse_solve", True))
+        self.complex_coarse_checkbox.setToolTip(
+            "Default for new projects: Palace's sparse direct coarse solve factorizes the\n"
+            "full complex system instead of only its real part. Converges in far fewer\n"
+            "iterations at higher frequencies, at about 1.9x (order 1) / 1.2x (order 2) RAM.")
+        # an older gds2palace hardcodes the Palace default, so the choice would have no effect
+        self.complex_coarse_checkbox.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
+        palace_form.addWidget(self.complex_coarse_checkbox)
+        self._reset_targets.append((self.complex_coarse_checkbox, "complex_coarse_solve", True, "bool"))
         palace_form.addStretch()
         self.tabs.addTab(palace_widget, "Palace")
 
@@ -3231,6 +3232,18 @@ class PreferencesDialog(QDialog):
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value in the Palace tab")
             return
+        try:
+            if int(self.solver_maxits_edit.text()) < 1:
+                raise ValueError
+        except Exception:
+            QMessageBox.warning(self, "Error", "Not a valid value for maximum solver iterations (integer >= 1)")
+            return
+        try:
+            if not (0 < float(self.solver_tol_edit.text()) < 1):
+                raise ValueError
+        except Exception:
+            QMessageBox.warning(self, "Error", "Not a valid value for solver tolerance (between 0 and 1)")
+            return
 
         set_preference(self.app_name, "purpose", self.purpose_edit.text())
         set_preference(self.app_name, "confirm_reuse_import_filename", self.confirm_reuse_checkbox.isChecked())
@@ -3246,6 +3259,9 @@ class PreferencesDialog(QDialog):
         set_preference(self.app_name, "adaptive_mesh_iterations", self.adaptive_mesh_iterations_edit.text())
         set_preference(self.app_name, "margin", self.margin_edit.text())
         set_preference(self.app_name, "air_around", self.air_around_edit.text())
+        set_preference(self.app_name, "complex_coarse_solve", self.complex_coarse_checkbox.isChecked())
+        set_preference(self.app_name, "solver_maxits", self.solver_maxits_edit.text())
+        set_preference(self.app_name, "solver_tol", self.solver_tol_edit.text())
         set_preference(self.app_name, "amr_tol", self.amr_goal_edit.text())
         set_preference(self.app_name, "amr_max_dof", self.amr_maxdof_edit.text())
         set_preference(self.app_name, "palace_max_ram_gb", self.palace_max_ram_edit.text())
@@ -3377,7 +3393,6 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_edit.setVisible(True)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
-        self.mesh_tab.palace_solver_group.setVisible(bool(PALACE_LINEAR_SOLVER_SETTINGS))
         self.mesh_tab.Elmer_group.setVisible(False)
         self.mesh_tab.label_filled_metals.setVisible(True)
         self.mesh_tab.filled_metals_box.setVisible(True)
@@ -3402,7 +3417,6 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_edit.setVisible(False)
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
-        self.mesh_tab.palace_solver_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
         self.mesh_tab.label_filled_metals.setVisible(False)
         self.mesh_tab.filled_metals_box.setVisible(False)
