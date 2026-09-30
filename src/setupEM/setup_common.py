@@ -4195,6 +4195,7 @@ class MainWindowBase(QMainWindow):
                     "adaptive_mesh_iterations": "adaptive_mesh_iterations",
                     "amr_tol": "amr_tol",
                     "amr_max_dof": "amr_max_dof",
+                    "adaptive_mesh_conformal": "adaptive_mesh_conformal",
                     "order": "order",
                     "filled_metals": "filled_metals",
                     "fill_factor_correction": "fill_factor_correction",

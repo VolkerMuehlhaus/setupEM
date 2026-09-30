@@ -1216,6 +1216,29 @@ class MeshTab(QWidget):
         self.mesh_order_box.currentIndexChanged.connect(self.update_amr_ram_note)
         self.update_amr_ram_note()
 
+        # settings['adaptive_mesh_conformal'], advanced row like the AMR goal/max DOF;
+        # the default for new projects comes from Preferences > Palace
+        self.amr_conformal_layout = QHBoxLayout()
+        self.label_amr_conformal = QLabel("Conformal AMR (experimental)")
+        self.label_amr_conformal.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_amr_conformal)
+        self.amr_conformal_layout.addWidget(self.label_amr_conformal)
+        self.amr_conformal_box = QComboBox()
+        self.amr_conformal_box.setFixedWidth(edit_width)
+        self.amr_conformal_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.amr_conformal_box.addItems(["No", "Yes"])
+        self.amr_conformal_box.setCurrentIndex(
+            1 if get_preference_bool(self.MainWindow.APP_NAME, "adaptive_mesh_conformal", False) else 0)
+        self.amr_conformal_box.setToolTip(
+            "No: Palace's default nonconformal (hanging-node) AMR refinement.\n"
+            "Yes: conformal refinement. Converged in fewer AMR iterations in the test cases\n"
+            "so far (D-band balun: 2 iterations gave about the result of 4 nonconformal ones,\n"
+            "in half the time), but the mesh cell count grows faster per iteration.\n"
+            "Only used with Adaptive mesh iterations > 0.")
+        self.amr_conformal_layout.addWidget(self.amr_conformal_box)
+        self.amr_conformal_layout.addStretch()
+        self.AMR_layout.addLayout(self.amr_conformal_layout)
+
         # Palace linear solver: settings['complex_coarse_solve'] (solver_maxits/solver_tol
         # are preferences only). Advanced row, never shown with an older gds2palace that hardcodes these
         # (PALACE_LINEAR_SOLVER_SETTINGS empty), since it would silently ignore them.
@@ -1254,7 +1277,8 @@ class MeshTab(QWidget):
         def on_show_advanced_changed(value):
             show = (value == "Yes")
             for item in [self.labelAMRgoal1, self.amr_goal_edit,
-                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note]:
+                         self.labelAMRmaxdof1, self.amr_maxdof_edit, self.amr_ram_note,
+                         self.label_amr_conformal, self.amr_conformal_box]:
                 item.setVisible(show)
             show_solver = show and bool(PALACE_LINEAR_SOLVER_SETTINGS)
             for item in [self.label_complex_coarse, self.complex_coarse_box]:
@@ -1533,6 +1557,7 @@ class MeshTab(QWidget):
             self.amr_maxdof_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "amr_max_dof", "2000000")))
             return False
         saved_values ["amr_max_dof"] = int(value)
+        saved_values ["adaptive_mesh_conformal"] = self.amr_conformal_box.currentIndex() == 1
 
         # Palace linear solver
         saved_values ["complex_coarse_solve"] = self.complex_coarse_box.currentIndex() == 0
@@ -1624,6 +1649,8 @@ class MeshTab(QWidget):
         self.AMR_iterations_edit.setText(str(saved_values.get("adaptive_mesh_iterations", get_preference(app_name, "adaptive_mesh_iterations", "0"))))
         self.amr_goal_edit.setText(str(saved_values.get("amr_tol", get_preference(app_name, "amr_tol", "0.01"))))
         self.amr_maxdof_edit.setText(str(saved_values.get("amr_max_dof", get_preference(app_name, "amr_max_dof", "2000000"))))
+        self.amr_conformal_box.setCurrentIndex(1 if saved_values.get(
+            "adaptive_mesh_conformal", get_preference_bool(app_name, "adaptive_mesh_conformal", False)) else 0)
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
@@ -2791,9 +2818,9 @@ class ModelEditorTab(QWidget):
 
         # AMR settings only matter for Palace with at least one AMR iteration
         if self.MainWindow.ElmerMode:
-            ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof'])
+            ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof', 'adaptive_mesh_conformal'])
         elif int(saved_values.get('adaptive_mesh_iterations', 0)) == 0:
-            ignore_list.extend(['amr_tol', 'amr_max_dof'])
+            ignore_list.extend(['amr_tol', 'amr_max_dof', 'adaptive_mesh_conformal'])
 
         # write settings grouped by topic; keys not listed here end up in "Other",
         # so a new setting is never silently dropped from the script
@@ -2803,7 +2830,8 @@ class ModelEditorTab(QWidget):
             ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
             ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
                       'meshsize_max', 'order', 'filled_metals']),
-            ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof']),
+            ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
+                                          'adaptive_mesh_conformal']),
             ("Simulation boundary", ['boundary', 'margin', 'air_around']),
             ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
@@ -3081,17 +3109,54 @@ class PreferencesDialog(QDialog):
             tooltip=("Terminates the solver once its reported memory usage exceeds this,\n"
                      "then runs S-parameter postprocessing on whatever results were\n"
                      "already computed, same as a normal completed run."))
-        self.complex_coarse_checkbox = QCheckBox("Complex coarse solve (recommended)")
-        self.complex_coarse_checkbox.setChecked(get_preference_bool(self.app_name, "complex_coarse_solve", True))
-        self.complex_coarse_checkbox.setToolTip(
+        # complex coarse solve and conformal AMR: dropdowns like the Mesh tab's rows,
+        # whose defaults they set
+        complex_coarse_row = QHBoxLayout()
+        complex_coarse_label = QLabel("Complex coarse solve")
+        complex_coarse_label.setFixedWidth(label_width)
+        complex_coarse_row.addWidget(complex_coarse_label)
+        self.complex_coarse_combo = QComboBox()
+        self.complex_coarse_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.complex_coarse_combo.addItem("Yes (recommended)", True)
+        self.complex_coarse_combo.addItem("No", False)
+        self.complex_coarse_combo.setCurrentIndex(
+            0 if get_preference_bool(self.app_name, "complex_coarse_solve", True) else 1)
+        complex_coarse_tooltip = (
             "Default for new projects: Palace's sparse direct coarse solve factorizes the\n"
             "full complex system instead of only its real part. Prevents frequencies that\n"
             "don't converge and get wrong S-parameters, at 1.0-1.6x (order 2) / 1.5-1.9x\n"
-            "(order 1) peak RAM, depending on the model. Turn off only if memory is short.")
+            "(order 1) peak RAM, depending on the model. Choose No only if memory is short.")
+        complex_coarse_label.setToolTip(complex_coarse_tooltip)
+        self.complex_coarse_combo.setToolTip(complex_coarse_tooltip)
         # an older gds2palace hardcodes the Palace default, so the choice would have no effect
-        self.complex_coarse_checkbox.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
-        palace_form.addWidget(self.complex_coarse_checkbox)
-        self._reset_targets.append((self.complex_coarse_checkbox, "complex_coarse_solve", True, "bool"))
+        complex_coarse_label.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
+        self.complex_coarse_combo.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
+        complex_coarse_row.addWidget(self.complex_coarse_combo)
+        palace_form.addLayout(complex_coarse_row)
+        self._reset_targets.append((self.complex_coarse_combo, "complex_coarse_solve", True, "combo"))
+
+        amr_conformal_row = QHBoxLayout()
+        amr_conformal_label = QLabel("Conformal AMR (experimental)")
+        amr_conformal_label.setFixedWidth(label_width)
+        amr_conformal_row.addWidget(amr_conformal_label)
+        self.amr_conformal_combo = QComboBox()
+        self.amr_conformal_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        self.amr_conformal_combo.addItem("No", False)
+        self.amr_conformal_combo.addItem("Yes", True)
+        self.amr_conformal_combo.setCurrentIndex(
+            1 if get_preference_bool(self.app_name, "adaptive_mesh_conformal", False) else 0)
+        amr_conformal_tooltip = (
+            "Default for new projects (Mesh and Boundaries tab, advanced configuration):\n"
+            "with AMR iterations > 0, refine the mesh conformally instead of Palace's\n"
+            "default nonconformal (hanging-node) refinement.\n"
+            "Converged in fewer AMR iterations in the test cases so far (D-band balun:\n"
+            "2 iterations gave about the result of 4 nonconformal ones, in half the time),\n"
+            "but the mesh cell count grows faster per iteration.")
+        amr_conformal_label.setToolTip(amr_conformal_tooltip)
+        self.amr_conformal_combo.setToolTip(amr_conformal_tooltip)
+        amr_conformal_row.addWidget(self.amr_conformal_combo)
+        palace_form.addLayout(amr_conformal_row)
+        self._reset_targets.append((self.amr_conformal_combo, "adaptive_mesh_conformal", False, "combo"))
         palace_form.addStretch()
         self.tabs.addTab(palace_widget, "Palace")
 
@@ -3265,11 +3330,12 @@ class PreferencesDialog(QDialog):
         set_preference(self.app_name, "adaptive_mesh_iterations", self.adaptive_mesh_iterations_edit.text())
         set_preference(self.app_name, "margin", self.margin_edit.text())
         set_preference(self.app_name, "air_around", self.air_around_edit.text())
-        set_preference(self.app_name, "complex_coarse_solve", self.complex_coarse_checkbox.isChecked())
+        set_preference(self.app_name, "complex_coarse_solve", bool(self.complex_coarse_combo.currentData()))
         set_preference(self.app_name, "solver_maxits", self.solver_maxits_edit.text())
         set_preference(self.app_name, "solver_tol", self.solver_tol_edit.text())
         set_preference(self.app_name, "amr_tol", self.amr_goal_edit.text())
         set_preference(self.app_name, "amr_max_dof", self.amr_maxdof_edit.text())
+        set_preference(self.app_name, "adaptive_mesh_conformal", bool(self.amr_conformal_combo.currentData()))
         set_preference(self.app_name, "palace_max_ram_gb", self.palace_max_ram_edit.text())
         set_preference(self.app_name, "enable_model_fit_button", self.enable_model_fit_checkbox.isChecked())
         set_preference(self.app_name, "enable_status_bar", self.enable_status_bar_checkbox.isChecked())
