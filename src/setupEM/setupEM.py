@@ -129,12 +129,15 @@ _RAM_FIT_GB_PER_MDOF = 11.7
 _RAM_WORST_GB_PER_MDOF = 15.4
 
 # The fit above predates settings['complex_coarse_solve'] (all those runs factorized only
-# the real part of the system). Factorizing the complex system instead raises peak RAM by
-# these factors, measured on the gds2palace maxits_repro GCPW study (hpz2, 16 ranks):
-# order 1: 15.1 -> 28.9 GB for the same 0.5 M DOF model; order 2: 37.0 GB at 2.6 M DOF
-# vs. 30.9 GB from the fit. Only the order-1 coarse level is factorized, so its share of
-# the total shrinks with order - order 3 (not measured) reuses the order-2 factor.
-_RAM_COMPLEX_COARSE_FACTOR = {1: 1.9, 2: 1.2, 3: 1.2}
+# the real part of the system). Factorizing the complex system instead raises peak RAM by a
+# model-dependent factor. Measured with the same model on vs. off (hpz2, 16 ranks, gds2palace
+# test_data/maxits_repro and test_data/complex_coarse_solve):
+#   order 1: D-band GCPW 15.1 -> 28.9 GB (x1.9), GF180 inductor 6.3 -> 9.5 GB (x1.51)
+#   order 2: L6n2 inductor x1.0, D-band GCPW x1.2 (vs. the fit), balun_mim 3/2/1 um and MIM
+#            x1.31-1.35, Butler matrix 9.5 -> 15.6 GB (x1.64)
+# Each factor is the largest seen for that order, so the estimate doesn't come out too low.
+# Order 3 (not measured) reuses the order-2 factor.
+_RAM_COMPLEX_COARSE_FACTOR = {1: 1.9, 2: 1.6, 3: 1.6}
 
 # readable on both the light and the dark Windows palette; the note also starts with a
 # warning sign so the over-limit state isn't signalled by color alone. The normal style
@@ -168,7 +171,7 @@ def amr_ram_note_text(max_dof_text, factor=1.0):
 def update_amr_ram_estimate(max_dof_text, ram_limit_text, note_label, order=2, complex_coarse_solve=False):
     """Show the estimated Palace peak RAM for an AMR maximum DOF value in note_label,
     as a warning if the worst case exceeds the "Stop Palace if memory exceeds" limit."""
-    factor = _RAM_COMPLEX_COARSE_FACTOR.get(order, 1.2) if complex_coarse_solve else 1.0
+    factor = _RAM_COMPLEX_COARSE_FACTOR.get(order, 1.6) if complex_coarse_solve else 1.0
     estimate = amr_ram_estimate_gb(max_dof_text, factor)
     try:
         limit = float(ram_limit_text)
@@ -1233,8 +1236,10 @@ class MeshTab(QWidget):
             "No: only its real part (Palace default), which ignores absorbing boundaries,\n"
             "port resistances and losses - the iterative solver then needs more and more\n"
             "iterations as radiation grows with frequency, up to not converging at all.\n"
-            "Yes converges in far fewer iterations and runs several times faster, but\n"
-            "needs more RAM: about 1.9x at order 1, 1.2x at order 2."
+            "An unconverged frequency gets wrong S-parameters, and this can happen at a\n"
+            "single low frequency too. Yes (default for every model) converges in far fewer\n"
+            "iterations, with the same results and the same or shorter run time, but needs\n"
+            "more peak RAM: 1.0-1.6x at order 2, 1.5-1.9x at order 1, depending on the model."
         )
         self.complex_coarse_layout.addWidget(self.complex_coarse_box)
         self.complex_coarse_layout.addStretch()
@@ -3080,8 +3085,9 @@ class PreferencesDialog(QDialog):
         self.complex_coarse_checkbox.setChecked(get_preference_bool(self.app_name, "complex_coarse_solve", True))
         self.complex_coarse_checkbox.setToolTip(
             "Default for new projects: Palace's sparse direct coarse solve factorizes the\n"
-            "full complex system instead of only its real part. Converges in far fewer\n"
-            "iterations at higher frequencies, at about 1.9x (order 1) / 1.2x (order 2) RAM.")
+            "full complex system instead of only its real part. Prevents frequencies that\n"
+            "don't converge and get wrong S-parameters, at 1.0-1.6x (order 2) / 1.5-1.9x\n"
+            "(order 1) peak RAM, depending on the model. Turn off only if memory is short.")
         # an older gds2palace hardcodes the Palace default, so the choice would have no effect
         self.complex_coarse_checkbox.setEnabled(bool(PALACE_LINEAR_SOLVER_SETTINGS))
         palace_form.addWidget(self.complex_coarse_checkbox)
