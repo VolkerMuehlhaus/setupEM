@@ -51,8 +51,10 @@ temperature one.
 import argparse
 import glob
 import os
+import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pyvista as pv
@@ -257,6 +259,118 @@ def _load_full_mesh(file_path, cycle_index=None):
     return pv.read(file_path), 0, 1
 
 
+# Elmer-as-EM-solver's per-step field-dump file name suffix, e.g. fields_t0002.vtu
+# or (multi-partition index) fields_t0002.pvtu - the step number is the 1-based
+# row of frequencies.dat that was solved for it.
+_ELMER_STEP_RE = re.compile(r"_t(\d+)\.p?vtu$", re.IGNORECASE)
+
+# How far into a .vtu file to look for its <PointData> header in
+# _piece_has_point_data() - the XML header precedes any (possibly huge, possibly
+# binary/appended) array data, so this covers it without reading the whole file.
+_VTU_HEADER_BYTES = 65536
+
+
+def _read_elmer_frequencies(file_path):
+    """{step (1-based int): frequency in Hz} from the frequencies.dat an Elmer-EM
+    run solved for - gds2palace writes it into the run directory ("frequency =
+    variable time / include frequencies.dat"), one "<step> <Hz>" row per solved
+    frequency, while Elmer itself writes the field dumps into the mesh/ folder
+    below it, so look next to file_path first, then one level up. Empty dict if
+    not found or unparsable - callers then just fall back to unlabeled entries."""
+    folder = os.path.dirname(os.path.abspath(file_path))
+    for d in (folder, os.path.dirname(folder)):
+        path = os.path.join(d, "frequencies.dat")
+        if not os.path.isfile(path):
+            continue
+        frequencies = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        frequencies[int(parts[0])] = float(parts[1])
+        except (OSError, ValueError):
+            return {}
+        return frequencies
+    return {}
+
+
+def _format_ghz(frequency_hz):
+    return f"{frequency_hz / 1e9:g} GHz"
+
+
+def _piece_has_point_data(path):
+    """True/False whether the dataset file a .pvd <DataSet> points at carries any
+    point-data arrays, or None if that can't be told cheaply - read from the file's
+    XML header only, never its array data. Used to label a geometry-only cycle
+    (e.g. Palace's appended AMR error-indicator dump, cell data only) as such
+    before the user ever selects it."""
+    try:
+        if path.lower().endswith(".pvtu"):
+            # A .pvtu is just a small XML index: <PPointData> lists the arrays.
+            root = ET.parse(path).getroot()
+            ppoint = root.find(".//PPointData")
+            return ppoint is not None and len(ppoint) > 0
+        with open(path, "rb") as f:
+            head = f.read(_VTU_HEADER_BYTES).decode("latin-1")
+    except (OSError, ET.ParseError):
+        return None
+    match = re.search(r"<PointData\b[^>]*?(/?)>\s*(<\w+)?", head)
+    if match is None:
+        # No <PointData> in a complete small file means none at all; in a
+        # truncated read of a bigger one, we just don't know.
+        return False if len(head) < _VTU_HEADER_BYTES else None
+    return match.group(1) != "/" and match.group(2) == "<DataArray"
+
+
+def _describe_pvd_cycles(file_path, source):
+    """Human-readable label per cycle of a .pvd collection, in the same order as
+    _load_full_mesh()'s cycle_index (the reader's sorted time_values), or None
+    if file_path isn't a .pvd or can't be read - the caller then keeps the
+    plain "Cycle N" labels.
+
+    What a cycle's <DataSet timestep="..."> means depends on the solver:
+     - Palace driven field dumps: the saved frequency in GHz (confirmed against
+       a real run - timestep="6" for Solver.Driven Freq [6.0]).
+     - Elmer-as-EM-solver: the solver time step, i.e. the 1-based row of
+       frequencies.dat ("frequency = variable time") - mapped to its Hz value.
+    A geometry-only cycle (no point data - e.g. Palace's AMR error-indicator
+    dump, whose timestep is NOT a frequency, observed as 99 for a 6 GHz run) is
+    detected from its file's header, never from its timestep value, and
+    labeled "geometry" instead. The 1-based cycle number is kept in every label
+    so it still matches field_viewer.py's --cycle N.
+    """
+    if os.path.splitext(file_path)[1].lower() != ".pvd":
+        return None
+    try:
+        time_values = list(pv.get_reader(file_path).time_values)
+        root = ET.parse(file_path).getroot()
+    except Exception:
+        return None
+    base = os.path.dirname(os.path.abspath(file_path))
+    has_point_data = {}
+    for dataset in root.iter("DataSet"):
+        try:
+            timestep = float(dataset.get("timestep"))
+        except (TypeError, ValueError):
+            continue
+        has_point_data[timestep] = _piece_has_point_data(os.path.join(base, dataset.get("file", "")))
+    elmer_frequencies = _read_elmer_frequencies(file_path) if source == _ELMER_EM else {}
+
+    labels = []
+    for i, t in enumerate(time_values):
+        number = f"cycle {i + 1}"
+        if has_point_data.get(t) is False:
+            labels.append(f"geometry ({number})")
+        elif source == _PALACE:
+            labels.append(f"{t:g} GHz ({number})")
+        elif source == _ELMER_EM and float(t).is_integer() and int(t) in elmer_frequencies:
+            labels.append(f"{_format_ghz(elmer_frequencies[int(t)])} ({number})")
+        else:
+            labels.append(f"Cycle {i + 1}")
+    return labels
+
+
 def _attach_complex_e_magnitude(mesh, source):
     """Compute and attach the complex E-field magnitude as point_data['E_magnitude'],
     for a source with a driven-frequency (phasor, not time-domain) E-field - see
@@ -459,8 +573,8 @@ class FieldViewerWindow(QDialog):
         self._final_paths = [p for p in self.file_paths if not is_amr_iteration_path(p)] or self.file_paths
         self._visible_paths = self._final_paths
         self.file_path = self._visible_paths[0]
-        self._file_labels = self._build_file_labels(self.file_paths)
         self.source = source
+        self._file_labels = self._build_file_labels(self.file_paths, source)
         # CLI-only (see main()'s --screenshot): render off-screen instead of
         # in a real, visible window - lets field_viewer.py run headless, e.g.
         # in an agent/script context with no display. The GUI (setupEM.py/
@@ -486,6 +600,11 @@ class FieldViewerWindow(QDialog):
         # self.cycle_combo instead of "Cycle N" once visited. Reset in
         # _switch_to_file() since a different file's cycles are unrelated.
         self._cycles_without_data = set()
+        # Per-cycle combo labels for the current file (frequency or "geometry",
+        # see _describe_pvd_cycles()), built once per file on its first load -
+        # None means "not built yet" (or not a labelable .pvd). Reset in
+        # _switch_to_file() together with the cycle state above.
+        self._cycle_labels = None
         # Which side of the clip plane is kept, per axis - +1 (default, matches
         # the original behavior) keeps the negative side; -1 keeps the positive
         # side instead. Updated by _set_view() to match whichever axis-view
@@ -927,7 +1046,7 @@ class FieldViewerWindow(QDialog):
     # ---------- Result file picker ----------
 
     @staticmethod
-    def _build_file_labels(paths):
+    def _build_file_labels(paths, source=None):
         """{path: display_label} for every candidate result file, unique and as
         short as possible. Palace's own field-dump folder nesting (driven vs.
         driven_boundary, per excitation, and - with AMR - per iteration on top
@@ -950,7 +1069,25 @@ class FieldViewerWindow(QDialog):
         a short emoji prefix (matching this codebase's existing emoji-as-icon
         convention, e.g. the "View fields (...)..." button) - skipped when
         every candidate is the same type, since there's then nothing to flag.
+
+        For Elmer-as-EM-solver (source "elmer_em"), each per-step file
+        (fields_t000N.vtu/.pvtu - one file per solved frequency, unlike
+        Palace's single multi-cycle .pvd) also gets its frequency appended,
+        looked up from the run's frequencies.dat - see _read_elmer_frequencies().
+        Left unlabeled if that file or the step's row is missing.
         """
+        labels = FieldViewerWindow._build_path_labels(paths)
+        if source == _ELMER_EM:
+            for path in paths:
+                match = _ELMER_STEP_RE.search(os.path.basename(path))
+                frequency = _read_elmer_frequencies(path).get(int(match.group(1))) if match else None
+                if frequency is not None:
+                    labels[path] = f"{labels[path]} - {_format_ghz(frequency)}"
+        return labels
+
+    @staticmethod
+    def _build_path_labels(paths):
+        """Path-only part of _build_file_labels() - see there."""
         if len(paths) == 1:
             return {paths[0]: os.path.basename(paths[0])}
 
@@ -1000,6 +1137,7 @@ class FieldViewerWindow(QDialog):
         # can have different cycle counts), see __init__'s self._cycle_index.
         self._cycle_index = None
         self._cycles_without_data = set()
+        self._cycle_labels = None
         self._load_mesh()
         self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
 
@@ -1080,12 +1218,24 @@ class FieldViewerWindow(QDialog):
         if not available:
             self._cycles_without_data.add(self._cycle_index)
 
+        # Frequency/"geometry" labels read from the .pvd and its pieces' headers
+        # (see _describe_pvd_cycles()) - once per file, only when there's a
+        # picker to show them in. Discarded if they don't line up with the
+        # reader's own cycle count, falling back to plain "Cycle N".
+        if self._cycle_labels is None and self._num_cycles > 1:
+            labels = _describe_pvd_cycles(self.file_path, self.source)
+            self._cycle_labels = labels if labels and len(labels) == self._num_cycles else []
+
+        def cycle_label(i):
+            if i in self._cycles_without_data:
+                return f"geometry (cycle {i + 1})"
+            if self._cycle_labels:
+                return self._cycle_labels[i]
+            return f"Cycle {i + 1}"
+
         self.cycle_combo.blockSignals(True)
         self.cycle_combo.clear()
-        self.cycle_combo.addItems([
-            "geometry" if i in self._cycles_without_data else f"Cycle {i + 1}"
-            for i in range(self._num_cycles)
-        ])
+        self.cycle_combo.addItems([cycle_label(i) for i in range(self._num_cycles)])
         self.cycle_combo.setCurrentIndex(self._cycle_index)
         self.cycle_combo.blockSignals(False)
         self.cycle_group.setVisible(self._num_cycles > 1)
@@ -1738,7 +1888,9 @@ def main():
                          help="1-based index of which solved cycle to display, for a "
                               "multi-frequency Palace fdump .pvd with more than one "
                               "<DataSet>/cycle (one per solved frequency) - default: the "
-                              "first cycle. Not a frequency/GHz value, just a position.")
+                              "first cycle. Not a frequency/GHz value, just a position - "
+                              "the GUI's Cycle picker shows it next to each frequency, "
+                              "e.g. \"6 GHz (cycle 1)\".")
 
     # --- Scripted/agentic use: everything below sets up the view without a
     # human touching the GUI, by driving the same widgets a click would - see

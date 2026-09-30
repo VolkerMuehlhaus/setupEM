@@ -26,6 +26,11 @@ recursively under a target directory, lets the user check any number of
 them to overlay, pick which S-parameters to plot from a dynamically sized
 grid, and choose whether reflection (Snn) parameters show phase, a Smith
 chart, or a zoomed Smith chart in place of the rectangular phase plot.
+An optional frequency marker (Display group's "Marker" checkbox, a click on
+any plot, or the Left/Right arrow keys) reads out every plotted curve at the
+same frequency - interpolated per file, since different files usually have
+different frequency grids - both as labels on the plot and in a table below it.
+Right-clicking a plot moves the marker to the (next) min/max of the nearest curve.
 
 Normally opened from setupEM's Create Model tab (View Results button, see
 MainWindow.open_result_viewer() in setupEM.py) - but also runnable
@@ -46,6 +51,7 @@ import numpy as np
 import skrf as rf
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
@@ -55,9 +61,10 @@ from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QTreeWidget, QTreeWidgetItem, QPushButton,
     QRadioButton, QButtonGroup, QCheckBox, QSizePolicy, QStyleFactory,
-    QFileDialog, QMessageBox, QMenu,
+    QFileDialog, QMessageBox, QMenu, QDoubleSpinBox, QTableWidget,
+    QTableWidgetItem, QSplitter, QAbstractItemView,
 )
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QColor, QIcon, QPixmap, QPainter, QCursor
 from PySide6.QtCore import Qt, QTimer, QProcess
 
 # __package__ is None/"" when this file is run directly rather than imported as part
@@ -106,6 +113,73 @@ def phase_deg(value):
 
 def Sxx(network, m, n):
     return network.s[:, m-1, n-1]
+
+
+def _interp_complex_at(freq_ghz, data, f_ghz):
+    """Linear interpolation of complex data (real and imaginary part separately)
+    at f_ghz, or None if f_ghz lies outside freq_ghz's range. A single-point
+    array only has a value at exactly its own frequency."""
+    if len(freq_ghz) == 1:
+        return complex(data[0]) if math.isclose(freq_ghz[0], f_ghz, rel_tol=1e-9) else None
+    if f_ghz < freq_ghz[0] or f_ghz > freq_ghz[-1]:
+        return None
+    return complex(np.interp(f_ghz, freq_ghz, data.real), np.interp(f_ghz, freq_ghz, data.imag))
+
+
+def interp_s_at(network, m, n, f_ghz):
+    """Smn of network at marker frequency f_ghz (interpolated, see
+    _interp_complex_at()), or None outside the network's frequency range. Only
+    needs .s/.frequency.f, so works for live-preview stand-in networks too."""
+    return _interp_complex_at(network.frequency.f / 1e9, Sxx(network, m, n), f_ghz)
+
+
+def z0_at(network, port, f_ghz):
+    """Reference impedance of the given port at f_ghz, or None when the network
+    carries none - the live-preview stand-in (_network_from_port_s_data()) has
+    no z0, and a value must not be assumed for it."""
+    z0 = getattr(network, 'z0', None)
+    if z0 is None:
+        return None
+    return _interp_complex_at(network.frequency.f / 1e9, np.asarray(z0)[:, port-1], f_ghz)
+
+
+def curve_values(kind, network, m, n):
+    """The quantity a subplot of the given kind ("db"/"phase"/"smith") shows for
+    Smn, per frequency point - what the marker's min/max search runs on (|Smn|
+    for a Smith chart)."""
+    data = Sxx(network, m, n)
+    if kind == "db":
+        return dB(data)
+    if kind == "phase":
+        return phase_deg(data)
+    return np.abs(data)
+
+
+def find_extremum(freq_ghz, values, which, direction, f_from):
+    """Frequency of a max/min (which="max"/"min") among the curve's own sample
+    points, or None if there is none. direction 0: global extremum; +1/-1: the
+    next local extremum strictly right/left of f_from (a VNA-style "next peak" -
+    endpoints don't count as local extrema there). f_from may be +-inf (marker off)."""
+    v = values if which == "max" else -values
+    v = np.where(np.isfinite(v), v, -np.inf)  # e.g. dB of an exact zero
+    if len(v) == 0:
+        return None
+    if direction == 0:
+        return float(freq_ghz[int(np.argmax(v))])
+    inner = np.arange(1, len(v) - 1)
+    # '>' on the left, '>=' on the right: a flat-topped peak counts once, at its start
+    peaks = inner[(v[inner] > v[inner - 1]) & (v[inner] >= v[inner + 1])]
+    tol = 1e-9 * max(abs(f_from), 1.0) if np.isfinite(f_from) else 0.0
+    if direction > 0:
+        candidates = peaks[freq_ghz[peaks] > f_from + tol]
+        return float(freq_ghz[candidates[0]]) if candidates.size else None
+    candidates = peaks[freq_ghz[peaks] < f_from - tol]
+    return float(freq_ghz[candidates[-1]]) if candidates.size else None
+
+
+def format_complex(z, digits=2):
+    sign = '-' if z.imag < 0 else '+'
+    return f"{z.real:.{digits}f} {sign} j{abs(z.imag):.{digits}f}"
 
 
 def draw_smith_grid(ax, gamma, grid_values, draw_boundary):
@@ -299,6 +373,21 @@ def pick_final_result_file(paths):
 # Result Viewer window
 # ------------------------------------------------------------------
 
+class _GridStepSpinBox(QDoubleSpinBox):
+    """Frequency spinbox whose up/down arrows (and wheel) step along the plotted
+    files' frequency grid via step_callback, instead of a fixed singleStep."""
+
+    def __init__(self, step_callback, parent=None):
+        super().__init__(parent)
+        self._step_callback = step_callback
+
+    def stepBy(self, steps):
+        self._step_callback(steps)
+
+    def stepEnabled(self):
+        return QDoubleSpinBox.StepUpEnabled | QDoubleSpinBox.StepDownEnabled
+
+
 class ResultViewerWindow(QDialog):
     """Own top-level window (no Qt parent, WA_DeleteOnClose - same lifecycle as
     StackupEditorWindow in stackupEditor.py) that lists Touchstone files under
@@ -319,6 +408,14 @@ class ResultViewerWindow(QDialog):
         self._last_n = None              # common port count as of last parameter-grid rebuild
         self.smith_mode = "phase"        # "phase" | "smith" | "zoom"
         self._updating_checks = False    # re-entrancy guard for group<->leaf checkbox propagation
+
+        # Frequency marker - kept as state, not as plot artists, because redraw_plot()
+        # clears the whole figure (on every control change and every live-preview poll)
+        # and must be able to put the marker back. See _draw_marker().
+        self._marker_f_ghz = None        # None = marker off
+        self._marker_axes = []           # (ax, kind "db"|"phase"|"smith", m, n), set by redraw_plot()
+        self._marker_plotted = []        # plotted tuples of the last redraw_plot()
+        self._marker_artists = []        # current marker line/dots/labels, removed on each move
 
         # Live preview of Palace's raw port-S.csv, one per completed AMR iteration,
         # while a run hasn't produced real Touchstone files yet - see _rescan_files(),
@@ -366,6 +463,9 @@ class ResultViewerWindow(QDialog):
         # button height, so it sits visually level with the filter checkboxes
         self.add_external_btn.setFixedHeight(self.include_dc_cb.sizeHint().height())
         self.add_external_btn.clicked.connect(self._on_add_external_clicked)
+        # QDialog makes every push button "auto-default" - Enter in the marker
+        # frequency box would otherwise click this button and open the file dialog
+        self.add_external_btn.setAutoDefault(False)
         filter_layout.addWidget(self.add_external_btn)
         files_layout.addLayout(filter_layout)
         self.file_list = QTreeWidget()
@@ -393,8 +493,26 @@ class ResultViewerWindow(QDialog):
             self.display_button_group.addButton(rb)
             display_layout.addWidget(rb)
             rb.toggled.connect(self._on_mode_changed)
+        marker_layout = QHBoxLayout()
+        self.marker_cb = QCheckBox("Marker")
+        self.marker_cb.setToolTip(
+            "Read out all curves at one frequency. Click a plot to place it, "
+            "Left/Right arrow keys (Shift: x10) step along the frequency points, "
+            "right-click a plot to search the nearest curve's min/max.")
+        self.marker_cb.toggled.connect(self._on_marker_toggled)
+        marker_layout.addWidget(self.marker_cb)
+        self.marker_spin = _GridStepSpinBox(self._step_marker)
+        self.marker_spin.setDecimals(6)
+        self.marker_spin.setRange(0.0, 1e6)  # not the data range: an out-of-range marker just reads "-"
+        self.marker_spin.setSuffix(" GHz")
+        self.marker_spin.setKeyboardTracking(False)  # commit on Enter/focus-out, not per keystroke
+        self.marker_spin.setEnabled(False)
+        self.marker_spin.valueChanged.connect(self._set_marker)
+        marker_layout.addWidget(self.marker_spin, 1)
+        display_layout.addLayout(marker_layout)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._rescan_files)
+        self.refresh_btn.setAutoDefault(False)  # see add_external_btn
         display_layout.addWidget(self.refresh_btn)
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
@@ -424,8 +542,27 @@ class ResultViewerWindow(QDialog):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.nav_toolbar = NavigationToolbar2QT(self.canvas, self)
+        # StrongFocus: a click on the plot gives the canvas keyboard focus, so the
+        # Left/Right marker keys reach its key_press_event right away
+        self.canvas.setFocusPolicy(Qt.StrongFocus)
+        self.canvas.mpl_connect('button_press_event', self._on_canvas_click)
+        self.canvas.mpl_connect('key_press_event', self._on_canvas_key)
+
+        self.marker_table = QTableWidget()
+        self.marker_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.marker_table.verticalHeader().setVisible(False)
+        self.marker_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.marker_table.customContextMenuRequested.connect(self._on_marker_table_context_menu)
+        self.marker_table.setVisible(False)
+
+        plot_splitter = QSplitter(Qt.Vertical)
+        plot_splitter.addWidget(self.canvas)
+        plot_splitter.addWidget(self.marker_table)
+        plot_splitter.setChildrenCollapsible(False)
+        plot_splitter.setStretchFactor(0, 4)
+        plot_splitter.setStretchFactor(1, 1)
         main_layout.addWidget(self.nav_toolbar)
-        main_layout.addWidget(self.canvas, 1)
+        main_layout.addWidget(plot_splitter, 1)
 
         # Ctrl+C copies the plot itself (not the toolbar/file list/controls) to
         # the clipboard as an image - window-scoped (default QShortcut context)
@@ -815,6 +952,7 @@ class ResultViewerWindow(QDialog):
                 for k in range(1, n + 1):
                     btn = QPushButton(f"S{m}{k}")
                     btn.setCheckable(True)
+                    btn.setAutoDefault(False)  # Enter must not toggle it, see add_external_btn
                     btn.setChecked((m, k) in self._checked_params)
                     btn.setFixedWidth(50)
                     btn.toggled.connect(lambda checked, m=m, k=k: self._on_param_toggled(m, k, checked))
@@ -856,13 +994,17 @@ class ResultViewerWindow(QDialog):
         self.figure.clear()
         plotted = self._get_checked_plotted()  # also sets warning_label for load failures
         params = sorted(self._checked_params)
+        # figure.clear() already removed the old marker artists along with their axes
+        self._marker_artists = []
+        self._marker_axes = []
+        self._marker_plotted = plotted
 
         if not plotted or not params:
             ax = self.figure.add_subplot(111)
             ax.axis('off')
             ax.text(0.5, 0.5, "Check a file and at least one S-parameter to plot",
                      ha='center', va='center', transform=ax.transAxes)
-            self.canvas.draw_idle()
+            self._draw_marker()
             return
 
         if self.smith_mode in ("smith", "zoom"):
@@ -883,21 +1025,32 @@ class ResultViewerWindow(QDialog):
                 ax.axis('off')
                 ax.text(0.5, 0.5, "No reflection (Snn) parameter selected for Smith view",
                          ha='center', va='center', transform=ax.transAxes)
-                self.canvas.draw_idle()
+                self._draw_marker()
                 return
 
             axes = self.figure.subplots(1, len(reflection_params), squeeze=False)
             for a, (m, n) in enumerate(reflection_params):
                 draw_smith(axes[0][a], m, n, plotted, zoomed=(self.smith_mode == "zoom"))
+                self._marker_axes.append((axes[0][a], "smith", m, n))
         else:
             axes = self.figure.subplots(2, len(params), squeeze=False)
             for a, (m, n) in enumerate(params):
                 draw_rectangular(axes[0][a], m, n, plotted, mode="db")
                 draw_rectangular(axes[1][a], m, n, plotted, mode="phase")
+                self._marker_axes.append((axes[0][a], "db", m, n))
+                self._marker_axes.append((axes[1][a], "phase", m, n))
+
+        for ax, _, _, _ in self._marker_axes:
+            # Freeze the limits autoscaled from the curves alone (get_xlim()/get_ylim()
+            # force the lazy autoscale now) - otherwise an out-of-range marker line
+            # would stretch the frequency axis to reach it.
+            ax.get_xlim()
+            ax.get_ylim()
+            ax.set_autoscale_on(False)
 
         self.figure.suptitle("S Parameters")
         self._draw_shared_legend(plotted)
-        self.canvas.draw_idle()
+        self._draw_marker()
 
     def _draw_shared_legend(self, plotted):
         """One legend below the whole figure instead of one per subplot - every
@@ -914,6 +1067,291 @@ class ResultViewerWindow(QDialog):
         # instead of the legend floating over/under-clipped by the figure edge
         self.figure.legend(handles, labels, loc='outside lower center',
                             ncol=min(len(plotted), 4), fontsize=8)
+
+    # ---------- Frequency marker ----------
+
+    def _marker_grid(self):
+        """Sorted union of all plotted files' frequency points (GHz) - what the
+        arrow keys/spinbox arrows step along."""
+        if not self._marker_plotted:
+            return np.array([])
+        return np.unique(np.concatenate(
+            [network.frequency.f / 1e9 for network, _, _, _ in self._marker_plotted]))
+
+    def _set_marker(self, f_ghz):
+        """Single entry point for every way of moving the marker (None = off):
+        syncs checkbox/spinbox without re-triggering their signals, then moves
+        only the marker artists - no full redraw_plot()."""
+        self._marker_f_ghz = None if f_ghz is None else float(f_ghz)
+        self.marker_cb.blockSignals(True)
+        self.marker_cb.setChecked(f_ghz is not None)
+        self.marker_cb.blockSignals(False)
+        self.marker_spin.setEnabled(f_ghz is not None)
+        if f_ghz is not None:
+            self.marker_spin.blockSignals(True)
+            self.marker_spin.setValue(self._marker_f_ghz)
+            self.marker_spin.blockSignals(False)
+        self._draw_marker()
+
+    def _step_marker(self, steps):
+        """Move the marker by steps points along _marker_grid() (turning it on at
+        the middle point if it was off). From an off-grid position, one step goes
+        to the adjacent grid point in that direction."""
+        grid = self._marker_grid()
+        if grid.size == 0:
+            return
+        f = self._marker_f_ghz
+        if f is None:
+            idx = grid.size // 2
+        elif steps > 0:
+            idx = int(np.searchsorted(grid, f, side='right')) + steps - 1
+        else:
+            idx = int(np.searchsorted(grid, f, side='left')) + steps
+        self._set_marker(grid[min(max(idx, 0), grid.size - 1)])
+
+    def _on_marker_toggled(self, checked):
+        if not checked:
+            self._set_marker(None)
+        elif self.marker_spin.value() > 0:
+            self._set_marker(self.marker_spin.value())  # back where it was last switched off
+        else:
+            self._step_marker(0)  # first use: middle of the plotted frequency points
+            if self._marker_f_ghz is None:
+                self._set_marker(None)  # nothing plotted to place it on - untick again
+
+    def _on_canvas_key(self, event):
+        steps = {'left': -1, 'right': 1, 'shift+left': -10, 'shift+right': 10}.get(event.key)
+        if steps is not None:
+            self._step_marker(steps)
+
+    def _on_canvas_click(self, event):
+        """Left click places the marker: on a dB/phase plot at the clicked frequency
+        (x axis is GHz), on a Smith chart at the frequency of the trace sample
+        nearest to the click. Right click opens the min/max search menu. Ignored
+        while the toolbar's zoom/pan mode is active, so those (which use both
+        mouse buttons) keep working undisturbed."""
+        if event.button not in (1, 3) or self.nav_toolbar.mode or event.inaxes is None:
+            return
+        for ax, kind, m, n in self._marker_axes:
+            if ax is event.inaxes:
+                break
+        else:
+            return
+        if event.button == 3:
+            self._show_marker_search_menu(ax, kind, m, n, event)
+        elif kind != "smith":
+            self._set_marker(event.xdata)
+        else:
+            nearest = self._nearest_curve(kind, m, n, event)
+            if nearest is not None:
+                network = nearest[0]
+                i = int(np.argmin(np.abs(Sxx(network, m, n) - complex(event.xdata, event.ydata))))
+                self._set_marker(network.frequency.f[i] / 1e9)
+
+    def _nearest_curve(self, kind, m, n, event):
+        """The plotted (network, color, linestyle, label) tuple whose curve passes
+        closest to a click in a subplot of the given kind, or None. dB/phase: the
+        vertical distance at the clicked frequency; Smith: the distance to the
+        trace's nearest sample."""
+        best = None  # (distance, plotted tuple)
+        for entry in self._marker_plotted:
+            network = entry[0]
+            if kind == "smith":
+                dist = np.min(np.abs(Sxx(network, m, n) - complex(event.xdata, event.ydata)))
+            else:
+                s = interp_s_at(network, m, n, event.xdata)
+                if s is None:
+                    continue
+                dist = abs((dB(s) if kind == "db" else phase_deg(s)) - event.ydata)
+            if best is None or dist < best[0]:
+                best = (dist, entry)
+        return None if best is None else best[1]
+
+    def _show_marker_search_menu(self, ax, kind, m, n, event):
+        """Right-click menu: move the marker to the max/min, or the next local
+        max/min right/left of the marker, of the curve nearest to the click. Runs
+        on the curve's own sample points (exact data, no interpolation), limited
+        to the frequency span currently visible in a dB/phase plot - so zooming
+        in first narrows the search to that region."""
+        nearest = self._nearest_curve(kind, m, n, event)
+        if nearest is None:
+            return
+        network, _, _, label = nearest
+        freq = network.frequency.f / 1e9
+        values = curve_values(kind, network, m, n)
+        if kind != "smith":
+            xmin, xmax = sorted(ax.get_xlim())
+            visible = (freq >= xmin) & (freq <= xmax)
+            freq, values = freq[visible], values[visible]
+        quantity = {"db": f"dB S{m}{n}", "phase": f"phase S{m}{n}", "smith": f"|S{m}{n}|"}[kind]
+
+        menu = QMenu(self)
+        header = menu.addAction(f"Search {quantity} of {label}")
+        header.setEnabled(False)
+        menu.addSeparator()
+        entries = [
+            ("Max", "max", 0), ("Min", "min", 0), None,
+            ("Next max →", "max", 1), ("Next max ←", "max", -1),
+            ("Next min →", "min", 1), ("Next min ←", "min", -1),
+        ]
+        for entry in entries:
+            if entry is None:
+                menu.addSeparator()
+                continue
+            text, which, direction = entry
+            f_from = self._marker_f_ghz
+            if f_from is None:
+                f_from = -np.inf if direction > 0 else np.inf  # marker off: search from the band edge
+            target = find_extremum(freq, values, which, direction, f_from)
+            action = menu.addAction(text)
+            if target is None:
+                action.setEnabled(False)  # e.g. no further local max in that direction
+            else:
+                action.triggered.connect(lambda checked=False, f=target: self._set_marker(f))
+        menu.exec(QCursor.pos())
+
+    def _draw_marker(self):
+        """(Re)draw the marker line, per-curve dots and value labels on every
+        subplot recorded in _marker_axes, update the readout table, and schedule
+        a canvas repaint. Also called at the end of every redraw_plot()."""
+        for artist in self._marker_artists:
+            artist.remove()
+        self._marker_artists = []
+        f = self._marker_f_ghz
+        if f is not None:
+            for ax, kind, m, n in self._marker_axes:
+                points = []  # (sort key, x, y, color, text)
+                for network, color, _, _ in self._marker_plotted:
+                    s = interp_s_at(network, m, n, f)
+                    if s is None:
+                        continue
+                    if kind == "db":
+                        points.append((dB(s), f, dB(s), color, f"{dB(s):.2f} dB"))
+                    elif kind == "phase":
+                        points.append((phase_deg(s), f, phase_deg(s), color, f"{phase_deg(s):.1f}°"))
+                    else:
+                        points.append((s.imag, s.real, s.imag, color, f"|Γ| {abs(s):.3f}"))
+
+                if kind == "smith":
+                    # labels stacked in the chart's top-left corner
+                    anchor, anchor_coords, dx, ha = (0.02, 0.98), 'axes fraction', 0, 'left'
+                else:
+                    self._marker_artists.append(
+                        ax.axvline(f, color='grey', linestyle='--', linewidth=1))
+                    # labels stacked from the top of the marker line - on its left
+                    # side once it's in the right half, so they stay inside the axes
+                    xmin, xmax = ax.get_xlim()
+                    right_half = f > (xmin + xmax) / 2
+                    anchor, anchor_coords = (f, 0.98), ('data', 'axes fraction')
+                    dx, ha = (-5, 'right') if right_half else (5, 'left')
+
+                # Readout labels as one column (VNA-style), not next to each dot -
+                # close curves would stack their labels on top of each other. Sorted
+                # by value so the column order matches the dots' vertical order;
+                # the box edge color ties each label to its curve.
+                for row, (_, x, y, color, text) in enumerate(sorted(points, key=lambda p: -p[0])):
+                    dot, = ax.plot([x], [y], linestyle='none', marker='o', markersize=6,
+                                   color=color, markeredgecolor='black')
+                    # black text, box edge in the curve color - curve colors like
+                    # yellow/white wouldn't be readable as text on a white plot
+                    label = ax.annotate(
+                        text, xy=anchor, xycoords=anchor_coords,
+                        xytext=(dx, -4 - 13 * row), textcoords='offset points',
+                        ha=ha, va='top', fontsize=7,
+                        bbox=dict(boxstyle='round,pad=0.2', fc='white', ec=color, alpha=0.85))
+                    self._marker_artists += [dot, label]
+        self._update_marker_table()
+        self.canvas.draw_idle()
+
+    def _update_marker_table(self):
+        """Readout table below the plot: one row per plotted file, dB/phase columns
+        per selected parameter - or |Γ|, angle and impedance per reflection
+        parameter in the Smith views. Hidden while the marker is off."""
+        table = self.marker_table
+        f = self._marker_f_ghz
+        table.setVisible(f is not None)
+        if f is None:
+            return
+        smith = self.smith_mode in ("smith", "zoom")
+        params = sorted(self._checked_params)
+        headers = [f"@ {f:.6g} GHz"]
+        if smith:
+            params = [(m, n) for (m, n) in params if m == n]
+            for m, n in params:
+                headers += [f"S{m}{n} |Γ|", f"S{m}{n} ∠ (°)", f"Z{m}{n}"]
+        else:
+            for m, n in params:
+                headers += [f"S{m}{n} (dB)", f"S{m}{n} (°)"]
+
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(self._marker_plotted))
+        for row, (network, color, _, label) in enumerate(self._marker_plotted):
+            name_item = QTableWidgetItem(label)
+            name_item.setIcon(self._color_icon(color))
+            table.setItem(row, 0, name_item)
+            col = 1
+            for m, n in params:
+                s = interp_s_at(network, m, n, f)
+                if smith:
+                    values = self._smith_readout(network, m, s, f)
+                elif s is None:
+                    values = ("—", "—")
+                else:
+                    values = (f"{dB(s):.3f}", f"{phase_deg(s):.2f}")
+                for value in values:
+                    item = QTableWidgetItem(value)
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    table.setItem(row, col, item)
+                    col += 1
+        table.resizeColumnsToContents()
+        # tall enough for up to 6 rows without scrolling (splitter can make it larger)
+        visible_rows = min(table.rowCount(), 6)
+        table.setMinimumHeight(table.horizontalHeader().sizeHint().height()
+                               + visible_rows * table.verticalHeader().defaultSectionSize()
+                               + 2 * table.frameWidth() + 2)
+
+    @staticmethod
+    def _smith_readout(network, port, s, f_ghz):
+        """(|Γ|, angle, impedance) strings for one reflection readout cell group.
+        Impedance uses the file's own reference impedance; the live-preview stand-in
+        network carries none, so it gets normalized z instead of an assumed 50 Ω."""
+        if s is None:
+            return ("—", "—", "—")
+        if abs(1 - s) < 1e-12:
+            z_text = "∞"
+        else:
+            z_norm = (1 + s) / (1 - s)
+            z0 = z0_at(network, port, f_ghz)
+            z_text = f"{format_complex(z_norm, 3)} (norm.)" if z0 is None \
+                else f"{format_complex(z_norm * z0)} Ω"
+        return (f"{abs(s):.4f}", f"{phase_deg(s):.2f}", z_text)
+
+    @staticmethod
+    def _color_icon(color):
+        """Small swatch in a curve's legend color, with a grey border so white/
+        yellow curves are still visible against the table background."""
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(QColor(to_hex(color)))
+        painter = QPainter(pixmap)
+        painter.setPen(QColor('grey'))
+        painter.drawRect(0, 0, 11, 11)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _on_marker_table_context_menu(self, pos):
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy table")
+        if menu.exec(self.marker_table.viewport().mapToGlobal(pos)) != copy_action:
+            return
+        table = self.marker_table
+        columns = range(table.columnCount())
+        lines = ["\t".join(table.horizontalHeaderItem(c).text() for c in columns)]
+        for r in range(table.rowCount()):
+            lines.append("\t".join(table.item(r, c).text() if table.item(r, c) else ""
+                                   for c in columns))
+        QApplication.clipboard().setText("\n".join(lines))
 
 
 # ------------------------------------------------------------------

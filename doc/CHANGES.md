@@ -1,6 +1,24 @@
 
 
+# What's New - September 30, 2026
+
+The **Adaptive mesh refinement (AMR)** group on the Mesh and Boundaries tab is now called **Solver & Adaptive Mesh Refinement (AMR)** and has a new Palace linear solver setting, shown with **Show advanced configuration** = **Yes**. 
+
+**Complex coarse solve** (default **Yes** for every model, set in **Preferences > Palace**) lets Palace's direct coarse solver factorize the full complex system instead of only its real part. With **No** (Palace's own default), some models don't converge at some frequencies and get wrong S-parameters there: a D-band line failed at 170 GHz, and an inductor failed at 2.4 GHz with 1.1 nH instead of 2.5 nH, while it converged at 0.1 and 10 GHz. With **Yes** both converged in 1-31 iterations and ran 3.5-6x faster. Models that already converge give identical results in about the same or less time. The cost is peak RAM, depending on the model 1.0-1.6x at order 2 and 1.5-1.9x at order 1; the AMR RAM estimate includes this. 
+
+**Maximum solver iterations** (400) and **Solver tolerance** (1e-6) can now be changed too, in **Preferences > Palace**. These settings require gds2palace v0.8.0 or later and are hidden with an older version. setupEM module installation now requires gds2palace v0.8.0 or later, which also restores the dielectric loss tangent in Palace models that had been deleted by mistake.
+
+**Conformal AMR (experimental)** is a new advanced setting in the **Solver & Adaptive Mesh Refinement (AMR)** group (default **No**, set in **Preferences > Palace**). With AMR iterations > 0, it switches Palace from its default nonconformal (hanging-node) mesh refinement to conformal refinement (gds2palace `settings['adaptive_mesh_conformal']`). In the test cases so far it converged in fewer AMR iterations (D-band balun: 2 iterations instead of 4, in half the time), but the mesh cell count grows faster per iteration.
+
+setupEM now warns when Palace's linear solver does **not converge**: Palace carries on and writes S-parameters for that frequency anyway, but they are unreliable. Each case gets a ⚠ warning in the Log panel with its frequency, and all of them are listed again at the end of the run.
+
+# What's New - September 29, 2026
+
+The built-in **3D field viewer** now shows frequencies instead of bare numbers: the **Cycle** picker of a multi-frequency Palace field dump lists e.g. "6 GHz (cycle 1)", and Palace's extra error-indicator dump is listed as "geometry" right away. For Elmer (EM), each result file in the **Result File** picker shows its frequency, e.g. "fields_t0002.vtu - 7.5 GHz". The cycle number is kept in the label, so it still matches `field_viewer.py --cycle <N>`.
+
 # What's New - September 26, 2026
+
+**Result Viewer**: new frequency **Marker** that reads out all curves at the same frequency, shown on the plots and in a table below. Set it by clicking a plot, typing a frequency or using the Left/Right arrow keys; right-click a plot to jump to the (next) min/max.
 
 The **AMR maximum DOF** setting now shows an estimate of the RAM that Palace will need at that mesh size, both on the Mesh tab and in Preferences > Palace. The estimate is based on existing Palace results (about 12 GB per million DOF, up to 15 GB). On the Mesh tab, it turns into a warning when the worst case exceeds the **"Stop Palace if memory exceeds"** limit.
 
