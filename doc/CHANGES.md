@@ -1,3 +1,9 @@
+# What's New - October 2, 2026
+
+**Tools > Simplify GDS...** has a new step **Merge via arrays** (default off), with a merge distance (default: the via array merge distance from Preferences). Vias closer than this distance are merged into one shape, but only if they connect the same metal shapes above and below, so merging never shorts different metal shapes. The via layers and the metal layers above and below them come from the loaded XML stackup. Vias without metal above or below are kept unchanged. After merging vias in the file, set the via array merge distance of the model to 0: fill factor correction needs the original vias. Requires gds_prepare_for_EM v1.3.0 or later.
+
+The via array merging of the models themselves (gds2palace `merge_polygon_size`) no longer shorts different metal shapes either, with gds2palace v0.8.1 or later.
+
 
 
 # What's New - September 30, 2026
