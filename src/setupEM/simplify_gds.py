@@ -389,9 +389,10 @@ class SimplifyGdsDialog(QDialog):
         via_size_row.addStretch(1)
         via_layout.addLayout(via_size_row)
 
-        via_note = QLabel("The vias are then already merged in the output file: set the via array "
-                          "merge distance of the model to 0. Fill factor correction needs the "
-                          "original vias and does not work on a file with merged vias.")
+        via_note = QLabel("Merged vias in the output file are treated as solid metal: fill factor "
+                          "correction needs the original vias, which are then no longer in the file. "
+                          "For accurate via resistance, merge vias in the model instead (via array "
+                          "merge distance > 0 with fill factor correction).")
         via_note.setWordWrap(True)
         via_layout.addWidget(via_note)
 
