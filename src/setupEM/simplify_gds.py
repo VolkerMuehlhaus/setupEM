@@ -19,16 +19,17 @@
 """
 simplify_gds.py
 
-Tools > Simplify GDS... : removes floating (unconnected) metal fill and/or
-fills in small cutouts on the currently loaded GDS file, writing the result
-to a new GDS file. Both operations come from gds_prepare_for_EM (a sibling
-package, already an editable install in this venv) and are called in-process
-- no subprocess/CLI involved.
+Tools > Simplify GDS... : removes floating (unconnected) metal fill, fills
+in small cutouts and/or merges via arrays on the currently loaded GDS file,
+writing the result to a new GDS file. All operations come from
+gds_prepare_for_EM (a sibling package, already an editable install in this
+venv) and are called in-process - no subprocess/CLI involved.
 
-No technology-specific layer numbers are hardcoded here: the list of metal
-layers to process is derived entirely from the XML stackup already parsed
-into MainWindow.metals_list (gds2palace's stackup_reader), same as every
-other setupEM feature that needs to know "which GDS layers are metal".
+No technology-specific layer numbers are hardcoded here: the metal layers to
+process, the via layers and the metal layers above/below each via are derived
+entirely from the XML stackup already parsed into MainWindow.metals_list
+(gds2palace's stackup_reader), same as every other setupEM feature that needs
+to know "which GDS layers are metal".
 """
 
 import os, io, contextlib, traceback, tempfile
@@ -130,7 +131,7 @@ def _flatten_cell(lib, cellname):
 def run_simplify(gds_path, metal_layers, output_path, cellname="",
                   do_cutouts=False, max_hole_area=None,
                   do_floating=False, fill_minsize=1.0, fill_maxsize=None, fill_mincount=20,
-                  do_merge=False):
+                  do_merge=False, via_layers=None, via_merge_size=0):
     """Load gds_path, optionally fill small cutouts, remove floating metal
     fill, and/or merge (boolean OR) polygons per layer as a final pass, on
     the given metal_layers, write the result to output_path. Mirrors the
@@ -139,12 +140,21 @@ def run_simplify(gds_path, metal_layers, output_path, cellname="",
     (needs a flattened, per-layer-merged cell first so that touching fill
     tiles aren't mistaken for isolated ones - see
     find_isolated_same_size_polygons_by_layer()'s own docstring), per-layer
-    merge last.
+    merge, then via array merging.
+
+    via_layers: list of (via layer, metal layers above, metal layers below),
+    GDS layer numbers. Vias closer than via_merge_size (microns) are merged
+    if they connect the same metal shapes above and below, see
+    gds_prepare_for_EM.merge_via_array_by_metal_overlap(). Vias without metal
+    above or below are kept unchanged. None or via_merge_size <= 0: no via
+    merging.
     """
     from gds_prepare_for_EM import (
         remove_cutout_keep_hierarchy,
         merge_polygons_by_layer,
         find_isolated_same_size_polygons_by_layer,
+        merge_polygons,
+        merge_via_array_by_metal_overlap,
     )
     from gds_geometry_utils import validate_and_repair_polygons
 
@@ -186,6 +196,31 @@ def run_simplify(gds_path, metal_layers, output_path, cellname="",
     if do_merge and not already_merged_flat:
         lib, top_cell = _flatten_cell(lib, cellname)
         lib = merge_polygons_by_layer(top_cell, layers_list=metal_layers)
+
+    if via_layers and via_merge_size > 0:
+        lib, top_cell = _flatten_cell(lib, cellname)
+        lpp = top_cell.get_polygons(by_spec=True)
+        print(f'Via array merging (distance {via_merge_size} um):')
+
+        def metal_polygons(layers):
+            polygons = [p for (layer, purpose), polys in lpp.items() if layer in layers for p in polys]
+            # touching metal pieces are one metal shape for via grouping
+            return merge_polygons(polygons) if polygons else []
+
+        for via_layer, above_layers, below_layers in via_layers:
+            purposes = [purpose for (layer, purpose) in lpp if layer == via_layer]
+            if not purposes:
+                continue
+            above, below = metal_polygons(above_layers), metal_polygons(below_layers)
+            for purpose in purposes:
+                vias = lpp[(via_layer, purpose)]
+                merged = merge_via_array_by_metal_overlap(
+                    vias, above, below, via_merge_size, keep_unmatched=True)
+                top_cell.remove_polygons(
+                    lambda pts, layer, datatype: layer == via_layer and datatype == purpose)
+                for pts in merged:
+                    top_cell.add(gdspy.Polygon(pts, layer=via_layer, datatype=purpose))
+                print(f'  layer {via_layer}:{purpose}: {len(vias)} -> {len(merged)} polygons')
 
     # Final polygon validity check/repair - always runs, regardless of which
     # operations above were selected. Catches any polygon still geometrically
@@ -235,6 +270,14 @@ class SimplifyGdsDialog(QDialog):
             int(m.layernum) for m in metals_list.getallplanarmetals()
             if not (port_layer_min <= int(m.layernum) <= port_layer_max)
         ) if metals_list is not None else []
+        # via layers with the metal layers above/below them, for via array merging
+        self._via_layers = [
+            (int(m.layernum),
+             [int(n.layernum) for n in m.above if n.is_metal],
+             [int(n.layernum) for n in m.below if n.is_metal])
+            for m in metals_list.metals
+            if m.is_via and not (port_layer_min <= int(m.layernum) <= port_layer_max)
+        ] if metals_list is not None else []
 
         layout = QVBoxLayout(self)
 
@@ -326,13 +369,40 @@ class SimplifyGdsDialog(QDialog):
 
         layout.addWidget(cutout_group)
 
+        # ---- Merge via arrays ----
+        via_group = QGroupBox("Merge via arrays")
+        via_group.setCheckable(True)
+        via_group.setChecked(False)
+        via_group.setToolTip(
+            "Vias closer than this distance are merged into one shape, but only if they connect "
+            "the same metal shapes above and below, so merging never shorts different metal "
+            "shapes. Via layers and the metal layers above/below them come from the XML stackup."
+        )
+        via_layout = QVBoxLayout(via_group)
+        self.via_group = via_group
+
+        via_size_row = QHBoxLayout()
+        via_size_row.addWidget(row_label("Distance (µm)"))
+        self.via_merge_size_edit = QLineEdit(str(get_preference(app_name, "merge_polygon_size", "0.5")))
+        self.via_merge_size_edit.setStyleSheet(_EDIT_STYLE)
+        via_size_row.addWidget(self.via_merge_size_edit)
+        via_size_row.addStretch(1)
+        via_layout.addLayout(via_size_row)
+
+        via_note = QLabel("Merged vias in the output file are treated as solid metal: fill factor "
+                          "correction needs the original vias, which are then no longer in the file. "
+                          "For accurate via resistance, merge vias in the model instead (via array "
+                          "merge distance > 0 with fill factor correction).")
+        via_note.setWordWrap(True)
+        via_layout.addWidget(via_note)
+
         # ---- Merge per layer ----
         # remembers the user's own choice while the checkbox is forced/greyed
         # out by "Remove floating (unconnected) metal" (see
         # _on_floating_group_toggled() below), so it's restored rather than
         # lost once that group is unchecked again
         self._merge_user_choice = get_preference_bool(app_name, "simplify_merge_per_layer", True)
-        self.merge_per_layer_checkbox = QCheckBox("Merge polygons per layer (final step)")
+        self.merge_per_layer_checkbox = QCheckBox("Merge polygons per layer")
         self.merge_per_layer_checkbox.setChecked(self._merge_user_choice)
         self.merge_per_layer_checkbox.setToolTip(
             "Boolean-OR touching/overlapping polygons on the same layer into the minimal "
@@ -346,6 +416,9 @@ class SimplifyGdsDialog(QDialog):
         layout.addWidget(self.merge_per_layer_checkbox)
         floating_group.toggled.connect(self._on_floating_group_toggled)
         self._on_floating_group_toggled(floating_group.isChecked())
+
+        # after "Merge polygons per layer": via merging runs last, see run_simplify()
+        layout.addWidget(via_group)
 
         # ---- Log area ----
         self.log_area = QPlainTextEdit()
@@ -437,7 +510,8 @@ class SimplifyGdsDialog(QDialog):
         do_floating = self.floating_group.isChecked()
         do_cutouts = self.cutout_group.isChecked()
         do_merge = self.merge_per_layer_checkbox.isChecked()
-        if not do_floating and not do_cutouts and not do_merge:
+        do_via_merge = self.via_group.isChecked()
+        if not do_floating and not do_cutouts and not do_merge and not do_via_merge:
             QMessageBox.warning(self, "Error", "Enable at least one operation")
             return
 
@@ -455,6 +529,11 @@ class SimplifyGdsDialog(QDialog):
             fill_mincount = int(mincount_text) if mincount_text else 20
             max_hole_area = _parse_optional_float(self.max_hole_area_edit.text(), "Max cutout area")
             excluded_layers = _parse_layer_list(self.excluded_layers_edit.text())
+            via_merge_size = 0
+            if do_via_merge:
+                via_merge_size = _parse_optional_float(self.via_merge_size_edit.text(), "Via merge distance")
+                if via_merge_size is None or via_merge_size <= 0:
+                    raise ValueError("'Via merge distance' must be a number > 0")
         except ValueError as e:
             QMessageBox.warning(self, "Error", str(e))
             return
@@ -489,7 +568,9 @@ class SimplifyGdsDialog(QDialog):
                     do_cutouts=do_cutouts, max_hole_area=max_hole_area,
                     do_floating=do_floating, fill_minsize=fill_minsize,
                     fill_maxsize=fill_maxsize, fill_mincount=fill_mincount,
-                    do_merge=do_merge)
+                    do_merge=do_merge,
+                    via_layers=[v for v in self._via_layers if v[0] not in excluded_layers],
+                    via_merge_size=via_merge_size)
         except (Exception, SystemExit):
             printed = captured_stdout.getvalue().strip()
             details = (printed + "\n\n" + traceback.format_exc()) if printed else traceback.format_exc()
