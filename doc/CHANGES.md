@@ -1,3 +1,9 @@
+# What's New - October 5, 2026
+
+**Import Model** (*.py) with several GDS purposes (datatypes), e.g. `settings['purpose'] = [0, 35, 4]`, now works: the purpose field shows "0, 35, 4" and the model uses all three. Before, the field showed "(0, 35, 4)" and no datatype matched, so the layout preview and the model had no polygons on any layer. Models with a single purpose were not affected. A single number in the script (`settings['purpose'] = 0`) is now also read as `[0]`.
+
+
+
 # What's New - October 2, 2026
 
 **3D Field Viewer:** with **Log color scale**, a **Range** dropdown (-10, -20 ... -70 dB below Max) replaces the Min field; the default is -70 dB. dB means 20·log10 for E and B fields and 10·log10 for power-like arrays such as S or the energy densities. Switching to another result file or cycle now keeps the selected field (if the new data has it; a field you picked comes back as soon as it is available again) and keeps the camera view, zoom and clip position if the new mesh has the same bounding box, e.g. another AMR iteration or the matching "boundary" file. Only a file with different bounds resets the view.

@@ -474,6 +474,40 @@ def resolve_value_text(value_text, known_constants):
     return eval_simple_python_expression(node, known_constants)
 
 
+def normalize_purpose_list(value, default=(0,)):
+    # Normalize a GDSII purpose (datatype) value to the flat list of ints that
+    # gds_reader.read_gds() expects as purposelist ("purpose in purposelist").
+    # Accepts an int, comma-separated text ("0, 35, 4", also "[0]" or "(0, 35)"),
+    # or a list/tuple. Nested lists/tuples are flattened, so values stored by
+    # older versions as [(0, 35, 4)] (or [[0, 35, 4]] after a JSON round trip)
+    # load back correctly instead of matching no datatype at all. Empty or
+    # unparseable input returns the default.
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return list(default)
+        try:
+            value = ast.literal_eval('[' + text + ']')
+        except (SyntaxError, ValueError):
+            return list(default)
+
+    result = []
+    pending = [value]
+    while pending:
+        item = pending.pop(0)
+        if isinstance(item, (list, tuple)):
+            pending[0:0] = list(item)
+        elif isinstance(item, bool):
+            return list(default)
+        elif isinstance(item, int):
+            result.append(item)
+        elif isinstance(item, float) and item.is_integer():
+            result.append(int(item))
+        else:
+            return list(default)
+    return result if result else list(default)
+
+
 def parse_assignments(file_path):
     # parse lines from a Python model code for variable assigments
     parameters = {}
@@ -1090,10 +1124,9 @@ class FileInputTab(QWidget):
         self.preprocess_gds_checkbox.setChecked(bool(get_saved_value(saved_values, "preprocess_gds", True)))
 
         purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
-        int_list = saved_values.get("purpose", purpose_default)
-        purpose_string = str(int_list).replace('[', '').replace(']', '')
-        self.purpose_edit.setText(purpose_string)
-        # self.purpose_edit.setText(','.join(map(str, int_list)))
+        int_list = normalize_purpose_list(saved_values.get("purpose", purpose_default),
+                                          default=normalize_purpose_list(purpose_default))
+        self.purpose_edit.setText(', '.join(map(str, int_list)))
 
         # read_XML(self.XML_file_edit.text()) # safe if invalid filename
 
@@ -1121,13 +1154,10 @@ class FileInputTab(QWidget):
             # a gds2palace that doesn't support this setting for this application
             saved_values.pop("fill_factor_correction", None)
 
-        text = self.purpose_edit.text()
-        if text != "":
-            # save as list of comma separated values
-            saved_values["purpose"] = ast.literal_eval('[' + text + ']')
-        else:
-            purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
-            saved_values["purpose"] = ast.literal_eval('[' + str(purpose_default) + ']')
+        # save as flat list of ints, empty text falls back to the preference default
+        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
+        saved_values["purpose"] = normalize_purpose_list(self.purpose_edit.text(),
+                                                         default=normalize_purpose_list(purpose_default))
 
         # also trigger the load function of CreateModelTab, because that uses gds file info
         self.MainWindow.create_model_tab.load_values()
@@ -4210,7 +4240,7 @@ class MainWindowBase(QMainWindow):
                 saved_values.clear()
                 # set values that are not included in import
                 saved_values["unit"] = 1e-6
-                saved_values["purpose"] = 0
+                saved_values["purpose"] = [0]
 
                 # check what directory the Python code is in, we might use that to prefix gdsfile and XML file
                 modelcode_path = os.path.dirname(file_path)
@@ -4236,6 +4266,15 @@ class MainWindowBase(QMainWindow):
                                     if not isinstance(values, (list, tuple)):
                                         values = [values]
                                     saved_values[varname] = [f / 1e9 for f in values]
+                                elif varname == "purpose":
+                                    # scalar or list in the script, always a flat list here
+                                    # (stripping "[]" and resolving would give a tuple for
+                                    # [0, 35, 4], which then never matched any datatype)
+                                    try:
+                                        value = resolve_value_text(import_value, known_constants)
+                                    except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
+                                        value = import_value
+                                    saved_values[varname] = normalize_purpose_list(value)
                                 elif varname in ("variable_overrides", "refined_cellsize_override"):
                                     saved_values[varname] = resolve_value_text(import_value, known_constants)
                                 elif varname in ["gds_filename", "XML_filename", "GdsFile", "SubstrateFile"]:
@@ -4543,11 +4582,7 @@ class MainWindowBase(QMainWindow):
         if not os.path.isfile(gdsfile) or self.metals_list is None:
             return set()
         cellname = cellname_from_display(self.file_tab.cellname_box.currentText())
-        purpose_text = self.file_tab.purpose_edit.text().strip()
-        try:
-            purposelist = ast.literal_eval('[' + purpose_text + ']') if purpose_text else [0]
-        except Exception:
-            purposelist = [0]
+        purposelist = normalize_purpose_list(self.file_tab.purpose_edit.text())
 
         if _derived_layer_range_is_safe(self.metals_list, layer_min, layer_max):
             try:
