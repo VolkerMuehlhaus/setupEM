@@ -292,7 +292,7 @@ Once field-dump results are available, click **View fields (...)...** on the Cre
 
 <img src="./png/fieldviewer2.png" alt="3D field viewer" width="750">
 
-The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
+The built-in viewer clips the model along a single axis-aligned plane to reveal a cross-section. Find max. jumps the plane straight to the field's hotspot along the current axis, and the axis-view buttons snap the camera to standard CAD views. The Field panel picks which array to color by and lets you override the color range manually. With a log color scale, a Range dropdown (-10 to -70 dB below Max, default -70 dB) replaces the Min field. Switching to another result file or cycle keeps the selected field, and keeps the camera view, zoom and clip position if the new mesh has the same bounding box; otherwise they are reset. For a vector array, Show arrows overlays direction arrows, with the Arrow size slider controlling both their size and how densely they're packed in.
 
 Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If ParaView is selected but not found on your system, setupEM falls back to the built-in viewer automatically.
 

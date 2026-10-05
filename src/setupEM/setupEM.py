@@ -3210,7 +3210,7 @@ class PreferencesDialog(QDialog):
         self.simplify_excluded_layers_edit = add_row(
             simplify_form, "Layers excluded from simplification", "simplify_excluded_layers", "")
         self.simplify_excluded_layers_edit.setPlaceholderText("e.g. 10,11 - blank = none")
-        self.simplify_merge_per_layer_checkbox = QCheckBox("Merge polygons per layer (final step)")
+        self.simplify_merge_per_layer_checkbox = QCheckBox("Merge polygons per layer")
         self.simplify_merge_per_layer_checkbox.setChecked(
             get_preference_bool(self.app_name, "simplify_merge_per_layer", True))
         simplify_form.addWidget(self.simplify_merge_per_layer_checkbox)

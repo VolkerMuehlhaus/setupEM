@@ -63,7 +63,7 @@ from pyvistaqt import QtInteractor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QRadioButton, QButtonGroup, QCheckBox,
-    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog, QMenu,
+    QSlider, QComboBox, QLineEdit, QStyleFactory, QColorDialog, QMenu, QWidget,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QShortcut, QKeySequence, QColor
@@ -527,6 +527,25 @@ def _is_field_amplitude_array(array_name):
     return array_name in _FIELD_AMPLITUDE_ARRAYS
 
 
+# Log color scale range below the maximum, offered in the "Range" dropdown -
+# see FieldViewerWindow._get_clim(). The last entry is the default.
+_LOG_RANGE_DB_CHOICES = (10, 20, 30, 40, 50, 60, 70)
+_LOG_RANGE_DB_DEFAULT = 70
+
+# Two meshes with bounding boxes this close (fraction of the diagonal) count
+# as the same geometry when switching result files: camera and clip position
+# are kept - see FieldViewerWindow._switch_to_file().
+_SAME_BOUNDS_TOLERANCE = 1e-3
+
+
+def _db_floor(array_name, clim_max, db_range):
+    """Lower color limit db_range dB below clim_max: 20*log10 convention for
+    E/B-field arrays, 10*log10 for everything else - see
+    _is_field_amplitude_array()."""
+    db_per_decade = 20.0 if _is_field_amplitude_array(array_name) else 10.0
+    return clim_max / 10.0 ** (db_range / db_per_decade)
+
+
 def _db_range_to_clim(mesh, array_name, db_range):
     """(floor, data_max) for a log color scale spanning db_range dB below
     array_name's own maximum in mesh, using the field-amplitude convention
@@ -539,9 +558,7 @@ def _db_range_to_clim(mesh, array_name, db_range):
     if positive.size == 0:
         return None
     data_max = positive.max()
-    db_per_decade = 20.0 if _is_field_amplitude_array(array_name) else 10.0
-    floor = data_max / 10.0 ** (db_range / db_per_decade)
-    return floor, data_max
+    return _db_floor(array_name, data_max, db_range), data_max
 
 
 # ------------------------------------------------------------------
@@ -623,6 +640,13 @@ class FieldViewerWindow(QDialog):
         # leaves the scene briefly actor-less, and PyVista's own "reset camera if
         # this looks like the first mesh" heuristic was firing on every redraw.
         self._camera_needs_reset = True
+        # Field type the user picked in the Field combo (and its log scale /
+        # colormap), restored on a cycle or file switch whenever the new data
+        # has an array of that name - even after a cycle or file in between
+        # lacked it and fell back to a default. See _load_mesh().
+        self._preferred_array = None
+        self._preferred_log = None
+        self._preferred_cmap = None
 
         # Colors for mesh edges / vector arrows / scalar-bar (legend) text,
         # each changeable via a small swatch button next to its checkbox in
@@ -689,6 +713,7 @@ class FieldViewerWindow(QDialog):
         self._redraw_scheduled = False
 
         self._build_ui()
+        self._update_range_controls()
         self._load_mesh()
         # Same generic starting view for every source: full mesh, no clip - the
         # "Find max." button (see _move_slider_to_max()) is one click away for
@@ -902,9 +927,12 @@ class FieldViewerWindow(QDialog):
         field_layout = QVBoxLayout()
         self.array_combo = QComboBox()
         self.array_combo.currentTextChanged.connect(self._on_array_changed)
+        # user selection only (not programmatic changes): remembered as the preferred field type
+        self.array_combo.textActivated.connect(self._remember_field_choice)
         field_layout.addWidget(self.array_combo)
         self.log_scale_cb = QCheckBox("Log color scale")
-        self.log_scale_cb.toggled.connect(self._on_redraw_needed)
+        self.log_scale_cb.toggled.connect(self._on_log_scale_toggled)
+        self.log_scale_cb.clicked.connect(self._remember_field_choice)
         field_layout.addWidget(self.log_scale_cb)
 
         # Color range (Min/Max/Reset) directly below the array/log-scale
@@ -913,12 +941,32 @@ class FieldViewerWindow(QDialog):
         # Min/Max stacked one per row (not side by side) - two QLineEdits
         # sharing one row left each too narrow to read its own value
         # comfortably, given the whole Field group's fixed column width.
-        min_layout = QHBoxLayout()
+        # Linear scale: Min field. Log scale: "Range" dropdown instead, the
+        # lower limit is that many dB below Max - see _get_clim(). Only one
+        # of the two rows is visible, see _update_range_controls().
+        self.clim_min_row = QWidget()
+        min_layout = QHBoxLayout(self.clim_min_row)
+        min_layout.setContentsMargins(0, 0, 0, 0)
         min_layout.addWidget(QLabel("Min:"))
         self.clim_min_edit = QLineEdit()
         self.clim_min_edit.editingFinished.connect(self._on_redraw_needed)
         min_layout.addWidget(self.clim_min_edit)
-        field_layout.addLayout(min_layout)
+        field_layout.addWidget(self.clim_min_row)
+
+        self.log_range_row = QWidget()
+        log_range_layout = QHBoxLayout(self.log_range_row)
+        log_range_layout.setContentsMargins(0, 0, 0, 0)
+        log_range_layout.addWidget(QLabel("Range:"))
+        self.log_range_combo = QComboBox()
+        for db in _LOG_RANGE_DB_CHOICES:
+            self.log_range_combo.addItem(f"-{db} dB", db)
+        self.log_range_combo.setCurrentIndex(_LOG_RANGE_DB_CHOICES.index(_LOG_RANGE_DB_DEFAULT))
+        self.log_range_combo.setToolTip(
+            "Log color scale: show values down to this many dB below Max "
+            "(20*log10 for E/B fields, 10*log10 for power-like arrays such as S)")
+        self.log_range_combo.currentIndexChanged.connect(self._on_redraw_needed)
+        log_range_layout.addWidget(self.log_range_combo)
+        field_layout.addWidget(self.log_range_row)
 
         max_layout = QHBoxLayout()
         max_layout.addWidget(QLabel("Max:"))
@@ -1124,22 +1172,34 @@ class FieldViewerWindow(QDialog):
         hidden again)."""
         if path == self.file_path:
             return
+        old_bounds = np.array(self._full_mesh.bounds) if self._full_mesh is not None else None
         self.file_path = path
         self._load_error = None
         self.warning_label.setText("")
-        # A different result file can have entirely different geometry/bounds
-        # (e.g. Palace's "driven" vs. "driven_boundary") - unlike every other
-        # control in this window, this is a good reason to re-fit the camera
-        # rather than keep the previous file's pan/zoom/rotation.
-        self._camera_needs_reset = True
         # Default to the NEW file's own first cycle - a cycle index picked on
         # the old file has no guaranteed correspondence here (different files
         # can have different cycle counts), see __init__'s self._cycle_index.
         self._cycle_index = None
         self._cycles_without_data = set()
         self._cycle_labels = None
-        self._load_mesh()
-        self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
+        # keep the field type if the new file has the same array, see _load_mesh()
+        self._load_mesh(preserve_selection=True, keep_range=False)
+        # Same geometry (e.g. another AMR iteration or frequency file of the
+        # same model): keep the camera (view direction, pan, zoom) and the clip
+        # position. Different bounds (e.g. Palace's "driven" vs.
+        # "driven_boundary" of a different domain): re-fit the camera and
+        # re-center the clip slider for the new mesh.
+        new_bounds = np.array(self._full_mesh.bounds) if self._full_mesh is not None else None
+        same_geometry = (
+            old_bounds is not None and new_bounds is not None
+            and np.allclose(old_bounds, new_bounds,
+                            atol=_SAME_BOUNDS_TOLERANCE * max(self._full_mesh.length, 1e-30))
+        )
+        if same_geometry:
+            self._schedule_redraw()
+        else:
+            self._camera_needs_reset = True
+            self._on_axis_changed()  # resets the clip slider for the new mesh's bounds, redraws
 
     def _on_cycle_changed(self, index):
         """Switch which solved cycle (e.g. frequency, for a multi-frequency
@@ -1151,7 +1211,7 @@ class FieldViewerWindow(QDialog):
         if index < 0 or index == self._cycle_index:
             return
         self._cycle_index = index
-        self._load_mesh(preserve_selection=True)
+        self._load_mesh(preserve_selection=True, keep_range=True)
         self._schedule_redraw()
 
     def _on_include_iterations_toggled(self, checked):
@@ -1169,15 +1229,18 @@ class FieldViewerWindow(QDialog):
 
     # ---------- Mesh loading ----------
 
-    def _load_mesh(self, preserve_selection=False):
+    def _load_mesh(self, preserve_selection=False, keep_range=True):
         """Load self._full_mesh from self.file_path/self._cycle_index.
 
-        preserve_selection=True (only passed by _on_cycle_changed()) keeps
-        the current array/color-by selection instead of recomputing a
-        default - array names are the same across cycles of one file, only
-        the underlying values/ranges differ per cycle. Every other caller
-        (initial load, _switch_to_file()) leaves this False, unchanged from
-        before this parameter existed.
+        preserve_selection=True (passed by _on_cycle_changed() and
+        _switch_to_file()) keeps the current array/color-by selection and log
+        scale setting if the newly loaded data has an array of the same name,
+        instead of recomputing a default. The initial load leaves this False.
+
+        keep_range=True (cycle switch) keeps a linear scale's manually entered
+        Min/Max; keep_range=False (file switch) resets them to the new data.
+        A log scale's Max is always reset to the new data's maximum, since its
+        dB range is defined relative to the maximum.
         """
         self.setWindowTitle(f"Field Viewer - {self._file_labels[self.file_path]}")
         # Bump the generation before anything else below - see __init__'s
@@ -1245,16 +1308,35 @@ class FieldViewerWindow(QDialog):
         self.array_combo.addItems(available)
         self.array_combo.blockSignals(False)
 
-        if preserve_selection and previous_array in available:
-            # Keep the user's current settings across a cycle-only switch -
-            # not just which array is selected, but also its Min/Max color
-            # range: don't let _on_array_changed's _reset_clim_range() (fired
+        # The user's own field choice first, then whatever is shown now (e.g. a
+        # default the user kept), then the default for this data.
+        if preserve_selection and self._preferred_array in available:
+            target_array = self._preferred_array
+        elif preserve_selection and previous_array in available:
+            target_array = previous_array
+        else:
+            target_array = None
+        if target_array is not None:
+            # Keep the user's current settings across a switch - not just which
+            # array is selected, but also its Min/Max color range on a cycle
+            # switch: don't let _on_array_changed's _reset_clim_range() (fired
             # by setCurrentText() below re-selecting the same array name in
             # the freshly repopulated combo) clobber a manually-entered range
             # with this cycle's own data range.
             self.array_combo.blockSignals(True)
-            self.array_combo.setCurrentText(previous_array)
+            self.array_combo.setCurrentText(target_array)
             self.array_combo.blockSignals(False)
+            if target_array == self._preferred_array and target_array != previous_array:
+                # back to the user's choice after a fallback: its own scale settings
+                self._current_cmap = self._preferred_cmap
+                self.log_scale_cb.blockSignals(True)
+                self.log_scale_cb.setChecked(self._preferred_log)
+                self.log_scale_cb.blockSignals(False)
+                self._update_range_controls()
+            if not keep_range or target_array != previous_array:
+                self._reset_clim_range()
+            elif self.log_scale_cb.isChecked():
+                self._reset_clim_max()
             self._update_vector_checkbox_state()
             return
 
@@ -1263,6 +1345,7 @@ class FieldViewerWindow(QDialog):
         self.log_scale_cb.blockSignals(True)
         self.log_scale_cb.setChecked(default_log_scale)
         self.log_scale_cb.blockSignals(False)
+        self._update_range_controls()
         if default_array is not None:
             self.array_combo.setCurrentText(default_array)
             # Explicit calls, not just relying on currentTextChanged above: that
@@ -1464,6 +1547,13 @@ class FieldViewerWindow(QDialog):
 
     # ---------- Field/array picker ----------
 
+    def _remember_field_choice(self, _value=None):
+        """Remember the field type (array, log scale, colormap) the user picked,
+        see __init__'s self._preferred_array."""
+        self._preferred_array = self.array_combo.currentText() or None
+        self._preferred_log = self.log_scale_cb.isChecked()
+        self._preferred_cmap = self._current_cmap
+
     def _on_array_changed(self, _text=None):
         self._reset_clim_range()
         self._update_vector_checkbox_state()
@@ -1514,19 +1604,56 @@ class FieldViewerWindow(QDialog):
         self.clim_min_edit.setText(f"{magnitudes.min():.6g}")
         self.clim_max_edit.setText(f"{magnitudes.max():.6g}")
 
+    def _reset_clim_max(self):
+        """Set only Max to the selected array's data maximum - a log scale's
+        lower limit follows from Max and the dB range, see _get_clim()."""
+        array_name = self.array_combo.currentText()
+        if self._full_mesh is None or not array_name or array_name not in self._full_mesh.point_data:
+            return
+        magnitudes = _array_magnitudes(self._full_mesh[array_name])
+        if magnitudes.size:
+            self.clim_max_edit.setText(f"{magnitudes.max():.6g}")
+
     def _on_clim_reset_clicked(self):
         self._reset_clim_range()
         self._schedule_redraw()
+
+    def _update_range_controls(self):
+        """Log scale: show the dB "Range" dropdown instead of the Min field."""
+        log = self.log_scale_cb.isChecked()
+        self.clim_min_row.setVisible(not log)
+        self.log_range_row.setVisible(log)
+
+    def _on_log_scale_toggled(self, _checked=None):
+        self._update_range_controls()
+        self._schedule_redraw()
+
+    def _set_log_range_db(self, db_range):
+        """Select db_range in the dB dropdown, adding it if it isn't one of the
+        standard choices (e.g. from the CLI's --log-range-db)."""
+        index = self.log_range_combo.findData(db_range)
+        if index < 0:
+            self.log_range_combo.addItem(f"-{db_range:g} dB", db_range)
+            index = self.log_range_combo.count() - 1
+        self.log_range_combo.setCurrentIndex(index)
 
     def _get_clim(self):
         """(min, max) parsed from the Min/Max fields, or None to let PyVista
         auto-scale from the currently displayed mesh (matches the behavior before
         this control existed). Invalid/empty text, or min >= max, both fall back
         to None rather than raising or blocking the redraw - VTK's own clim
-        requires min < max, and a typo here shouldn't break the view."""
+        requires min < max, and a typo here shouldn't break the view.
+
+        Log scale: min is the dB "Range" below Max instead of the Min field."""
         try:
-            clim_min = float(self.clim_min_edit.text())
             clim_max = float(self.clim_max_edit.text())
+            if self.log_scale_cb.isChecked():
+                if clim_max <= 0:
+                    return None
+                clim_min = _db_floor(self.array_combo.currentText(), clim_max,
+                                     self.log_range_combo.currentData())
+            else:
+                clim_min = float(self.clim_min_edit.text())
         except ValueError:
             return None
         if clim_min >= clim_max:
@@ -1901,7 +2028,9 @@ def main():
                               "thermal only). Ignored if --array is also given.")
     parser.add_argument("--array", help="exact point-data array name to color by "
                                          "(e.g. E_imag, U_e, B_imag) - overrides --field")
-    parser.add_argument("--log-scale", action="store_true", help="use a log color scale")
+    parser.add_argument("--log-scale", action="store_true",
+                         help=f"use a log color scale, down to {_LOG_RANGE_DB_DEFAULT} dB below the "
+                              "maximum unless --log-range-db is given")
     parser.add_argument("--log-range-db", type=float,
                          help="set the color range's minimum this many dB below the "
                               "data's own maximum (implies --log-scale) instead of using "
@@ -2008,12 +2137,10 @@ def main():
         window.log_scale_cb.setChecked(True)
     if args.log_range_db is not None:
         array_name = window.array_combo.currentText()
-        result = _db_range_to_clim(window._full_mesh, array_name, args.log_range_db)
-        if result is None:
+        if _db_range_to_clim(window._full_mesh, array_name, args.log_range_db) is None:
             die(f"--log-range-db: array {array_name!r} has no positive values to scale from")
-        floor, data_max = result
-        window.clim_min_edit.setText(f"{floor:.6g}")
-        window.clim_max_edit.setText(f"{data_max:.6g}")
+        window._set_log_range_db(args.log_range_db)
+        window._reset_clim_max()
         window._redraw()
 
     if args.opacity is not None:
