@@ -884,7 +884,7 @@ class FieldViewerWindow(QDialog):
         # scalar-bar legend text, respectively. All three swatches share
         # _pick_color()/_style_swatch_button(); only the swatch and the state
         # attribute it edits differ per row.
-        def _swatch_row(attr_name, initial_color, checkbox):
+        def _swatch_row(attr_name, initial_color, checkbox, extra_widget=None):
             swatch = QPushButton()
             swatch.setFixedSize(18, 18)
             swatch.setToolTip("Choose color")
@@ -898,6 +898,8 @@ class FieldViewerWindow(QDialog):
             row = QHBoxLayout()
             row.addWidget(swatch)
             row.addWidget(checkbox)
+            if extra_widget is not None:
+                row.addWidget(extra_widget)
             row.addStretch()
             display_layout.addLayout(row)
 
@@ -907,7 +909,15 @@ class FieldViewerWindow(QDialog):
         self.show_vectors_cb = QCheckBox("Show arrows")
         self.show_vectors_cb.setEnabled(False)
         self.show_vectors_cb.toggled.connect(self._on_redraw_needed)
-        _swatch_row("_arrow_color", self._arrow_color, self.show_vectors_cb)
+        # Arrow length and color follow the field value (same colormap, linear/
+        # log scale and Min/Max or dB Range as the surface and legend) - see
+        # _add_scaled_vector_glyphs(). Only usable while arrows are drawn.
+        self.scaled_arrows_cb = QCheckBox("Scaled")
+        self.scaled_arrows_cb.setEnabled(False)
+        self.scaled_arrows_cb.toggled.connect(self._on_redraw_needed)
+        self.show_vectors_cb.toggled.connect(lambda _checked: self._update_scaled_checkbox_state())
+        _swatch_row("_arrow_color", self._arrow_color, self.show_vectors_cb, self.scaled_arrows_cb)
+        self._update_scaled_checkbox_state()
 
         self.show_edges_cb = QCheckBox("Overlay mesh")
         self.show_edges_cb.setChecked(False)
@@ -1580,6 +1590,18 @@ class FieldViewerWindow(QDialog):
         )
         self.arrow_size_label.setEnabled(is_vector)
         self.arrow_size_slider.setEnabled(is_vector)
+        self._update_scaled_checkbox_state()
+
+    def _update_scaled_checkbox_state(self):
+        """Enable "Scaled" only while arrows can actually be drawn (vector
+        array selected and Show arrows checked). Its checked state is kept
+        while disabled, like Show arrows' own."""
+        active = self.show_vectors_cb.isEnabled() and self.show_vectors_cb.isChecked()
+        self.scaled_arrows_cb.setEnabled(active)
+        self.scaled_arrows_cb.setToolTip(
+            "Scale arrow length and color by field value, using the same color "
+            "scale and range as the legend; arrows below the range are hidden"
+            if active else "Only available while Show arrows is checked")
 
     def _reset_clim_range(self):
         """(Re-)populate the Min/Max fields from the currently selected array's
@@ -1700,6 +1722,10 @@ class FieldViewerWindow(QDialog):
         target_fraction = (self.arrow_size_slider.value() * _ARROW_SIZE_STEP_PERCENT) / 100.0
         decimation = target_fraction * _VECTOR_ARROW_DECIMATION_RATIO
 
+        if self.scaled_arrows_cb.isChecked() and self.scaled_arrows_cb.isEnabled():
+            return self._add_scaled_vector_glyphs(
+                mesh, array_name, vectors, magnitudes, diagonal * target_fraction, decimation)
+
         floor = max_magnitude * 1e-6  # avoid log10(0) for exact-zero points
         log_magnitude = np.log10(np.clip(magnitudes, floor, None))
         lo, hi = log_magnitude.min(), log_magnitude.max()
@@ -1721,6 +1747,55 @@ class FieldViewerWindow(QDialog):
             # list (would otherwise show up in the Field dropdown's arrays).
             del mesh.point_data[scale_key]
         return self.plotter.add_mesh(glyphs, color=self._arrow_color, reset_camera=False)
+
+    def _add_scaled_vector_glyphs(self, mesh, array_name, vectors, magnitudes,
+                                   max_length, decimation):
+        """"Scaled" arrows: length and color both follow the field magnitude on
+        the same scale as the surface and legend - same colormap, same
+        linear/log choice, same Min/Max (or log dB Range below Max), including
+        the same fallback to the displayed data's own range when no valid clim
+        is set (see _apply_display_mesh()). Length runs from
+        _VECTOR_ARROW_MIN_LENGTH_RATIO to 1.0 of max_length across that range;
+        points below the lower limit get no arrow (excluded before decimation,
+        so they don't use up arrow slots); points above Max are drawn at full
+        length in the top color."""
+        clim = self._get_clim()
+        if clim is None:
+            lo, hi = float(magnitudes.min()), float(magnitudes.max())
+        else:
+            lo, hi = clim
+        use_log = bool(self.log_scale_cb.isChecked() and lo > 0)
+        if hi <= lo:
+            return None
+
+        keep = magnitudes >= lo
+        if not keep.any():
+            self.warning_label.setText("Scaled arrows: no values inside the color range")
+            return None
+        kept_mag = magnitudes[keep]
+        if use_log:
+            normalized = np.log10(np.clip(kept_mag, lo, hi) / lo) / np.log10(hi / lo)
+        else:
+            normalized = (np.clip(kept_mag, lo, hi) - lo) / (hi - lo)
+        lengths = max_length * (
+            _VECTOR_ARROW_MIN_LENGTH_RATIO + (1.0 - _VECTOR_ARROW_MIN_LENGTH_RATIO) * normalized
+        )
+
+        # Separate point cloud rather than helper arrays on the display mesh:
+        # holds only the arrows that will be drawn.
+        points = pv.PolyData(np.asarray(mesh.points)[keep])
+        points.point_data["vec"] = np.asarray(vectors)[keep]
+        points.point_data["length"] = lengths
+        points.point_data["value"] = kept_mag
+        try:
+            glyphs = points.glyph(orient="vec", scale="length", factor=1.0,
+                                   tolerance=decimation)
+        except Exception as exc:
+            self.warning_label.setText(f"Vector arrows failed: {exc}")
+            return None
+        return self.plotter.add_mesh(
+            glyphs, scalars="value", cmap=self._current_cmap, clim=(lo, hi),
+            log_scale=use_log, show_scalar_bar=False, reset_camera=False)
 
     # ---------- Redraw ----------
 
@@ -2046,6 +2121,9 @@ def main():
     parser.add_argument("--arrows", action="store_true",
                          help="overlay vector-field direction arrows (only takes effect "
                               "when the selected array is a vector)")
+    parser.add_argument("--arrows-scaled", action="store_true",
+                         help="with --arrows: scale arrow length and color by field value, "
+                              "using the same color scale and range as the legend")
     parser.add_argument("--arrow-size", type=float,
                          help=f"arrow size as a percent of the mesh's bounding-box diagonal "
                               f"({_ARROW_SIZE_MIN_PERCENT}-{_ARROW_SIZE_MAX_PERCENT}, default "
@@ -2152,6 +2230,11 @@ def main():
         if not window.show_vectors_cb.isEnabled():
             print("Warning: --arrows requested but the selected array is not a vector "
                   "field; no arrows will be drawn.", file=sys.stderr)
+    if args.arrows_scaled:
+        window.scaled_arrows_cb.setChecked(True)
+        if not window.scaled_arrows_cb.isEnabled():
+            print("Warning: --arrows-scaled requires --arrows on a vector field; "
+                  "arrows will not be scaled.", file=sys.stderr)
     if args.arrow_size is not None:
         window.arrow_size_slider.setValue(round(args.arrow_size / _ARROW_SIZE_STEP_PERCENT))
 

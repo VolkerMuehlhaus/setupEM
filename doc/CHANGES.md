@@ -1,3 +1,11 @@
+# What's New - October 7, 2026
+
+**Layout Preview:** the bottom bar now shows the live cursor position (X/Y in um, GDS orientation). Press **M** to measure distances: click the start point, move the mouse to see the live distance, dx and dy, click the end point to fix it. The next click starts a new measurement, **M** or **Esc** leaves measure mode. Dragging still pans while measuring. The mouse pointer is now an arrow (a crosshair in measure mode) instead of a hand while no button is pressed, so the position is easier to identify.
+
+**3D Field Viewer:** new **Scaled** checkbox next to **Show arrows**. When on, arrow length and color follow the field value, using the same colormap, linear or log scale, and Min/Max (or dB Range) as the legend. Arrows below the lower limit are hidden; the smallest visible arrow is never shorter than 15% of the longest. The arrow color swatch is not used while Scaled is on. The command line field viewer has a matching `--arrows-scaled` option.
+
+
+
 # What's New - October 5, 2026
 
 **Import Model** (*.py) with several GDS purposes (datatypes), e.g. `settings['purpose'] = [0, 35, 4]`, now works: the purpose field shows "0, 35, 4" and the model uses all three. Before, the field showed "(0, 35, 4)" and no datatype matched, so the layout preview and the model had no polygons on any layer. Models with a single purpose were not affected. A single number in the script (`settings['purpose'] = 0`) is now also read as `[0]`.
