@@ -146,6 +146,8 @@ Both fields support drag & drop or the **Browse...** button.
 
 Some layout pre-processing is defined here too: **Merge via arrays with spacing** merges nearby vias on `Type="via"` layers into one larger via box (speeds up meshing). Merging fills the gaps between the vias with via material, so the merged box conducts better than the real via array; with **Correction for via array cross section** enabled, the conductivity of each merged via box (heat conductivity in setupThermal) is multiplied by its fill factor (original via area / merged box area). This option needs gds2palace 0.7.0 or later and is hidden otherwise. Layouts with **polygons with holes/cutouts** need "Preprocess GDSII file" checked - this option only appears with an outdated gds2palace install; a current one handles cutouts natively.
 
+**Show layout** (also **Tools > Layout Preview...**) opens a 2D view of the GDSII layers colored by the stackup, with ports and other markers. The mouse wheel zooms and dragging pans; the cursor position (X/Y in um, GDS orientation) is shown in the bottom bar. Press **M** to measure a distance: click the start point, click the end point, and the distance with its dx and dy components is shown on the line and in the bottom bar. A further click starts a new measurement; **M** or **Esc** leaves measure mode. **Ctrl+C** copies the view as an image.
+
 <img src="./png/inputfiles1.png" alt="input files" width="700">
 
 
