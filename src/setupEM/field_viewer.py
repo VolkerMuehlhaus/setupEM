@@ -297,9 +297,16 @@ def _load_full_mesh(file_path, cycle_index=None):
 _ELMER_STEP_RE = re.compile(r"_t(\d+)\.p?vtu$", re.IGNORECASE)
 
 # How far into a .vtu file to look for its <PointData> header in
-# _piece_has_point_data() - the XML header precedes any (possibly huge, possibly
+# _piece_point_arrays() - the XML header precedes any (possibly huge, possibly
 # binary/appended) array data, so this covers it without reading the whole file.
 _VTU_HEADER_BYTES = 65536
+
+# Point-data arrays of Palace's AMR error-indicator cycle (appended to a field
+# dump's .pvd after the solved frequencies; confirmed against a real Palace
+# dump: Cycle000002/data.pvtu with only these two point arrays). A cycle whose
+# point data is a subset of these is labeled "error indicator", not by its
+# timestep - see _describe_pvd_cycles().
+_ERROR_INDICATOR_ARRAYS = {"Indicator", "Rank"}
 
 
 def _read_elmer_frequencies(file_path):
@@ -331,28 +338,33 @@ def _format_ghz(frequency_hz):
     return f"{frequency_hz / 1e9:g} GHz"
 
 
-def _piece_has_point_data(path):
-    """True/False whether the dataset file a .pvd <DataSet> points at carries any
-    point-data arrays, or None if that can't be told cheaply - read from the file's
-    XML header only, never its array data. Used to label a geometry-only cycle
-    (e.g. Palace's appended AMR error-indicator dump, cell data only) as such
-    before the user ever selects it."""
+def _piece_point_arrays(path):
+    """Set of point-data array names in the dataset file a .pvd <DataSet> points
+    at (empty: none at all), or None if that can't be told cheaply - read from
+    the file's XML header only, never its array data. Used to label Palace's
+    appended AMR error-indicator cycle as such before the user ever selects it
+    - see _describe_pvd_cycles()."""
     try:
         if path.lower().endswith(".pvtu"):
             # A .pvtu is just a small XML index: <PPointData> lists the arrays.
             root = ET.parse(path).getroot()
             ppoint = root.find(".//PPointData")
-            return ppoint is not None and len(ppoint) > 0
+            return set() if ppoint is None else {a.get("Name", "") for a in ppoint}
         with open(path, "rb") as f:
             head = f.read(_VTU_HEADER_BYTES).decode("latin-1")
     except (OSError, ET.ParseError):
         return None
-    match = re.search(r"<PointData\b[^>]*?(/?)>\s*(<\w+)?", head)
+    match = re.search(r"<PointData\b[^>]*?(/?)>", head)
     if match is None:
         # No <PointData> in a complete small file means none at all; in a
         # truncated read of a bigger one, we just don't know.
-        return False if len(head) < _VTU_HEADER_BYTES else None
-    return match.group(1) != "/" and match.group(2) == "<DataArray"
+        return set() if len(head) < _VTU_HEADER_BYTES else None
+    if match.group(1) == "/":
+        return set()
+    end = head.find("</PointData>", match.end())
+    if end < 0:
+        return None
+    return set(re.findall(r'<DataArray\b[^>]*?\bName="([^"]*)"', head[match.end():end]))
 
 
 def _describe_pvd_cycles(file_path, source):
@@ -366,11 +378,13 @@ def _describe_pvd_cycles(file_path, source):
        a real run - timestep="6" for Solver.Driven Freq [6.0]).
      - Elmer-as-EM-solver: the solver time step, i.e. the 1-based row of
        frequencies.dat ("frequency = variable time") - mapped to its Hz value.
-    A geometry-only cycle (no point data - e.g. Palace's AMR error-indicator
-    dump, whose timestep is NOT a frequency, observed as 99 for a 6 GHz run) is
-    detected from its file's header, never from its timestep value, and
-    labeled "geometry" instead. The 1-based cycle number is kept in every label
-    so it still matches field_viewer.py's --cycle N.
+    Palace's AMR error-indicator dump, appended as an extra cycle, has a
+    timestep that is NOT a frequency (observed as 99 and 999) - it is detected
+    from its file's header, never from its timestep value: labeled "error
+    indicator" when its point data is only Indicator/Rank (how Palace writes
+    it, see _ERROR_INDICATOR_ARRAYS), or "geometry" when it has no point data
+    at all. The 1-based cycle number is kept in every label so it still matches
+    field_viewer.py's --cycle N.
     """
     if os.path.splitext(file_path)[1].lower() != ".pvd":
         return None
@@ -380,20 +394,23 @@ def _describe_pvd_cycles(file_path, source):
     except Exception:
         return None
     base = os.path.dirname(os.path.abspath(file_path))
-    has_point_data = {}
+    point_arrays = {}
     for dataset in root.iter("DataSet"):
         try:
             timestep = float(dataset.get("timestep"))
         except (TypeError, ValueError):
             continue
-        has_point_data[timestep] = _piece_has_point_data(os.path.join(base, dataset.get("file", "")))
+        point_arrays[timestep] = _piece_point_arrays(os.path.join(base, dataset.get("file", "")))
     elmer_frequencies = _read_elmer_frequencies(file_path) if source == _ELMER_EM else {}
 
     labels = []
     for i, t in enumerate(time_values):
         number = f"cycle {i + 1}"
-        if has_point_data.get(t) is False:
+        arrays = point_arrays.get(t)
+        if arrays is not None and not arrays:
             labels.append(f"geometry ({number})")
+        elif arrays and arrays <= _ERROR_INDICATOR_ARRAYS:
+            labels.append(f"error indicator ({number})")
         elif source == _PALACE:
             labels.append(f"{t:g} GHz ({number})")
         elif source == _ELMER_EM and float(t).is_integer() and int(t) in elmer_frequencies:
