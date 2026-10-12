@@ -464,6 +464,37 @@ def is_openems_model_script(file_path):
     return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
 
 
+# Which kind of model each app handles - MainWindow.MODEL_KIND, and the kind
+# detect_model_script_kind() reports for a script.
+MODEL_KIND_EM = "EM"
+MODEL_KIND_THERMAL = "thermal"
+MODEL_KIND_DESCRIPTIONS = {
+    MODEL_KIND_EM: "an EM (Palace/Elmer) simulation",
+    MODEL_KIND_THERMAL: "a thermal (Elmer) simulation",
+}
+MODEL_KIND_APPS = {MODEL_KIND_EM: "setupEM", MODEL_KIND_THERMAL: "setupThermal"}
+
+
+def detect_model_script_kind(file_path):
+    """MODEL_KIND_THERMAL / MODEL_KIND_EM for a gds2palace model script, or None
+    if it can't be told (neither or both kinds of markers, unreadable file).
+    Markers are the calls the scripts that setupEM/setupThermal generate make:
+    create_elmer_thermal() and heatsource()/constanttemp() objects for thermal,
+    create_palace()/create_elmer() and simulation_port() for EM. Same textual
+    approach as is_openems_model_script() and setupEM's Elmer-vs-Palace check."""
+    try:
+        text = pathlib.Path(file_path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    thermal = re.search(r'create_elmer_thermal\s*\(|\.(?:heatsource|constanttemp)\s*\(', text)
+    em = re.search(r'create_(?:palace|elmer)\s*\(|\.simulation_port\s*\(', text)
+    if thermal and not em:
+        return MODEL_KIND_THERMAL
+    if em and not thermal:
+        return MODEL_KIND_EM
+    return None
+
+
 def resolve_value_text(value_text, known_constants):
     # Parse a raw right-hand-side text (as captured by parse_assignments() below, e.g.
     # "50", "ftarget", "2*Z0", "[ftarget]") as a Python expression and evaluate it
@@ -4170,15 +4201,33 @@ class MainWindowBase(QMainWindow):
         if file_path:
             self.load_configuration_from_file(file_path)
 
+    def _warn_wrong_app_file(self, file_path, owner_app):
+        owner_kind = next(kind for kind, app in MODEL_KIND_APPS.items() if app == owner_app)
+        QMessageBox.warning(
+            self, "Wrong application",
+            f"'{os.path.basename(file_path)}' is a {owner_app} configuration file, which sets up "
+            f"{MODEL_KIND_DESCRIPTIONS[owner_kind]}. This is {self.APP_NAME}.\n\n"
+            f"Open the file with {owner_app} instead.")
+
     def load_configuration_from_file(self, file_path):
         saved_values = self.saved_values
         if file_path:
             extension = pathlib.Path(file_path).suffix
-            if self.CONFIG_SUFFIX.upper() in extension.upper():
+            # *.simcfg is setupEM's, *.tsimcfg setupThermal's - tell the user which
+            # app a file belongs to instead of a generic failure
+            other_app_suffixes = {"." + app_suffix.upper(): app for app_suffix, app in
+                                   (("simcfg", "setupEM"), ("tsimcfg", "setupThermal"))
+                                   if app != self.APP_NAME}
+            if extension.upper() in other_app_suffixes:
+                self._warn_wrong_app_file(file_path, other_app_suffixes[extension.upper()])
+            elif self.CONFIG_SUFFIX.upper() in extension.upper():
                 # regular data storage
-                self.user_inputs_file = file_path
-                # call the native config file loading function
                 data = self.load_user_inputs(file_path)
+                if data.get("application", "") != self.APP_NAME and \
+                        data.get("application", "") in MODEL_KIND_APPS.values():
+                    self._warn_wrong_app_file(file_path, data["application"])
+                    return
+                self.user_inputs_file = file_path
                 if data.get("application", "") == self.APP_NAME:
                     # update internal data structure
                     saved_values.clear()
@@ -4200,6 +4249,21 @@ class MainWindowBase(QMainWindow):
                 else:
                     QMessageBox.information(self, "Failed", "Unknown data format")
             elif extension.upper() == ".PY":
+                script_kind = detect_model_script_kind(file_path)
+                if script_kind is not None and script_kind != self.MODEL_KIND:
+                    answer = QMessageBox.question(
+                        self, "Import Model",
+                        f"'{os.path.basename(file_path)}' looks like a model script for "
+                        f"{MODEL_KIND_DESCRIPTIONS[script_kind]}, but {self.APP_NAME} sets up "
+                        f"{MODEL_KIND_DESCRIPTIONS[self.MODEL_KIND]}.\n\n"
+                        f"Use {MODEL_KIND_APPS[script_kind]} for this file. Importing it here "
+                        "would only pick up the settings that both share (GDSII file, "
+                        "stackup, frequencies ...) and none of its "
+                        f"{'heat sources/boundaries' if script_kind == MODEL_KIND_THERMAL else 'ports'}.\n\n"
+                        "Import anyway?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    if answer != QMessageBox.Yes:
+                        return
                 import_mapping = {
                     "gds_filename": "GdsFile",
                     "XML_filename": "SubstrateFile",

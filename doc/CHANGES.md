@@ -8,6 +8,12 @@
 
 
 
+# What's New - October 8, 2026
+
+**Loading the wrong kind of model:** setupEM and setupThermal now tell you when a file belongs to the other app. A `*.simcfg` file opened in setupThermal or a `*.tsimcfg` file opened in setupEM shows a message naming the app to use instead. An imported `*.py` model script that is a thermal model (`create_elmer_thermal`, heat sources) in setupEM, or an EM model (`create_palace`/`create_elmer`, ports) in setupThermal, asks for confirmation first; the default is not to import.
+
+
+
 # What's New - October 7, 2026
 
 **Layout Preview:** the bottom bar now shows the live cursor position (X/Y in um, GDS orientation). Press **M** to measure distances: click the start point, move the mouse to see the live distance, dx and dy, click the end point to fix it. The next click starts a new measurement, **M** or **Esc** leaves measure mode. Dragging still pans while measuring. The mouse pointer is now an arrow (a crosshair in measure mode) instead of a hand while no button is pressed, so the position is easier to identify.
