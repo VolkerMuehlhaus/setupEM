@@ -1,3 +1,9 @@
+# What's New - October 12, 2026
+
+**Port de-embedding in `scripts/combine_extend_snp.py` fixed** (the `_deembedded.sNp` and `_dc_deembedded.sNp` files): the negative inductance of all ports was put in series at port 1, and the other ports were not de-embedded. For a 3-port, port 1 got the sum of all three values. Now each port gets the value for its own port number; a port without geometry data in `port_information.json` is not de-embedded. The raw `.sNp` and the `_dc.sNp` files were not affected. Please run `combine_snp` again to create the de-embedded files again. The same bug was fixed in gds2palace, where Gianluca Simone and David Lurz (FAU) found it.
+
+
+
 # What's New - October 7, 2026
 
 **Layout Preview:** the bottom bar now shows the live cursor position (X/Y in um, GDS orientation). Press **M** to measure distances: click the start point, move the mouse to see the live distance, dx and dy, click the end point to fix it. The next click starts a new measurement, **M** or **Esc** leaves measure mode. Dragging still pans while measuring. The mouse pointer is now an arrow (a crosshair in measure mode) instead of a hand while no button is pressed, so the position is easier to identify.
