@@ -60,6 +60,7 @@ if __package__ in (None, ""):
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
+        MODEL_KIND_EM,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -73,6 +74,7 @@ else:
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
+        MODEL_KIND_EM,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -3356,6 +3358,7 @@ class PreferencesDialog(QDialog):
 
 class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
+    MODEL_KIND = MODEL_KIND_EM
     CONFIG_SUFFIX = CONFIG_SUFFIX
     DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_FILE
 

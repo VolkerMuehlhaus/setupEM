@@ -55,7 +55,7 @@ if __package__ in (None, ""):
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe,
+        find_paraview_exe, MODEL_KIND_THERMAL,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 else:
@@ -65,7 +65,7 @@ else:
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe,
+        find_paraview_exe, MODEL_KIND_THERMAL,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
 
@@ -1465,6 +1465,7 @@ class ThermalConductivityLegend(QWidget):
 
 class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
+    MODEL_KIND = MODEL_KIND_THERMAL
     CONFIG_SUFFIX = CONFIG_SUFFIX
     DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_FILE
 

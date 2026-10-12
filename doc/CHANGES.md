@@ -1,6 +1,20 @@
 # What's New - October 12, 2026
 
+**3D Field Viewer: value markers.** Check **Probe** in the View box (or press **P**), then click the model to place a numbered marker with the field value at that exact point. Clicking works from any angle, on the full model, the clipped solid, its cut face or the **2D plane only** section; dragging still rotates. Markers are drawn on top of the model, so a marker on a buried body stays visible. A **Markers** list opens beside the view with the marker number, value and x / y / z in µm, plus **Remove**, **Clear** and **Copy** (tab-separated, for spreadsheets). For Elmer thermal temperatures, a dropdown switches the list and labels between **K**, **°C** and **ΔT** (rise above the lowest temperature in the model, in K). Right-click the model for **Jump to Maximum in Cut Plane** (with the clip plane on), **Jump to Maximum on Surface of Body N** (the outer surface of the body you clicked, e.g. the chip; results without body IDs use the whole shown surface), **Add Marker Here**, **Remove Marker N** and **Clear Markers**. Markers are updated when you change the field, result file or cycle; markers outside the new model are removed. Ported from EMStudio's field viewer.
+
+**3D Field Viewer: keys.** With the 3D view focused: **R / F / Home** reset camera, **I** isometric, **X / Y / Z** axis views (**Shift**: negative side), **+ / −** zoom, arrow keys pan, **O** parallel projection, **M** find max., **A** arrows on/off, **P** probe, **PgUp / PgDn** move the clip plane. VTK's own letter keys (e.g. **w** wireframe, **3** stereo, **q** / **e** which stopped the interactor) no longer do anything. The right-click menu now opens only on a click: a right-drag zooms without the menu popping up afterwards.
+
+**3D Field Viewer:** the **Cycle** picker of a Palace field dump showed Palace's extra AMR error-indicator cycle as a frequency, e.g. "999 GHz (cycle 2)". It is now listed as "error indicator (cycle 2)". This happened when that cycle stores its Indicator/Rank values as point data. Dumps that store them as cell data were already listed as "geometry".
+
+**3D Field Viewer:** running `field_viewer.py` / `fieldViewer` standalone with a window failed in Python environments that also have PyQt5 installed. Fixed.
+
 **Port de-embedding in `scripts/combine_extend_snp.py` fixed** (the `_deembedded.sNp` and `_dc_deembedded.sNp` files): the negative inductance of all ports was put in series at port 1, and the other ports were not de-embedded. For a 3-port, port 1 got the sum of all three values. Now each port gets the value for its own port number; a port without geometry data in `port_information.json` is not de-embedded. The raw `.sNp` and the `_dc.sNp` files were not affected. Please run `combine_snp` again to create the de-embedded files again. The same bug was fixed in gds2palace, where Gianluca Simone and David Lurz (FAU) found it.
+
+
+
+# What's New - October 8, 2026
+
+**Loading the wrong kind of model:** setupEM and setupThermal now tell you when a file belongs to the other app. A `*.simcfg` file opened in setupThermal or a `*.tsimcfg` file opened in setupEM shows a message naming the app to use instead. An imported `*.py` model script that is a thermal model (`create_elmer_thermal`, heat sources) in setupEM, or an EM model (`create_palace`/`create_elmer`, ports) in setupThermal, asks for confirmation first; the default is not to import.
 
 
 
