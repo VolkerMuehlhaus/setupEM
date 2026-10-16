@@ -117,15 +117,15 @@ There isn't a single dialog. SetupEM defauls are set using File > Preferences. S
 
 ### What do "margin" and "air_around" actually control, and how does that map to an airbox setting?
 
-`margin` oversizes the dielectric layers, substrate, oxide, and so on, from the bounding box of the drawn geometry. `air_around` is a separate spacing for the air layer that surrounds the whole dielectric stack, and can differ per side of the model, or be set to zero on one side, for example to let a backside ground plane sit flush with the outer boundary instead of wasting an air layer below it. A commercial tool usually bundles both ideas into one airbox padding value; here they are two independent settings, and both must be non-zero somewhere or meshing fails.
+`margin` oversizes the dielectric layers, substrate, oxide, and so on, from the bounding box of the drawn geometry. `air_around` is a separate spacing for the air layer that surrounds the whole dielectric stack, and can differ per side of the model, or be set to zero on one side, for example to let a backside ground plane sit flush with the outer boundary instead of wasting an air layer below it. A commercial tool usually bundles both ideas into one airbox padding value; here they are two independent settings, and both must be non-zero somewhere or meshing fails. In setupEM, the air layer per side is set with **Advanced...** next to **Boundary conditions** on the Mesh and Boundaries tab.
 
 ### What boundary condition types are available, and how do they compare to a radiation boundary?
 
-Each of the six outer box faces, xmin, xmax, ymin, ymax, zmin, zmax, can independently be set to ABC (absorbing boundary), PEC and PMC. ABC plays the role of HFSS's radiation boundary. PML is not implemented yet in the AWS Palace solver. PEC and PMC let you terminate a face as an ideal conductor or ideal magnetic wall, for example to represent a backside ground plane directly as the boundary.
+Each of the six outer box faces, xmin, xmax, ymin, ymax, zmin, zmax, can independently be set to ABC (absorbing boundary), PEC and PMC. ABC plays the role of HFSS's radiation boundary. PML is not implemented yet in the AWS Palace solver. PEC and PMC let you terminate a face as an ideal conductor or ideal magnetic wall, for example to represent a backside ground plane directly as the boundary. In setupEM, **Boundary conditions** on the Mesh and Boundaries tab sets all six faces, and **Advanced...** next to it sets single faces.
 
 ### Is there a symmetry-plane feature to halve simulation time, like HFSS's symmetry boundary?
 
-Not as an automatic feature. You can get the same speedup by drawing only half the layout in GDSII yourself and setting the cut face's boundary to PEC or PMC, matching the symmetry of the structure and excitation. There is no tool that cuts an existing full layout in half for you.
+Not as an automatic feature. You can get the same speedup by drawing only half the layout in GDSII yourself and setting the cut face's boundary to PEC or PMC (**Advanced...** next to **Boundary conditions**), matching the symmetry of the structure and excitation. There is no tool that cuts an existing full layout in half for you.
 
 ### Can I run Elmer instead of Palace, and when would that make sense?
 
