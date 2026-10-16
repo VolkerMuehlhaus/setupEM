@@ -157,12 +157,6 @@ Order sets the polynomial degree of the FEM basis functions, comparable to first
 
 Usually not, if you are already using order 2 with a roughly 2 micron initial mesh. A fine initial mesh without AMR is typically faster overall than starting coarse and refining, because Palace's default AMR here refines against all frequencies and all port excitations at once, which is expensive per iteration. AMR is more useful as a spot check, or at one or a few target frequencies with the refined mesh saved to disk, than as your everyday default.
 
-### What does `z_thickness_factor` do, and why would I touch it?
-
-It scales the effective thickness used for the surface impedance on a conductor's side walls, separately from the true top and bottom surfaces, to correct for over-estimating the low-frequency conductor cross-section. The default is 1.0. Testing on both an inductor and a microstrip line found real, frequency-dependent differences from this factor, particularly in the medium frequency range near a device's peak Q, so it is worth experimenting with if your low-to-mid-frequency loss or Q doesn't match measurement.
-
-See the [Conductor loss modelling](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/userguide_md_format/gds2palace_workflow_userguide.md#conductor-loss-modelling) chapter of the gds2palace workflow user's guide for the full derivation and test cases behind this correction.
-
 ### Do I need to mesh into skin effect anywhere in this flow?
 
 No, for planar conductors. Via layers, `Type="via"`, are meshed as solid volumes rather than surfaces, and get their bulk conductivity assigned directly, with reduced in-plane conductivity to avoid unrealistic side-wall currents after via-array merging.
