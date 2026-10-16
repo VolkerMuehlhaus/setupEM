@@ -399,7 +399,7 @@ Same **Mesh refinement at the edges** / **Mesh cell maximum size absolute** / ba
 
 The Stackup Editor is a standalone graphical tool for creating and editing the XML stackup files used throughout this workflow - materials, the dielectric stack, drawn metal/via layers, derived layers, named Variables, and thermal conductivity tables. It replaces hand-editing this XML in a text editor.
 
-Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
+Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. While the stackup has errors, the preview can't be redrawn: it keeps the last valid drawing, dimmed and crossed by a thin red line, with a banner above it. **Show errors** in that banner opens the XML Preview tab, which lists the errors. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
 
 ### Launching the editor
 
@@ -453,7 +453,7 @@ A free-text description stored as a `<!-- File description: ... -->` XML comment
 
 ### XML Preview tab
 
-A read-only, syntax-highlighted view of the file exactly as it will be saved - including the automatic `schemaVersion` bump and comment stamping this format uses when a file starts using Reference-relative positioning, Derived Layers, or Variables/expressions for the first time. It refreshes when you switch to it, and also right after Undo, New, Open, Import, or a format conversion.
+A read-only, syntax-highlighted view of the file exactly as it will be saved - including the automatic `schemaVersion` bump and comment stamping this format uses when a file starts using Reference-relative positioning, Derived Layers, or Variables/expressions for the first time. It refreshes when you switch to it, and also right after Undo, New, Open, Import, or a format conversion. While the stackup has errors, it lists them instead of the XML.
 
 <img src="./png/xmlpreview1.png" alt="xmldpreview" width="750">
 
