@@ -4,6 +4,8 @@
 
 Loading a model with different boundary conditions per side no longer changes it to one condition for all sides: before, a single **PEC** side turned all six sides into PEC.
 
+**Stackup Editor:** while the stackup has errors, the cross-section preview can't be redrawn and keeps the last valid drawing. It is now marked as not up to date: dimmed, crossed by a thin red line, with a banner above it. **Show errors** in the banner opens the editor's XML Preview tab, which lists the errors. The status line now points there too, instead of to Save.
+
 
 
 # What's New - October 12, 2026
