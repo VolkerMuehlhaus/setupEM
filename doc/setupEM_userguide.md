@@ -205,7 +205,11 @@ Controls the mesh used for simulation, trading off accuracy against simulation t
 
 The same group holds Palace's linear solver setting, which controls how Palace solves each frequency. It is also only shown with **Show advanced configuration** set to **Yes**. **Complex coarse solve** (default **Yes** for every model, changeable in **Preferences > Palace**) makes Palace's sparse direct coarse solver factorize the full complex system instead of only its real part. With **No** (Palace's own default), absorbing boundaries, port resistances and losses are missing from the preconditioner. Some models then don't converge at some frequencies, and get **wrong S-parameters** there. This can't be predicted from the settings, and doesn't depend on **Conductor meshing**: a D-band line failed at 170 GHz, and an inductor failed at a single frequency, 2.4 GHz, giving 1.1 nH instead of 2.5 nH, while it converged at 0.1 and 10 GHz. With **Yes** both converged in 1 to 31 iterations and ran 3.5 to 6 times faster. Models that already converge give identical results, in about the same or less time. The price is more peak RAM, which depends on the model: 1.0-1.6× at order 2 and 1.5-1.9× at order 1 in our test cases. The RAM estimate next to **AMR maximum DOF** includes this. Choose **No** only if a model doesn't fit into memory, and watch for the non-convergence warning described below. **Maximum solver iterations** (default 400) and **Solver tolerance** (default 1e-6) rarely need changing, so they are set in **Preferences > Palace** only and apply to every project. These settings require gds2palace v0.8.0 or later; with an older version they are hidden, since that version always uses the Palace defaults.
 
-The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here - **both must be non-zero**, or meshing will fail.
+The **Boundary settings** group sets the boundary condition on the outside of the simulation box: **Absorbing**, **PEC** or **PMC**. The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here - **both must be non-zero**, or meshing will fail.
+
+**Advanced...** next to **Boundary conditions** sets the boundary condition and the air layer thickness for single sides of the simulation box: xmin, xmax, ymin, ymax, zmin (bottom) and zmax (top). A blank entry uses the value from the tab. The button shows how many sides have their own setting, and its tooltip lists them. A typical use is a backside ground plane: **PEC** at zmin with 0 µm air puts the boundary right at the bottom of the substrate, instead of an air layer below it.
+
+<img src="./png/mesh2.png" alt="box sides" width="460">
 
 When **Simulator > Elmer FEM** is selected (setupEM only), this tab additionally shows Elmer-specific settings (direct vs. iterative solver, optional MPI thread count) in place of the Palace-only **Solver & Adaptive Mesh Refinement (AMR)** group.
 
@@ -399,7 +403,7 @@ Same **Mesh refinement at the edges** / **Mesh cell maximum size absolute** / ba
 
 The Stackup Editor is a standalone graphical tool for creating and editing the XML stackup files used throughout this workflow - materials, the dielectric stack, drawn metal/via layers, derived layers, named Variables, and thermal conductivity tables. It replaces hand-editing this XML in a text editor.
 
-Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
+Edits appear live in the cross-section preview. Clicking a shape there selects the matching row in the Dielectric Stack/Layers tables (and vice versa), and shows its properties in a flyout. While the stackup has errors, the preview can't be redrawn: it keeps the last valid drawing, dimmed and crossed by a thin red line, with a banner above it. **Show errors** in that banner opens the XML Preview tab, which lists the errors. The editor closes itself automatically if a different stackup file is chosen in the main app and there's nothing unsaved to lose.
 
 ### Launching the editor
 
@@ -453,7 +457,7 @@ A free-text description stored as a `<!-- File description: ... -->` XML comment
 
 ### XML Preview tab
 
-A read-only, syntax-highlighted view of the file exactly as it will be saved - including the automatic `schemaVersion` bump and comment stamping this format uses when a file starts using Reference-relative positioning, Derived Layers, or Variables/expressions for the first time. It refreshes when you switch to it, and also right after Undo, New, Open, Import, or a format conversion.
+A read-only, syntax-highlighted view of the file exactly as it will be saved - including the automatic `schemaVersion` bump and comment stamping this format uses when a file starts using Reference-relative positioning, Derived Layers, or Variables/expressions for the first time. It refreshes when you switch to it, and also right after Undo, New, Open, Import, or a format conversion. While the stackup has errors, it lists them instead of the XML.
 
 <img src="./png/xmlpreview1.png" alt="xmldpreview" width="750">
 
