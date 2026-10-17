@@ -60,7 +60,7 @@ if __package__ in (None, ""):
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
-        MODEL_KIND_EM,
+        GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
 else:
@@ -74,7 +74,7 @@ else:
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
-        MODEL_KIND_EM,
+        GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
 
@@ -1173,41 +1173,49 @@ class MeshTab(QWidget):
         self.mesh_group = QGroupBox("Mesh settings")
         self.mesh_layout = QVBoxLayout()
 
-        # Palace-only: settings['filled_metals'] - model conductors as solid
-        # bulk-conductivity volumes instead of the default surface-impedance boundary
-        # condition. Hidden under Elmer mode (setPalaceMode()/setElmerMode() below),
-        # and excluded from Elmer's generated settings dict in create_model_text(),
-        # since gds2palace's filled_metals_em also covers Elmer EM - untested there
-        # so not exposed yet.
-        self.filled_metals_layout = QHBoxLayout()
-        self.label_filled_metals = QLabel("Conductor meshing")
-        self.label_filled_metals.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label_filled_metals)
-        self.filled_metals_layout.addWidget(self.label_filled_metals)
+        # Palace-only: settings['conductor_model'] - 'surface' (surface impedance
+        # boundary on all conductor faces), 'solve_inside' (conductors as solid
+        # bulk-conductivity volumes) or 'solve_inside_skin' (volumes plus thin skin
+        # layers along their faces). Hidden under Elmer mode (setPalaceMode()/
+        # setElmerMode() below), and excluded from Elmer's generated settings dict in
+        # create_model_text(), since gds2palace's volume conductors also cover Elmer
+        # EM - untested there so not exposed yet. An older gds2palace without
+        # conductor_model only gets the first two choices, written as filled_metals.
+        self.conductor_model_layout = QHBoxLayout()
+        self.label_conductor_model = QLabel("Conductor model")
+        self.label_conductor_model.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_conductor_model)
+        self.conductor_model_layout.addWidget(self.label_conductor_model)
 
-        self.filled_metals_box = QComboBox()
+        self.conductor_model_box = QComboBox()
         # wider than the usual edit_width (170) - "Surface impedance (recommended)"/
         # "Solve inside (volume mesh)" don't fit that without clipping. 254 (not
         # edit_width) so its right edge lines up with the "Advanced..." button's
         # right edge on the row below (measured: edit_width 170 + that button's
         # own ~79px + inter-widget spacing = 254).
-        self.filled_metals_box.setFixedWidth(254)
-        self.filled_metals_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.filled_metals_box.addItems(["Surface impedance (recommended)", "Solve inside (volume mesh)"])
-        self.filled_metals_box.setCurrentIndex(0)
-        self.filled_metals_box.setToolTip(
+        self.conductor_model_box.setFixedWidth(254)
+        self.conductor_model_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        conductor_model_labels = {"surface": "Surface impedance (fastest)",
+                                  "solve_inside": "Solve inside (volume mesh)",
+                                  "solve_inside_skin": "Solve inside + skin layers"}
+        for model in (GDS2PALACE_CONDUCTOR_MODELS or ("surface", "solve_inside")):
+            self.conductor_model_box.addItem(conductor_model_labels.get(model, model), model)
+        self.conductor_model_box.setCurrentIndex(0)
+        self.conductor_model_box.setToolTip(
             # Qt tooltips don't auto-wrap plain text - only explicit "\n" breaks
             # a line, so this is wrapped by hand rather than left as one long line.
-            "Surface mesh is the recommended default for microwave frequencies.\n"
-            "Volume mesh gives more accurate conductor loss at low frequency, where\n"
-            "skin depth is no longer small compared to the conductor cross section.\n"
-            "Not recommended as a default: it costs more RAM and simulation time,\n"
-            "and becomes inaccurate at higher frequencies unless the mesh actually\n"
-            "resolves the skin effect."
+            "Surface impedance: fastest. Accurate for inductance, coupling, resonances,\n"
+            "match and balance. Loss is less accurate: peak Q of coils on\n"
+            "TopMetal1/TopMetal2 is 18-30 % too high.\n"
+            "Solve inside: conductors meshed as volumes. For Q and loss while\n"
+            "designing, a few percent pessimistic at a 2 um mesh, 1.25-1.7x the run time.\n"
+            "Solve inside + skin layers: thin layers along the conductor faces resolve\n"
+            "the skin effect. For final Q and loss numbers, within about 3 %,\n"
+            "1.5-3.5x the run time of the surface model."
         )
-        self.filled_metals_layout.addWidget(self.filled_metals_box)
-        self.filled_metals_layout.addStretch()
-        self.mesh_layout.addLayout(self.filled_metals_layout)
+        self.conductor_model_layout.addWidget(self.conductor_model_box)
+        self.conductor_model_layout.addStretch()
+        self.mesh_layout.addLayout(self.conductor_model_layout)
 
         self.refinement_layout = QHBoxLayout()
         self.label2 = QLabel("Mesh refinement at metal edges (µm)")
@@ -1641,7 +1649,14 @@ class MeshTab(QWidget):
         saved_values ["refined_cellsize_override"] = self._refined_cellsize_override
 
         saved_values ["order"] = self.mesh_order_box.currentIndex()+1
-        saved_values ["filled_metals"] = self.filled_metals_box.currentIndex() == 1
+        conductor_model = self.conductor_model_box.currentData()
+        if GDS2PALACE_CONDUCTOR_MODELS:
+            saved_values ["conductor_model"] = conductor_model
+            saved_values.pop("filled_metals", None)   # older name, would conflict in gds2palace
+        else:
+            # an older gds2palace only knows filled_metals
+            saved_values ["filled_metals"] = conductor_model == "solve_inside"
+            saved_values.pop("conductor_model", None)
 
         try:
             value = float(self.cells_lambda_edit.text())
@@ -1761,7 +1776,13 @@ class MeshTab(QWidget):
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
-        self.filled_metals_box.setCurrentIndex(1 if saved_values.get("filled_metals", False) else 0)
+        # older .simcfg files and model scripts have filled_metals (True = 'solve_inside') instead
+        conductor_model = saved_values.get(
+            "conductor_model", "solve_inside" if saved_values.get("filled_metals", False) else "surface")
+        index = self.conductor_model_box.findData(conductor_model)
+        if index < 0 and conductor_model == "solve_inside_skin":
+            index = self.conductor_model_box.findData("solve_inside")   # older gds2palace: closest choice
+        self.conductor_model_box.setCurrentIndex(max(index, 0))
         # older .simcfg files predate these keys - fall back to the preference
         # (complex coarse solve) or gds2palace's defaults
         self.complex_coarse_box.setCurrentIndex(0 if saved_values.get(
@@ -2905,12 +2926,12 @@ class ModelEditorTab(QWidget):
             # leak into an Elmer-mode script; the synthesized settings['fdump'] line
             # (below, after special_keylist) is emitted instead when the checkbox is on.
             ignore_list.append('fdump')
-            # filled_metals (Conductor meshing) is Palace-only in the GUI (its combo box
-            # is hidden under Elmer mode) - gds2palace's filled_metals_em actually also
-            # covers Elmer EM, but that path is untested from setupEM so far, so exclude
-            # it here too, same as 'iterative' is excluded under Palace mode above,
+            # conductor_model (filled_metals with an older gds2palace) is Palace-only in the
+            # GUI (its combo box is hidden under Elmer mode) - gds2palace's volume conductors
+            # actually also cover Elmer EM, but that path is untested from setupEM so far, so
+            # exclude it here too, same as 'iterative' is excluded under Palace mode above,
             # rather than let a value set earlier in Palace mode leak into an Elmer script.
-            ignore_list.append('filled_metals')
+            ignore_list.extend(['conductor_model', 'filled_metals'])
             # an older gds2palace supports the via fill factor correction for Palace only
             if 'elmer' not in FILL_FACTOR_CORRECTION_SOLVERS:
                 ignore_list.append('fill_factor_correction')
@@ -2937,7 +2958,7 @@ class ModelEditorTab(QWidget):
                              'preprocess_gds', 'merge_polygon_size', 'fill_factor_correction']),
             ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
             ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
-                      'meshsize_max', 'order', 'filled_metals']),
+                      'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
             ("Simulation boundary", ['boundary', 'margin', 'air_around']),
@@ -3575,8 +3596,8 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
         self.mesh_tab.Elmer_group.setVisible(False)
-        self.mesh_tab.label_filled_metals.setVisible(True)
-        self.mesh_tab.filled_metals_box.setVisible(True)
+        self.mesh_tab.label_conductor_model.setVisible(True)
+        self.mesh_tab.conductor_model_box.setVisible(True)
         self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
@@ -3599,8 +3620,8 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
-        self.mesh_tab.label_filled_metals.setVisible(False)
-        self.mesh_tab.filled_metals_box.setVisible(False)
+        self.mesh_tab.label_conductor_model.setVisible(False)
+        self.mesh_tab.conductor_model_box.setVisible(False)
         self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 

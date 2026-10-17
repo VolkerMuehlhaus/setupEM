@@ -1,3 +1,9 @@
+# What's New - October 17, 2026
+
+**Conductor model** replaces **Conductor meshing** on the Mesh and Boundaries tab (Palace only), with a third choice: **Surface impedance** (default, as before), **Solve inside (volume mesh)** and the new **Solve inside + skin layers**, which adds thin layers along the conductor faces for accurate Q and loss at high frequency. Generated model scripts now use `settings['conductor_model']` instead of `settings['filled_metals']`. Older projects and model scripts with `filled_metals` still load. setupEM now requires gds2palace 0.9.0 or later; `pip install --upgrade setupEM` updates it.
+
+
+
 # What's New - October 16, 2026
 
 **Boundary conditions per side:** **Advanced...** next to **Boundary conditions** on the Mesh and Boundaries tab opens a table with the six sides of the simulation box. Each side can have its own boundary condition (**Absorbing**, **PEC** or **PMC**) and air layer thickness; a blank entry uses the value from the tab. For example, **PEC** at zmin with 0 µm air models a backside ground plane at the box boundary. This replaces the "same on all sides / different per side" choice for the air layer, which now lives in the same table.

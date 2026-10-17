@@ -96,6 +96,11 @@ FILL_FACTOR_CORRECTION_SOLVERS = getattr(
 # the installed gds2palace understands - empty for an older gds2palace, which hardcodes them
 # and would silently ignore these keys, so the Mesh tab hides its linear solver rows then.
 PALACE_LINEAR_SOLVER_SETTINGS = tuple(getattr(simulation_setup, "PALACE_LINEAR_SOLVER_SETTINGS", ()))
+# Values of settings['conductor_model'] the installed gds2palace understands - empty for an
+# older gds2palace, which only knows settings['filled_metals'] (True = 'solve_inside',
+# False = 'surface') and would silently ignore conductor_model, so the Mesh tab then offers
+# only those two choices and writes filled_metals instead.
+GDS2PALACE_CONDUCTOR_MODELS = tuple(getattr(simulation_setup, "CONDUCTOR_MODELS", ()))
 
 
 # QSettings scope for the File menu's "Load Recent Config"/"Import Recent Model" lists -
@@ -4325,6 +4330,8 @@ class MainWindowBase(QMainWindow):
                     "amr_max_dof": "amr_max_dof",
                     "adaptive_mesh_conformal": "adaptive_mesh_conformal",
                     "order": "order",
+                    "conductor_model": "conductor_model",
+                    # scripts from gds2palace before 0.9.0, mapped to conductor_model in MeshTab.load_values()
                     "filled_metals": "filled_metals",
                     "fill_factor_correction": "fill_factor_correction",
                     "iterative": "iterative",
