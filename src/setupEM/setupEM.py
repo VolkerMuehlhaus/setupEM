@@ -1208,10 +1208,10 @@ class MeshTab(QWidget):
             "match and balance. Loss is less accurate: peak Q of coils on\n"
             "TopMetal1/TopMetal2 is 18-30 % too high.\n"
             "Solve inside: conductors meshed as volumes. For Q and loss while\n"
-            "designing, a few percent pessimistic at a 2 um mesh, about 1.4x the run time.\n"
+            "designing, a few percent pessimistic at a 2 um mesh, 1.25-1.7x the run time.\n"
             "Solve inside + skin layers: thin layers along the conductor faces resolve\n"
             "the skin effect. For final Q and loss numbers, within about 3 %,\n"
-            "about 2x the run time of the surface model."
+            "1.5-3.5x the run time of the surface model."
         )
         self.conductor_model_layout.addWidget(self.conductor_model_box)
         self.conductor_model_layout.addStretch()
