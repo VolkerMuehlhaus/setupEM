@@ -1,3 +1,9 @@
+# What's New - October 19, 2026
+
+**Stackup Editor, ADS Momentum (*.ltd) import:** metals with an EXPAND thickness operation now make the dielectric next to them thicker, as in ADS, instead of reaching into the dielectric below. Before, a thick EXPAND DOWN metal (e.g. MET1/MET2 in a GaAs stackup) overlapped the layers underneath it, and a via could end up with zero height. Files where long lines are wrapped or END_... markers follow the last entry on the same line now import too; before, they failed with "No usable dielectric slabs".
+
+
+
 # What's New - October 18, 2026
 
 **Touchstone files with different port impedances:** the option line of the combined `.sNp` file now has one Z0 per port, in port order. Before, ports with the same Z0 as port 1 were left out.
