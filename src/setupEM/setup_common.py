@@ -4912,8 +4912,8 @@ class MainWindowBase(QMainWindow):
         self.layout_preview_window.show()
 
     def open_simplify_gds(self):
-        # local import: simplify_gds.py imports gds_prepare_for_EM lazily
-        # inside run_simplify() too, but import the dialog module itself here
+        # local import: gds_simplify_for_em.run_simplify() imports gds_prepare_for_EM
+        # lazily, but import the dialog module itself here
         # (not at module load time) for the same circular-import reason as
         # open_stackup_editor()/open_layout_preview() above
         if __package__ in (None, ""):
