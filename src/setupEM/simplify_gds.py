@@ -21,19 +21,18 @@ simplify_gds.py
 
 Tools > Simplify GDS... : removes floating (unconnected) metal fill, fills
 in small cutouts and/or merges via arrays on the currently loaded GDS file,
-writing the result to a new GDS file. All operations come from
-gds_prepare_for_EM (a sibling package, already an editable install in this
-venv) and are called in-process - no subprocess/CLI involved.
+writing the result to a new GDS file. The pipeline itself is
+gds_prepare_for_EM's gds_simplify_for_em.run_simplify() (shared with the
+gds2palace MCP server), called in-process - no subprocess/CLI involved.
 
 No technology-specific layer numbers are hardcoded here: the metal layers to
 process, the via layers and the metal layers above/below each via are derived
 entirely from the XML stackup already parsed into MainWindow.metals_list
-(gds2palace's stackup_reader), same as every other setupEM feature that needs
-to know "which GDS layers are metal".
+(gds2palace's stackup_reader), with gds_simplify_for_em.layers_from_stackup().
 """
 
-import os, io, contextlib, traceback, tempfile
-import gdspy
+import os, io, contextlib, traceback
+from gds_simplify_for_em import run_simplify, layers_from_stackup
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit,
     QPushButton, QPlainTextEdit, QFileDialog, QMessageBox, QCheckBox,
@@ -112,138 +111,6 @@ def _parse_layer_list(text):
                           f"comma-separated list of layer numbers: {text!r}")
 
 
-def _flatten_cell(lib, cellname):
-    """Return (lib, top_cell) with top_cell flattened in place. Round-trips
-    through a temporary GDS file first: gdspy's flatten()/get_polygonsets()
-    hits an internal bug on some in-memory-only reference structures ('tuple'
-    object does not support item assignment) that only a GDS write+read
-    cycle avoids - same workaround gds_prepare_for_EM.py's own CLI pipeline
-    uses before every flatten() call in its main()."""
-    with tempfile.TemporaryDirectory(prefix="setupEM_simplify_") as tmp_dir:
-        tmp_path = os.path.join(tmp_dir, "pre_flatten.gds")
-        lib.write_gds(tmp_path)
-        lib = gdspy.GdsLibrary(infile=tmp_path)
-    top_cell = lib.cells.get(cellname, lib.top_level()[0])
-    top_cell.flatten()
-    return lib, top_cell
-
-
-def run_simplify(gds_path, metal_layers, output_path, cellname="",
-                  do_cutouts=False, max_hole_area=None,
-                  do_floating=False, fill_minsize=1.0, fill_maxsize=None, fill_mincount=20,
-                  do_merge=False, via_layers=None, via_merge_size=0):
-    """Load gds_path, optionally fill small cutouts, remove floating metal
-    fill, and/or merge (boolean OR) polygons per layer as a final pass, on
-    the given metal_layers, write the result to output_path. Mirrors the
-    step order gds_prepare_for_EM.py's own main() uses: cutout removal first
-    (works on the hierarchical design), floating-fill removal after that
-    (needs a flattened, per-layer-merged cell first so that touching fill
-    tiles aren't mistaken for isolated ones - see
-    find_isolated_same_size_polygons_by_layer()'s own docstring), per-layer
-    merge, then via array merging.
-
-    via_layers: list of (via layer, metal layers above, metal layers below),
-    GDS layer numbers. Vias closer than via_merge_size (microns) are merged
-    if they connect the same metal shapes above and below, see
-    gds_prepare_for_EM.merge_via_array_by_metal_overlap(). Vias without metal
-    above or below are kept unchanged. None or via_merge_size <= 0: no via
-    merging.
-    """
-    from gds_prepare_for_EM import (
-        remove_cutout_keep_hierarchy,
-        merge_polygons_by_layer,
-        find_isolated_same_size_polygons_by_layer,
-        merge_polygons,
-        merge_via_array_by_metal_overlap,
-    )
-    from gds_geometry_utils import validate_and_repair_polygons
-
-    # merge_polygons_by_layer()/find_isolated_same_size_polygons_by_layer()
-    # create cells via the bare gdspy.Cell(...) constructor, which
-    # auto-registers each one into gdspy's persistent global
-    # gdspy.current_library - harmless for the CLI (a fresh process every
-    # run) but in this long-running GUI, a second Run on the same file
-    # would reuse the same cell names and gdspy raises "already present in
-    # library". Starting from a fresh current_library each call clears that
-    # accumulated state without touching gds_prepare_for_EM itself.
-    gdspy.current_library = gdspy.GdsLibrary()
-
-    lib = gdspy.GdsLibrary()
-    lib.read_gds(gds_path)
-    top_cell = lib.cells.get(cellname, lib.top_level()[0])
-
-    if do_cutouts:
-        design_bbox = top_cell.get_bounding_box()
-        lib = remove_cutout_keep_hierarchy(lib, metal_layers, design_bbox=design_bbox,
-                                            max_hole_area=max_hole_area)
-        top_cell = lib.cells.get(cellname, lib.top_level()[0])
-
-    # floating-fill removal already ends with a flattened, per-layer-merged
-    # cell (it needs that itself, to tell a floating fill cluster apart from
-    # touching real metal) - so a separate final merge pass is only extra
-    # work when floating-fill removal did NOT already run
-    already_merged_flat = False
-
-    if do_floating:
-        lib, top_cell = _flatten_cell(lib, cellname)
-        merged_lib = merge_polygons_by_layer(top_cell, layers_list=metal_layers)
-        merged_top = merged_lib.top_level()[0]
-        lib = find_isolated_same_size_polygons_by_layer(
-            merged_top, metal_layers,
-            minsize=fill_minsize, maxsize=fill_maxsize, mincount=fill_mincount)
-        already_merged_flat = True
-
-    if do_merge and not already_merged_flat:
-        lib, top_cell = _flatten_cell(lib, cellname)
-        lib = merge_polygons_by_layer(top_cell, layers_list=metal_layers)
-
-    if via_layers and via_merge_size > 0:
-        lib, top_cell = _flatten_cell(lib, cellname)
-        lpp = top_cell.get_polygons(by_spec=True)
-        print(f'Via array merging (distance {via_merge_size} um):')
-
-        def metal_polygons(layers):
-            polygons = [p for (layer, purpose), polys in lpp.items() if layer in layers for p in polys]
-            # touching metal pieces are one metal shape for via grouping
-            return merge_polygons(polygons) if polygons else []
-
-        for via_layer, above_layers, below_layers in via_layers:
-            purposes = [purpose for (layer, purpose) in lpp if layer == via_layer]
-            if not purposes:
-                continue
-            above, below = metal_polygons(above_layers), metal_polygons(below_layers)
-            for purpose in purposes:
-                vias = lpp[(via_layer, purpose)]
-                merged = merge_via_array_by_metal_overlap(
-                    vias, above, below, via_merge_size, keep_unmatched=True)
-                top_cell.remove_polygons(
-                    lambda pts, layer, datatype: layer == via_layer and datatype == purpose)
-                for pts in merged:
-                    top_cell.add(gdspy.Polygon(pts, layer=via_layer, datatype=purpose))
-                print(f'  layer {via_layer}:{purpose}: {len(vias)} -> {len(merged)} polygons')
-
-    # Final polygon validity check/repair - always runs, regardless of which
-    # operations above were selected. Catches any polygon still geometrically
-    # invalid (self-intersecting) no matter the reason - e.g. a cutout
-    # deliberately left alone by remove_cutout_keep_hierarchy() for being
-    # larger than max_hole_area, or a merge step re-introducing an invalid
-    # "bridge" hole encoding while fusing polygons back together. A
-    # solid-body mesher like gds2palace cannot handle this even though
-    # gdspy/GDSII themselves tolerate it.
-    repaired_count, unresolved = validate_and_repair_polygons(lib, metal_layers)
-    if repaired_count:
-        print(f'Final validity check: repaired {repaired_count} invalid polygon(s)')
-    if unresolved:
-        print(f'Final validity check: WARNING - {len(unresolved)} polygon(s) could not be '
-              f'auto-repaired, still geometrically invalid in the output file:')
-        for cell_name, n, layer, reason in unresolved:
-            print(f'  {cell_name} polygon #{n} layer {layer}: {reason}')
-    if not repaired_count and not unresolved:
-        print('Final validity check: no invalid polygons found')
-
-    lib.write_gds(output_path)
-
-
 class SimplifyGdsDialog(QDialog):
     """Own top-level window (WA_DeleteOnClose, non-modal), same lifecycle as
     LayoutPreviewWindow/StackupEditorWindow."""
@@ -266,18 +133,10 @@ class SimplifyGdsDialog(QDialog):
         app_name = self.MainWindow.APP_NAME
         port_layer_min, port_layer_max = _port_layer_range(app_name)
         metals_list = self.MainWindow.metals_list
-        self._metal_layers = sorted(
-            int(m.layernum) for m in metals_list.getallplanarmetals()
-            if not (port_layer_min <= int(m.layernum) <= port_layer_max)
-        ) if metals_list is not None else []
-        # via layers with the metal layers above/below them, for via array merging
-        self._via_layers = [
-            (int(m.layernum),
-             [int(n.layernum) for n in m.above if n.is_metal],
-             [int(n.layernum) for n in m.below if n.is_metal])
-            for m in metals_list.metals
-            if m.is_via and not (port_layer_min <= int(m.layernum) <= port_layer_max)
-        ] if metals_list is not None else []
+        # metal layers to process, and via layers with the metal layers above/below them
+        # for via array merging
+        self._metal_layers, self._via_layers = layers_from_stackup(
+            metals_list, (port_layer_min, port_layer_max)) if metals_list is not None else ([], [])
 
         layout = QVBoxLayout(self)
 

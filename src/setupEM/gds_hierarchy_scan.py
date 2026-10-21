@@ -30,69 +30,16 @@ cell/reference tree directly instead, recursing into referenced cells
 without expanding them, so cost scales with the (small) number of distinct
 cells rather than the (potentially huge) number of instantiated copies.
 
+open_gds_cell() and estimate_polygon_count() live in gds_prepare_for_EM's
+gds_simplify_for_em module (shared with the gds2palace MCP server) and are
+re-exported here, so callers keep using gds_hierarchy_scan.<name>.
+
 No PySide6/setup_common/layout_preview dependency here - keeps this a leaf
 module importable from both without any circular-import concern (setup_common.py
 and layout_preview.py already need a deferred import between each other).
 """
 
-import gdspy
-
-
-def open_gds_cell(gds_path, cellname):
-    """Open gds_path and resolve the target cell: cellname if given and
-    found, else the file's first top-level cell. Shared first step for
-    every walker below. Raises on a bad file or a library with no top-level
-    cell, same as gdspy itself would - callers already wrap their own call
-    sites in a broad try/except.
-    """
-    library = gdspy.GdsLibrary(infile=gds_path)
-    top_level = library.top_level()
-    if not top_level:
-        raise ValueError(f"no top-level cell in {gds_path}")
-    cell = library.cells.get(cellname, top_level[0])
-    return library, cell
-
-
-def estimate_polygon_count(gds_path, cellname, layernumbers, purposelist):
-    """Fast pre-check of how many polygons a full read_gds()-based load
-    would end up processing, without flattening the GDS hierarchy. Walks
-    the cell/reference tree directly: a plain CellReference contributes its
-    referenced cell's own (memoized) count once, a CellArray contributes it
-    columns*rows times - the same arithmetic flatten() would otherwise do
-    by actually generating that many polygon objects. Returns None if the
-    file can't even be opened here (the real read_gds() call is expected to
-    surface that error properly instead).
-    """
-    try:
-        library, cell = open_gds_cell(gds_path, cellname)
-    except Exception:
-        return None
-
-    layernumbers = set(int(n) for n in layernumbers)
-    purposeset = set(int(p) for p in purposelist) if purposelist else None
-
-    memo = {}
-
-    def count(c):
-        if c.name in memo:
-            return memo[c.name]
-        total = 0
-        for polygonset in c.polygons:
-            for layer, datatype in zip(polygonset.layers, polygonset.datatypes):
-                if int(layer) in layernumbers and (purposeset is None or int(datatype) in purposeset):
-                    total += 1
-        for ref in c.references:
-            ref_cell = ref.ref_cell
-            if isinstance(ref_cell, str):
-                ref_cell = library.cells.get(ref_cell)
-            if ref_cell is None:
-                continue
-            sub = count(ref_cell)
-            total += sub * ref.columns * ref.rows if isinstance(ref, gdspy.CellArray) else sub
-        memo[c.name] = total
-        return total
-
-    return count(cell)
+from gds_simplify_for_em import open_gds_cell, estimate_polygon_count  # noqa: F401 (re-export)
 
 
 def layers_present_in_range(gds_path, cellname, layer_min, layer_max, purposelist):

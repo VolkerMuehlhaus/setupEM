@@ -1,3 +1,11 @@
+# What's New - October 21, 2026
+
+**Tools > Simplify GDS:** the simplification code moved to gds_prepare_for_EM (module `gds_simplify_for_em`), where the gds2palace MCP server uses it too. setupEM now requires gds_prepare_for_EM 1.6.0 or later; `pip install --upgrade setupEM` updates it.
+
+Fix: with **Merge via arrays** (and no fill removal or merging per layer), the simplified file still contained the original subcells as extra top-level cells. Without a cell name, gds2palace reads the first top-level cell, which could be one of them, e.g. a pad cell instead of the design. These left-over cells are now removed.
+
+
+
 # What's New - October 19, 2026
 
 **Stackup Editor, ADS Momentum (*.ltd) import:** metals with an EXPAND thickness operation now make the dielectric next to them thicker, as in ADS, instead of reaching into the dielectric below. Before, a thick EXPAND DOWN metal (e.g. MET1/MET2 in a GaAs stackup) overlapped the layers underneath it, and a via could end up with zero height. Files where long lines are wrapped or END_... markers follow the last entry on the same line now import too; before, they failed with "No usable dielectric slabs".
