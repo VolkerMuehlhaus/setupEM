@@ -132,7 +132,7 @@ Type `setupThermal` to start the thermal GUI instead - see chapter "[setupTherma
 
 Both apps organize the workflow into tabs, guiding you through model setup and simulation. Behind the scenes, the GUI builds a Python model script for gds2palace, viewable and (auto-refreshing) editable on the **Code** tab.
 
-Colors in the user interface: **yellow** input fields always require your attention; **white** fields can usually be left at their default values.
+Colors in the user interface: **yellow** input fields always require your attention; **white** fields can usually be left at their default values. To keep these colors readable, setupEM and setupThermal always use a light look, also when your system uses a dark theme.
 
 setupEM can build models for **either** solver: the **Simulator** menu (**Simulator > Palace FEM** / **Elmer FEM**) switches between them, changing the window title and showing/hiding solver-specific settings on the Mesh and Boundaries tab (adaptive mesh refinement settings for Palace; solver/MPI settings for Elmer). setupThermal always targets Elmer's thermal solver and has no Simulator menu.
 
