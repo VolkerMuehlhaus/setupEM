@@ -1561,7 +1561,12 @@ class MainWindow(MainWindowBase):
             model = ScriptModel.from_file(file_path)
         except (SyntaxError, ValueError, OSError, UnicodeDecodeError):
             model = None
-        if model is not None:
+        probe = getattr(self, "_import_probe", None)
+        if probe is not None:
+            # Import ran the script: every object the model has, also ones made in a loop
+            heatsource_defs = [dict(args) for kind, args in probe.thermal if kind == "heatsource"]
+            consttemp_defs = [dict(args) for kind, args in probe.thermal if kind == "constanttemp"]
+        elif model is not None:
             heatsource_defs = [dict(c.args) for c in model.thermal if c.static and c.kind == "heatsource"]
             consttemp_defs = [dict(c.args) for c in model.thermal if c.static and c.kind == "constanttemp"]
             # reported in the import message (see load_configuration_from_file())

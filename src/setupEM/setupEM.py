@@ -3729,7 +3729,11 @@ class MainWindow(MainWindowBase):
             model = ScriptModel.from_file(file_path)
         except (SyntaxError, ValueError, OSError, UnicodeDecodeError):
             model = None
-        if model is not None:
+        probe = getattr(self, "_import_probe", None)
+        if probe is not None:
+            # Import ran the script: every port the model has, also ones made in a loop
+            ports = [dict(p) for p in probe.ports]
+        elif model is not None:
             ports = [dict(c.args) for c in model.ports if c.static]
             # reported in the import message (see load_configuration_from_file())
             for c in model.ports:

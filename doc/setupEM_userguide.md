@@ -321,7 +321,13 @@ Save and load simulation configurations (JSON, extension `.simcfg` for setupEM /
 
 setupEM warns when a \*.py script is a thermal model (use setupThermal for those), and setupThermal warns for EM models; a `*.simcfg` or `*.tsimcfg` file from the other app is refused with a note naming the right app.
 
-**Import from \*.py model** loads settings from existing model code (e.g. the examples in the gds2palace repository), by detecting known keywords with or without the `settings[...]` dict syntax. setupEM then writes its own script. As before, Create Model writes it over the imported script (**Preferences > Files > When importing a \*.py model: ask before writing over it** asks first; answering No writes *script*`_new.py` instead). A script that setupEM didn't generate itself is copied to *script*`_backup_`*date*`_`*time*`.py` before it is overwritten the first time. An openEMS script is never overwritten, the new model goes to *script*`_new.py`. Importing also works for openEMS Python models, though you'll likely need to adjust `refined_cellsize` afterward (openEMS models the MIM differently and typically needs a finer mesh).
+**Import from \*.py model** loads settings from existing model code (e.g. the examples in the gds2palace repository). setupEM then writes its own script.
+
+- For a gds2palace script, setupEM runs it, but without the slow parts: no GDSII file is read and no mesh is made. The run stops where the script would build the model, so a solver start after that never happens. This way the import gets exactly what gds2palace would get, also values and ports the script computes, for example ports made in a loop. A script that builds several models (a sweep) gives its first one.
+- The script's own code before that point does run. A script that generates its GDSII file, for example, writes it.
+- If the run fails (a missing input file, a module that isn't installed, more than 60 s), setupEM reads the known keywords from the script text instead, with or without the `settings[...]` dict syntax, and the bar below the menu says why. Values it can't read that way are listed in the Create Model log.
+
+As before, Create Model writes the new script over the imported one (**Preferences > Files > When importing a \*.py model: ask before writing over it** asks first; answering No writes *script*`_new.py` instead). A script that setupEM didn't generate itself is copied to *script*`_backup_`*date*`_`*time*`.py` before it is overwritten the first time. An openEMS script is never overwritten, the new model goes to *script*`_new.py`. Importing also works for openEMS Python models (read from the script text, they are not run), though you'll likely need to adjust `refined_cellsize` afterward (openEMS models the MIM differently and typically needs a finer mesh).
 
 ### Edit \*.py model in place
 

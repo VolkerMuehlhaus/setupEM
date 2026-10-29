@@ -62,9 +62,11 @@ from gds2palace import *
 if __package__ in (None, ""):
     import gds_hierarchy_scan
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
+    from script_probe import probe_script
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
+    from .script_probe import probe_script
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -4688,7 +4690,23 @@ class MainWindowBase(QMainWindow):
                     script = ScriptModel.from_file(file_path)
                 except (SyntaxError, ValueError, OSError, UnicodeDecodeError):
                     script = None
-                if script is not None:
+                # Import runs the script with gds2palace's slow steps replaced
+                # (script_probe.py), so it gets what gds2palace would get, also
+                # values and ports the script computes (e.g. in a loop). Edit in
+                # place reads the text: it must know where each value is written.
+                probe = None
+                if not in_place and script is not None and not is_openems_model_script(file_path):
+                    QApplication.setOverrideCursor(Qt.WaitCursor)
+                    try:
+                        probe = probe_script(file_path)
+                    finally:
+                        QApplication.restoreOverrideCursor()
+                self._import_probe = probe if probe is not None and probe.ok else None
+                if self._import_probe is not None:
+                    self._import_values_from_probe(probe, set(import_mapping.values()),
+                                                   modelcode_path, unresolved)
+                    imported_parameters = {}
+                elif script is not None:
                     # read with the same parser that edits a script in place, so the
                     # GUI shows exactly the values Save would find and write back
                     self._import_values_from_script(script, set(import_mapping.values()),
@@ -4844,13 +4862,29 @@ class MainWindowBase(QMainWindow):
                         log_lines.append(f"Create Model writes the generated script over {name}{keep}.")
                     else:
                         log_lines.append(f"Create Model writes {output} next to {name}, which itself is not changed.")
-                    if not is_setupem_generated(file_path) and not self._in_place_problem(file_path):
+                    can_edit = not self._in_place_problem(file_path)
+                    edit = (lambda path=file_path: self.edit_py_model(path)) if can_edit else None
+                    if self._import_probe is not None:
+                        log_lines.append(f"Read by running {name} up to {probe.create_call}() "
+                                         "(no GDSII file read, no mesh).")
+                        if script is not None and script.builds_in_loop:
+                            log_lines.append("The script builds several models (a loop), "
+                                             "the import uses the first one.")
+                    elif probe is not None:
+                        log_lines.append(f"Running {name} to read it failed ({probe.error}), "
+                                         "its values were read from the script text instead.")
+                        self.show_info_bar(
+                            f"Could not run {name} to read it ({probe.error}). Its values were read "
+                            "from the script text instead, see the Create Model log for any that are missing.",
+                            "Edit in place instead" if can_edit else "", edit)
+                    if not is_setupem_generated(file_path) and can_edit:
                         log_lines.append(f"{name} has its own code (loops, comments). To keep it as it is, "
                                          "use File > Edit *.py model in place instead.")
-                        self.show_info_bar(
-                            f"{name} has its own code (loops, comments). Import uses only its settings "
-                            "for a new, generated script.",
-                            "Edit in place instead", lambda path=file_path: self.edit_py_model(path))
+                        if probe is None or probe.ok:
+                            self.show_info_bar(
+                                f"{name} has its own code (loops, comments). Import uses only its settings "
+                                "for a new, generated script.",
+                                "Edit in place instead", edit)
                 log_lines.extend(path_messages)
                 if not_editable:
                     log_lines.append("Set by the script, not editable here:" if in_place else
@@ -4880,27 +4914,43 @@ class MainWindowBase(QMainWindow):
             if site.reason.startswith("swept"):
                 # a sweep in the script: the GUI shows (and a new model uses) the first value
                 unresolved.append((key, site.reason + ", the first value is shown"))
-            value = site.value
             try:
-                if key in ("fpoint", "fdump"):
-                    values = value if isinstance(value, (list, tuple)) else [value]
-                    value = [float(f) / 1e9 for f in values]
-                elif key in ("fstart", "fstop", "fstep"):
-                    value = float(value) / 1e9
-                elif key == "purpose":
-                    value = normalize_purpose_list(value)
-                elif key == "ELMER_MPI_THREADS":
-                    value = int(value)
-                elif key in ("GdsFile", "SubstrateFile"):
-                    value = str(value)
-                    if not os.path.isabs(value):
-                        value = os.path.normpath(os.path.join(modelcode_path, value)).replace('\\', '/')
-                elif isinstance(value, tuple):
-                    value = list(value)
+                saved_values[key] = self._import_value(key, site.value, modelcode_path)
             except (TypeError, ValueError):
                 unresolved.append((key, f"not a valid value: {script.source(site.node)}"))
+
+    def _import_values_from_probe(self, probe, keys, modelcode_path, unresolved):
+        """Fill saved_values from a run of the script (script_probe.py), in GUI units."""
+        for key in sorted(keys):
+            if key not in probe.values:
                 continue
-            saved_values[key] = value
+            try:
+                self.saved_values[key] = self._import_value(key, probe.values[key], modelcode_path)
+            except (TypeError, ValueError):
+                unresolved.append((key, f"not a valid value: {probe.values[key]!r}"))
+        unresolved.extend((key, reason) for key, reason in probe.notes if key in keys)
+
+    @staticmethod
+    def _import_value(key, value, modelcode_path):
+        """A value from a model script (Hz, paths relative to the script) in GUI
+        units: GHz, purpose as a flat list, absolute paths."""
+        if key in ("fpoint", "fdump"):
+            values = value if isinstance(value, (list, tuple)) else [value]
+            return [float(f) / 1e9 for f in values]
+        if key in ("fstart", "fstop", "fstep"):
+            return float(value) / 1e9
+        if key == "purpose":
+            return normalize_purpose_list(value)
+        if key == "ELMER_MPI_THREADS":
+            return int(value)
+        if key in ("GdsFile", "SubstrateFile"):
+            value = str(value)
+            if not os.path.isabs(value):
+                value = os.path.normpath(os.path.join(modelcode_path, value)).replace('\\', '/')
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        return value
 
     # ---------- Preserve mode: edit an imported *.py model in place ----------
 
@@ -5058,9 +5108,10 @@ class MainWindowBase(QMainWindow):
         self._info_bar_action = None
         self.info_bar.hide()
 
-    def show_info_bar(self, text, action_text, action):
+    def show_info_bar(self, text, action_text="", action=None):
         self.info_bar_label.setText(text)
         self.info_bar_button.setText(action_text)
+        self.info_bar_button.setVisible(bool(action_text) and action is not None)
         self._info_bar_action = action
         self.info_bar.show()
 
