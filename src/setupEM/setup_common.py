@@ -99,6 +99,11 @@ FILL_FACTOR_CORRECTION_SOLVERS = getattr(
 # the installed gds2palace understands - empty for an older gds2palace, which hardcodes them
 # and would silently ignore these keys, so the Mesh tab hides its linear solver rows then.
 PALACE_LINEAR_SOLVER_SETTINGS = tuple(getattr(simulation_setup, "PALACE_LINEAR_SOLVER_SETTINGS", ()))
+# Values of settings['conductor_model'] the installed gds2palace understands - empty for an
+# older gds2palace, which only knows settings['filled_metals'] (True = 'solve_inside',
+# False = 'surface') and would silently ignore conductor_model, so the Mesh tab then offers
+# only those two choices and writes filled_metals instead.
+GDS2PALACE_CONDUCTOR_MODELS = tuple(getattr(simulation_setup, "CONDUCTOR_MODELS", ()))
 
 
 # QSettings scope for the File menu's "Load Recent Config"/"Recent Models" lists -
@@ -422,6 +427,37 @@ def is_openems_model_script(file_path):
     except (OSError, UnicodeDecodeError):
         return False
     return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
+
+
+# Which kind of model each app handles - MainWindow.MODEL_KIND, and the kind
+# detect_model_script_kind() reports for a script.
+MODEL_KIND_EM = "EM"
+MODEL_KIND_THERMAL = "thermal"
+MODEL_KIND_DESCRIPTIONS = {
+    MODEL_KIND_EM: "an EM (Palace/Elmer) simulation",
+    MODEL_KIND_THERMAL: "a thermal (Elmer) simulation",
+}
+MODEL_KIND_APPS = {MODEL_KIND_EM: "setupEM", MODEL_KIND_THERMAL: "setupThermal"}
+
+
+def detect_model_script_kind(file_path):
+    """MODEL_KIND_THERMAL / MODEL_KIND_EM for a gds2palace model script, or None
+    if it can't be told (neither or both kinds of markers, unreadable file).
+    Markers are the calls the scripts that setupEM/setupThermal generate make:
+    create_elmer_thermal() and heatsource()/constanttemp() objects for thermal,
+    create_palace()/create_elmer() and simulation_port() for EM. Same textual
+    approach as is_openems_model_script() and setupEM's Elmer-vs-Palace check."""
+    try:
+        text = pathlib.Path(file_path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    thermal = re.search(r'create_elmer_thermal\s*\(|\.(?:heatsource|constanttemp)\s*\(', text)
+    em = re.search(r'create_(?:palace|elmer)\s*\(|\.simulation_port\s*\(', text)
+    if thermal and not em:
+        return MODEL_KIND_THERMAL
+    if em and not thermal:
+        return MODEL_KIND_EM
+    return None
 
 
 def resolve_value_text(value_text, known_constants):
@@ -2854,6 +2890,10 @@ class VectorWidget(QGraphicsView):
         # it" behavior doesn't misfire just because a chiplet-owned item happened to carry
         # its selection over into a freshly-entered topology view
         self._restoring_selection = False
+        # True while the drawing no longer matches the data being edited (e.g. the
+        # Stackup Editor's file is invalid and the last good drawing is kept) - see
+        # set_stale()/drawForeground()
+        self._stale = False
         # set via set_chiplet_switcher() by whoever constructs this widget, once its
         # own ChipletSwitcher exists too - lets Left/Right (see keyPressEvent below)
         # drive the same single source of truth (the switcher's combo index) as
@@ -2902,6 +2942,36 @@ class VectorWidget(QGraphicsView):
         """
         self._topology_mode = bool(enabled)
         self._rebuild_scene()
+
+    def set_stale(self, stale):
+        """Marks the drawing as out of date (True) or current (False). A stale
+        drawing stays visible but is dimmed and struck through by a thin red
+        diagonal line, so it isn't mistaken for the current state - used by the
+        Stackup Editor while its file is invalid and only the last good drawing
+        can be shown.
+        """
+        stale = bool(stale)
+        if stale != self._stale:
+            self._stale = stale
+            self.viewport().update()
+
+    def drawForeground(self, painter, rect):
+        super().drawForeground(painter, rect)
+        if not self._stale:
+            return
+        # drawn here rather than as a scene item: _rebuild_scene() clears the
+        # scene on every resize/chiplet switch, the view's foreground survives it.
+        # Viewport coordinates, so the line always spans the whole visible pane.
+        painter.save()
+        painter.resetTransform()
+        viewport_rect = self.viewport().rect()
+        painter.fillRect(viewport_rect, QColor(255, 255, 255, 120))
+        pen = QPen(QColor(210, 0, 0))
+        pen.setWidthF(2)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(viewport_rect.left(), viewport_rect.bottom()),
+                         QPointF(viewport_rect.right(), viewport_rect.top()))
+        painter.restore()
 
     def keyPressEvent(self, event):
         if self._chiplet_switcher is not None and event.key() in (Qt.Key_Left, Qt.Key_Right):
@@ -4522,6 +4592,14 @@ class MainWindowBase(QMainWindow):
         if file_path:
             self.open_file(file_path)
 
+    def _warn_wrong_app_file(self, file_path, owner_app):
+        owner_kind = next(kind for kind, app in MODEL_KIND_APPS.items() if app == owner_app)
+        QMessageBox.warning(
+            self, "Wrong application",
+            f"'{os.path.basename(file_path)}' is a {owner_app} configuration file, which sets up "
+            f"{MODEL_KIND_DESCRIPTIONS[owner_kind]}. This is {self.APP_NAME}.\n\n"
+            f"Open the file with {owner_app} instead.")
+
     def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True):
         # in_place: *.py only, from open_py_model() - edit this script in
         # place (preserve mode) instead of importing its values for a new script.
@@ -4530,15 +4608,31 @@ class MainWindowBase(QMainWindow):
         if file_path:
             if ask_unsaved and not self.confirm_unsaved_script():
                 return
-            self._stop_preserve_mode()
-            self.protected_source_model_path = None
-            self.backup_before_overwrite = None
+
+            def leave_current_script():
+                # only once the file is accepted - a wrong-app file that's refused
+                # leaves a script edited in place as it was
+                self._stop_preserve_mode()
+                self.protected_source_model_path = None
+                self.backup_before_overwrite = None
+
             extension = pathlib.Path(file_path).suffix
-            if self.CONFIG_SUFFIX.upper() in extension.upper():
+            # *.simcfg is setupEM's, *.tsimcfg setupThermal's - tell the user which
+            # app a file belongs to instead of a generic failure
+            other_app_suffixes = {"." + app_suffix.upper(): app for app_suffix, app in
+                                   (("simcfg", "setupEM"), ("tsimcfg", "setupThermal"))
+                                   if app != self.APP_NAME}
+            if extension.upper() in other_app_suffixes:
+                self._warn_wrong_app_file(file_path, other_app_suffixes[extension.upper()])
+            elif self.CONFIG_SUFFIX.upper() in extension.upper():
                 # regular data storage
-                self.user_inputs_file = file_path
-                # call the native config file loading function
                 data = self.load_user_inputs(file_path)
+                if data.get("application", "") != self.APP_NAME and \
+                        data.get("application", "") in MODEL_KIND_APPS.values():
+                    self._warn_wrong_app_file(file_path, data["application"])
+                    return
+                leave_current_script()
+                self.user_inputs_file = file_path
                 if data.get("application", "") == self.APP_NAME:
                     # update internal data structure
                     saved_values.clear()
@@ -4560,6 +4654,22 @@ class MainWindowBase(QMainWindow):
                 else:
                     QMessageBox.information(self, "Failed", "Unknown data format")
             elif extension.upper() == ".PY":
+                script_kind = detect_model_script_kind(file_path)
+                if script_kind is not None and script_kind != self.MODEL_KIND:
+                    answer = QMessageBox.question(
+                        self, "Import Model",
+                        f"'{os.path.basename(file_path)}' looks like a model script for "
+                        f"{MODEL_KIND_DESCRIPTIONS[script_kind]}, but {self.APP_NAME} sets up "
+                        f"{MODEL_KIND_DESCRIPTIONS[self.MODEL_KIND]}.\n\n"
+                        f"Use {MODEL_KIND_APPS[script_kind]} for this file. Importing it here "
+                        "would only pick up the settings that both share (GDSII file, "
+                        "stackup, frequencies ...) and none of its "
+                        f"{'heat sources/boundaries' if script_kind == MODEL_KIND_THERMAL else 'ports'}.\n\n"
+                        "Import anyway?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    if answer != QMessageBox.Yes:
+                        return
+                leave_current_script()
                 import_mapping = {
                     "gds_filename": "GdsFile",
                     "XML_filename": "SubstrateFile",
@@ -4587,6 +4697,8 @@ class MainWindowBase(QMainWindow):
                     "amr_max_dof": "amr_max_dof",
                     "adaptive_mesh_conformal": "adaptive_mesh_conformal",
                     "order": "order",
+                    "conductor_model": "conductor_model",
+                    # scripts from gds2palace before 0.9.0, mapped to conductor_model in MeshTab.load_values()
                     "filled_metals": "filled_metals",
                     "fill_factor_correction": "fill_factor_correction",
                     "iterative": "iterative",
@@ -5706,8 +5818,8 @@ class MainWindowBase(QMainWindow):
         self.layout_preview_window.show()
 
     def open_simplify_gds(self):
-        # local import: simplify_gds.py imports gds_prepare_for_EM lazily
-        # inside run_simplify() too, but import the dialog module itself here
+        # local import: gds_simplify_for_em.run_simplify() imports gds_prepare_for_EM
+        # lazily, but import the dialog module itself here
         # (not at module load time) for the same circular-import reason as
         # open_stackup_editor()/open_layout_preview() above
         if __package__ in (None, ""):

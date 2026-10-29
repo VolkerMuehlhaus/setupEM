@@ -60,6 +60,7 @@ if __package__ in (None, ""):
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
+        GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
         protected_script_message,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
@@ -75,6 +76,7 @@ else:
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
+        GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
         protected_script_message,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
@@ -981,6 +983,175 @@ class RefinedCellsizeOverrideDialog(QDialog):
         return self._result
 
 
+# the 6 sides of the simulation box, in the order of gds2palace's 6-value
+# settings['boundary'] and settings['air_around'] lists, with their dialog labels
+BOX_SIDES = [("xmin", "xmin"), ("xmax", "xmax"), ("ymin", "ymin"), ("ymax", "ymax"),
+             ("zmin", "zmin (bottom)"), ("zmax", "zmax (top)")]
+
+# boundary condition names shown in the GUI <-> values in settings['boundary'];
+# dict order is also the tie-break order when picking the tab default on load
+BOUNDARY_DISPLAY_TO_SETTING = {"Absorbing": "ABC", "PEC": "PEC", "PMC": "PMC"}
+BOUNDARY_SETTING_TO_DISPLAY = {v: k for k, v in BOUNDARY_DISPLAY_TO_SETTING.items()}
+
+
+def as_six_values(value):
+    """Normalize a saved boundary/air_around value to a list of 6 strings, or
+    None if it's a single value. A native .simcfg stores a list, a .py import
+    a tuple, or the raw text if it couldn't be resolved."""
+    if isinstance(value, str):
+        value = [v.strip().strip("'\"") for v in value.strip("[]() ").split(",")]
+    if isinstance(value, (list, tuple)) and len(value) == 6:
+        return [str(v).strip() for v in value]
+    return None
+
+
+def format_number_text(value):
+    """Plain text for a float: 200.0 -> "200", 12.5 -> "12.5"."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() else str(value)
+
+
+def most_common_value(values, preferred_order=()):
+    """Most frequent entry of values. On a tie, the first one in
+    preferred_order, else the first one in values."""
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best = max(counts.values())
+    tied = [v for v in counts if counts[v] == best]
+    for v in preferred_order:
+        if v in tied:
+            return v
+    return tied[0]
+
+
+class BoxSidesOverrideDialog(QDialog):
+    """Popup editor for per-side boundary conditions and air layer thickness,
+    opened from MeshTab's "Advanced..." button in the Boundary settings group.
+    Each side either uses the default from the tab (blank / "default") or
+    overrides it. Both are edited together, since they usually go together,
+    e.g. PEC with 0 air at zmin is a backside ground plane at the box boundary.
+    overrides: {side: {'bc': 'PEC', 'air': 0.0}}, either key optional.
+    """
+
+    def __init__(self, parent, default_bc_display, default_air_text, current_overrides):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Simulation Box Sides")
+        self.setModal(True)
+
+        self._default_bc = BOUNDARY_DISPLAY_TO_SETTING.get(default_bc_display, "ABC")
+        try:
+            self._default_air = float(default_air_text)
+        except ValueError:
+            self._default_air = None
+        self._result = {}
+
+        layout = QVBoxLayout()
+
+        info = QLabel("Override the boundary condition or air layer thickness for single sides\n"
+                      "of the simulation box (blank = default from the tab).")
+        layout.addWidget(info)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Side", "Boundary", "Air layer (µm)"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # only the cell widgets take focus - no focus highlight on the Side column
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table)
+
+        self._bc_boxes = {}
+        self._air_edits = {}
+        self.table.setRowCount(len(BOX_SIDES))
+        for row, (side, label) in enumerate(BOX_SIDES):
+            side_item = QTableWidgetItem(label)
+            side_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row, 0, side_item)
+
+            combo = QComboBox()
+            combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
+            combo.addItem(f"default ({default_bc_display})", None)
+            for display, setting in BOUNDARY_DISPLAY_TO_SETTING.items():
+                combo.addItem(display, setting)
+            bc = current_overrides.get(side, {}).get("bc")
+            if bc is not None:
+                combo.setCurrentIndex(max(combo.findData(bc), 0))
+            self.table.setCellWidget(row, 1, combo)
+            self._bc_boxes[side] = combo
+
+            air_edit = QLineEdit()
+            air_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+            air_edit.setPlaceholderText(default_air_text)
+            air = current_overrides.get(side, {}).get("air")
+            if air is not None:
+                air_edit.setText(format_number_text(air))
+            self.table.setCellWidget(row, 2, air_edit)
+            self._air_edits[side] = air_edit
+        self.table.resizeRowsToContents()
+        # fixed 6 rows: size the table to fit them exactly, no empty area or scrollbar
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setFixedHeight(self.table.horizontalHeader().sizeHint().height()
+                                  + sum(self.table.rowHeight(r) for r in range(self.table.rowCount()))
+                                  + 2 * self.table.frameWidth())
+        self.table.setMinimumWidth(440)
+
+        button_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset all")
+        reset_btn.clicked.connect(self._reset_all)
+        button_layout.addWidget(reset_btn)
+        button_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self._on_ok)
+        button_layout.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def _reset_all(self):
+        for side, _ in BOX_SIDES:
+            self._bc_boxes[side].setCurrentIndex(0)
+            self._air_edits[side].clear()
+
+    def _on_ok(self):
+        overrides = {}
+        for side, label in BOX_SIDES:
+            override = {}
+            bc = self._bc_boxes[side].currentData()
+            # an explicit choice equal to the default is the same as "default"
+            if bc is not None and bc != self._default_bc:
+                override["bc"] = bc
+
+            air_text = self._air_edits[side].text().strip()
+            if air_text:
+                try:
+                    air = float(air_text)
+                    if air < 0:
+                        raise ValueError
+                except ValueError:
+                    QMessageBox.warning(self, "Error", f"Not a valid air layer thickness for side '{label}'")
+                    return
+                if air != self._default_air:
+                    override["air"] = air
+
+            if override:
+                overrides[side] = override
+
+        self._result = overrides
+        self.accept()
+
+    def get_overrides(self):
+        return self._result
+
+
 class MeshTab(QWidget):
     def __init__(self, MainWindow):
         super().__init__()
@@ -1004,41 +1175,49 @@ class MeshTab(QWidget):
         self.mesh_group = QGroupBox("Mesh settings")
         self.mesh_layout = QVBoxLayout()
 
-        # Palace-only: settings['filled_metals'] - model conductors as solid
-        # bulk-conductivity volumes instead of the default surface-impedance boundary
-        # condition. Hidden under Elmer mode (setPalaceMode()/setElmerMode() below),
-        # and excluded from Elmer's generated settings dict in create_model_text(),
-        # since gds2palace's filled_metals_em also covers Elmer EM - untested there
-        # so not exposed yet.
-        self.filled_metals_layout = QHBoxLayout()
-        self.label_filled_metals = QLabel("Conductor meshing")
-        self.label_filled_metals.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label_filled_metals)
-        self.filled_metals_layout.addWidget(self.label_filled_metals)
+        # Palace-only: settings['conductor_model'] - 'surface' (surface impedance
+        # boundary on all conductor faces), 'solve_inside' (conductors as solid
+        # bulk-conductivity volumes) or 'solve_inside_skin' (volumes plus thin skin
+        # layers along their faces). Hidden under Elmer mode (setPalaceMode()/
+        # setElmerMode() below), and excluded from Elmer's generated settings dict in
+        # create_model_text(), since gds2palace's volume conductors also cover Elmer
+        # EM - untested there so not exposed yet. An older gds2palace without
+        # conductor_model only gets the first two choices, written as filled_metals.
+        self.conductor_model_layout = QHBoxLayout()
+        self.label_conductor_model = QLabel("Conductor model")
+        self.label_conductor_model.setFixedWidth(label_width)
+        self._mesh_labels.append(self.label_conductor_model)
+        self.conductor_model_layout.addWidget(self.label_conductor_model)
 
-        self.filled_metals_box = QComboBox()
+        self.conductor_model_box = QComboBox()
         # wider than the usual edit_width (170) - "Surface impedance (recommended)"/
         # "Solve inside (volume mesh)" don't fit that without clipping. 254 (not
         # edit_width) so its right edge lines up with the "Advanced..." button's
         # right edge on the row below (measured: edit_width 170 + that button's
         # own ~79px + inter-widget spacing = 254).
-        self.filled_metals_box.setFixedWidth(254)
-        self.filled_metals_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.filled_metals_box.addItems(["Surface impedance (recommended)", "Solve inside (volume mesh)"])
-        self.filled_metals_box.setCurrentIndex(0)
-        self.filled_metals_box.setToolTip(
+        self.conductor_model_box.setFixedWidth(254)
+        self.conductor_model_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        conductor_model_labels = {"surface": "Surface impedance (fastest)",
+                                  "solve_inside": "Solve inside (volume mesh)",
+                                  "solve_inside_skin": "Solve inside + skin layers"}
+        for model in (GDS2PALACE_CONDUCTOR_MODELS or ("surface", "solve_inside")):
+            self.conductor_model_box.addItem(conductor_model_labels.get(model, model), model)
+        self.conductor_model_box.setCurrentIndex(0)
+        self.conductor_model_box.setToolTip(
             # Qt tooltips don't auto-wrap plain text - only explicit "\n" breaks
             # a line, so this is wrapped by hand rather than left as one long line.
-            "Surface mesh is the recommended default for microwave frequencies.\n"
-            "Volume mesh gives more accurate conductor loss at low frequency, where\n"
-            "skin depth is no longer small compared to the conductor cross section.\n"
-            "Not recommended as a default: it costs more RAM and simulation time,\n"
-            "and becomes inaccurate at higher frequencies unless the mesh actually\n"
-            "resolves the skin effect."
+            "Surface impedance: fastest. Accurate for inductance, coupling, resonances,\n"
+            "match and balance. Loss is less accurate: peak Q of coils on\n"
+            "TopMetal1/TopMetal2 is 18-30 % too high.\n"
+            "Solve inside: conductors meshed as volumes. For Q and loss while\n"
+            "designing, a few percent pessimistic at a 2 um mesh, 1.25-1.7x the run time.\n"
+            "Solve inside + skin layers: thin layers along the conductor faces resolve\n"
+            "the skin effect. For final Q and loss numbers, within about 3 %,\n"
+            "1.5-3.5x the run time of the surface model."
         )
-        self.filled_metals_layout.addWidget(self.filled_metals_box)
-        self.filled_metals_layout.addStretch()
-        self.mesh_layout.addLayout(self.filled_metals_layout)
+        self.conductor_model_layout.addWidget(self.conductor_model_box)
+        self.conductor_model_layout.addStretch()
+        self.mesh_layout.addLayout(self.conductor_model_layout)
 
         self.refinement_layout = QHBoxLayout()
         self.label2 = QLabel("Mesh refinement at metal edges (µm)")
@@ -1157,9 +1336,8 @@ class MeshTab(QWidget):
         # tuned away from their defaults - hidden until this is set to "Yes",
         # to keep the common case (just choosing how many AMR iterations to
         # run) uncluttered.
-        # Resets to "No" every time this tab is (re)constructed, same as
-        # e.g. the "at xmin, xmax/..." air-margin fields below, which also
-        # aren't persisted - this is a display toggle, not a simulation
+        # Resets to "No" every time this tab is (re)constructed and isn't
+        # persisted - this is a display toggle, not a simulation
         # setting, and the AMR goal/max DOF values themselves are still
         # saved/loaded normally regardless of whether they're shown.
         self.show_advanced_layout = QHBoxLayout()
@@ -1308,8 +1486,11 @@ class MeshTab(QWidget):
         self.boundary_box = QComboBox()
         self.boundary_box.setFixedWidth(edit_width)
         self.boundary_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.boundary_box.addItems(["Absorbing","PEC","PMC"])
+        self.boundary_box.addItems(list(BOUNDARY_DISPLAY_TO_SETTING))
         self.boundary_layout.addWidget(self.boundary_box)
+        self.boundary_override_btn = QPushButton("Advanced...")
+        self.boundary_override_btn.clicked.connect(self.open_box_sides_override_dialog)
+        self.boundary_layout.addWidget(self.boundary_override_btn)
         self.boundary_layout.addStretch()
         self.mesh_layout.addLayout(self.boundary_layout)
 
@@ -1328,22 +1509,15 @@ class MeshTab(QWidget):
         self.mesh_layout.addLayout(self.margins_layout)
 
 
+        # default air layer thickness for all sides; single sides can be
+        # overridden in the "Advanced..." dialog on the Boundary conditions row
         self.airaround_layout = QHBoxLayout()
-        self.label9 = QLabel("Air layer thickness around stackup is")
+        self.label9 = QLabel("Air layer thickness around stackup")
         self.label9.setFixedWidth(label_width)
         self._mesh_labels.append(self.label9)
         self.airaround_layout.addWidget(self.label9)
-
-        self.airaround_box = QComboBox()
-        self.airaround_box.setFixedWidth(edit_width)
-        self.airaround_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.airaround_box.addItems(["same on all sides","different per side"])
-        self.airaround_layout.addWidget(self.airaround_box)
-
-        air_edit_width = 100
-
         self.airaround_edit = QLineEdit("200")
-        self.airaround_edit.setFixedWidth(air_edit_width)
+        self.airaround_edit.setFixedWidth(edit_width)
         self.airaround_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
         self.airaround_layout.addWidget(self.airaround_edit)
         self.label10 = QLabel(" µm")
@@ -1351,80 +1525,12 @@ class MeshTab(QWidget):
         self.airaround_layout.addStretch()
         self.mesh_layout.addLayout(self.airaround_layout)
 
-        self.airx_layout = QHBoxLayout()
-        self.label11 = QLabel("at xmin, xmax")
-        self.label11.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label11)
-        self.label11.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.airx_layout.addWidget(self.label11)
-        self.airxmin_edit = QLineEdit("200")
-        self.airxmin_edit.setFixedWidth(air_edit_width)
-        self.airxmin_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airx_layout.addWidget(self.airxmin_edit)
-        self.airxmax_edit = QLineEdit("200")
-        self.airxmax_edit.setFixedWidth(air_edit_width)
-        self.airxmax_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airx_layout.addWidget(self.airxmax_edit)
-        self.label12 = QLabel(" µm")
-        self.airx_layout.addWidget(self.label12)
-        self.airx_layout.addStretch()
-        self.mesh_layout.addLayout(self.airx_layout)
-
-        self.airy_layout = QHBoxLayout()
-        self.label13 = QLabel("at ymin, ymax")
-        self.label13.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label13)
-        self.label13.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.airy_layout.addWidget(self.label13)
-        self.airymin_edit = QLineEdit("200")
-        self.airymin_edit.setFixedWidth(air_edit_width)
-        self.airymin_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airy_layout.addWidget(self.airymin_edit)
-        self.airymax_edit = QLineEdit("200")
-        self.airymax_edit.setFixedWidth(air_edit_width)
-        self.airymax_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airy_layout.addWidget(self.airymax_edit)
-        self.label14 = QLabel(" µm")
-        self.airy_layout.addWidget(self.label14)
-        self.airy_layout.addStretch()
-        self.mesh_layout.addLayout(self.airy_layout)
-
-        self.airz_layout = QHBoxLayout()
-        self.label15 = QLabel("at zmin, zmax")
-        self.label15.setFixedWidth(label_width)
-        self._mesh_labels.append(self.label15)
-        self.label15.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.airz_layout.addWidget(self.label15)
-        self.airzmin_edit = QLineEdit("200")
-        self.airzmin_edit.setFixedWidth(air_edit_width)
-        self.airzmin_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airz_layout.addWidget(self.airzmin_edit)
-        self.airzmax_edit = QLineEdit("200")
-        self.airzmax_edit.setFixedWidth(air_edit_width)
-        self.airzmax_edit.setStyleSheet(EDIT_STYLE_REQUIRED)
-        self.airz_layout.addWidget(self.airzmax_edit)
-        self.label16 = QLabel(" µm")
-        self.airz_layout.addWidget(self.label16)
-        self.airz_layout.addStretch()
-        self.mesh_layout.addLayout(self.airz_layout)
-
-        # callback when air_around dropdown changed, so that we can show/hide edit fields
-        def on_airaround_changed(value):
-            if "different" in value:
-                # hide target layer label and edit
-                for item in [self.label11,self.label12,self.label13,self.label14,self.label15,self.label16,self.airxmin_edit, self.airxmax_edit, self.airymin_edit, self.airymax_edit, self.airzmin_edit, self.airzmax_edit]:
-                    item.show()
-                self.airaround_edit.hide()
-                self.label10.hide()
-            else:
-                for item in [self.label11,self.label12,self.label13,self.label14,self.label15,self.label16,self.airxmin_edit, self.airxmax_edit, self.airymin_edit, self.airymax_edit, self.airzmin_edit, self.airzmax_edit]:
-                    item.hide()
-                self.airaround_edit.show()
-                self.label10.show()
-
-        self.airaround_box.currentTextChanged.connect(on_airaround_changed)
-        self.airaround_box.setCurrentIndex(1)
-        self.airaround_box.setCurrentIndex(0)
+        # in-memory per-side overrides of the boundary condition and air layer
+        # thickness ({side: {'bc': ..., 'air': ...}}), edited via the
+        # "Advanced..." dialog; merged into the 6-value settings['boundary'] /
+        # settings['air_around'] lists by save_values()
+        self._box_side_overrides = {}
+        self._update_boundary_override_button_label()
 
         self.mesh_group.setLayout(self.mesh_layout)
         self.main_layout.addWidget(self.mesh_group)
@@ -1462,6 +1568,33 @@ class MeshTab(QWidget):
         if dialog.exec() == QDialog.Accepted:
             self._refined_cellsize_override = dialog.get_overrides()
             self._update_refined_override_button_label()
+
+    def _update_boundary_override_button_label(self):
+        overrides = self._box_side_overrides
+        n = len(overrides)
+        self.boundary_override_btn.setText(f"Advanced... ({n})" if n > 0 else "Advanced...")
+        lines = []
+        for side, label in BOX_SIDES:
+            override = overrides.get(side, {})
+            parts = []
+            if "bc" in override:
+                parts.append(BOUNDARY_SETTING_TO_DISPLAY[override["bc"]])
+            if "air" in override:
+                parts.append(f"air {format_number_text(override['air'])} µm")
+            if parts:
+                lines.append(f"{label}: " + ", ".join(parts))
+        if lines:
+            self.boundary_override_btn.setToolTip("Per-side overrides:\n" + "\n".join(lines))
+        else:
+            self.boundary_override_btn.setToolTip(
+                "Set the boundary condition and air layer thickness per side of the simulation box")
+
+    def open_box_sides_override_dialog(self):
+        dialog = BoxSidesOverrideDialog(self, self.boundary_box.currentText(),
+                                        self.airaround_edit.text().strip(), self._box_side_overrides)
+        if dialog.exec() == QDialog.Accepted:
+            self._box_side_overrides = dialog.get_overrides()
+            self._update_boundary_override_button_label()
 
     def update_amr_ram_note(self, *_):
         # the memory stop limit is a preference, so re-read it on every update
@@ -1518,7 +1651,14 @@ class MeshTab(QWidget):
         saved_values ["refined_cellsize_override"] = self._refined_cellsize_override
 
         saved_values ["order"] = self.mesh_order_box.currentIndex()+1
-        saved_values ["filled_metals"] = self.filled_metals_box.currentIndex() == 1
+        conductor_model = self.conductor_model_box.currentData()
+        if GDS2PALACE_CONDUCTOR_MODELS:
+            saved_values ["conductor_model"] = conductor_model
+            saved_values.pop("filled_metals", None)   # older name, would conflict in gds2palace
+        else:
+            # an older gds2palace only knows filled_metals
+            saved_values ["filled_metals"] = conductor_model == "solve_inside"
+            saved_values.pop("conductor_model", None)
 
         try:
             value = float(self.cells_lambda_edit.text())
@@ -1573,13 +1713,11 @@ class MeshTab(QWidget):
         # iterative or direct solver for Elmer
         saved_values["iterative"] = "iterative" in self.solver_box.currentText()
 
-        BC = self.boundary_box.currentText()
-        if BC=="PEC":
-            saved_values ["boundary"] = ['PEC','PEC','PEC','PEC','PEC','PEC']
-        elif BC=="PMC":
-            saved_values ["boundary"] = ['PMC','PMC','PMC','PMC','PMC','PMC']
-        else: # Absorbing
-            saved_values ["boundary"] = ['ABC','ABC','ABC','ABC','ABC','ABC']
+        # one value per side (xmin, xmax, ymin, ymax, zmin, zmax): the tab
+        # default, unless overridden for that side in the "Advanced..." dialog
+        default_bc = BOUNDARY_DISPLAY_TO_SETTING[self.boundary_box.currentText()]
+        saved_values ["boundary"] = [self._box_side_overrides.get(side, {}).get("bc", default_bc)
+                                     for side, _ in BOX_SIDES]
 
 
         try:
@@ -1590,37 +1728,21 @@ class MeshTab(QWidget):
             return False
         saved_values ["margin"] = float(value)
 
-        airsides = self.airaround_box.currentText()
-        if not "different" in airsides:
-            # one air margin for all
-            try:
-                value = float(self.airaround_edit.text())
-            except Exception:
-                QMessageBox.warning(self, "Error", "Not a valid value for AMR iterations")
-                # default air thickness =  margins
-                self.airaround_edit.setText(self.margins_edit.text())
-                return False
-            saved_values ["air_around"] = float(value)
+        try:
+            value = float(self.airaround_edit.text())
+            if value < 0:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "Error", "Not a valid value for air layer thickness")
+            # default air thickness =  margins
+            self.airaround_edit.setText(self.margins_edit.text())
+            return False
+        # a single value unless some side is overridden, then one value per side
+        if any("air" in override for override in self._box_side_overrides.values()):
+            saved_values ["air_around"] = [self._box_side_overrides.get(side, {}).get("air", value)
+                                           for side, _ in BOX_SIDES]
         else:
-            # one air margin per side, total 6 values
-            try:
-                xmin = float(self.airxmin_edit.text())
-                xmax = float(self.airxmax_edit.text())
-                ymin = float(self.airymin_edit.text())
-                ymax = float(self.airymax_edit.text())
-                zmin = float(self.airzmin_edit.text())
-                zmax = float(self.airzmax_edit.text())
-            except Exception:
-                QMessageBox.warning(self, "Error", "Not a valid value for air margins, reset to default")
-                # default air thickness =  margins
-                self.airxmin_edit.setText(self.margins_edit.text())
-                self.airxmax_edit.setText(self.margins_edit.text())
-                self.airymin_edit.setText(self.margins_edit.text())
-                self.airymax_edit.setText(self.margins_edit.text())
-                self.airzmin_edit.setText(self.margins_edit.text())
-                self.airzmax_edit.setText(self.margins_edit.text())
-                return False
-            saved_values ["air_around"] = [xmin, xmax, ymin, ymax, zmin, zmax]
+            saved_values ["air_around"] = value
 
         # check value for number of threads
         if self.MainWindow.ElmerMode:
@@ -1656,7 +1778,13 @@ class MeshTab(QWidget):
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
-        self.filled_metals_box.setCurrentIndex(1 if saved_values.get("filled_metals", False) else 0)
+        # older .simcfg files and model scripts have filled_metals (True = 'solve_inside') instead
+        conductor_model = saved_values.get(
+            "conductor_model", "solve_inside" if saved_values.get("filled_metals", False) else "surface")
+        index = self.conductor_model_box.findData(conductor_model)
+        if index < 0 and conductor_model == "solve_inside_skin":
+            index = self.conductor_model_box.findData("solve_inside")   # older gds2palace: closest choice
+        self.conductor_model_box.setCurrentIndex(max(index, 0))
         # older .simcfg files predate these keys - fall back to the preference
         # (complex coarse solve) or gds2palace's defaults
         self.complex_coarse_box.setCurrentIndex(0 if saved_values.get(
@@ -1667,17 +1795,37 @@ class MeshTab(QWidget):
         else:
             self.solver_box.setCurrentIndex(0)
 
-        if 'PEC' in saved_values.get("boundary",""):
-            self.boundary_box.setCurrentIndex(1)
-        elif 'PMC' in saved_values.get("boundary",""):
-            self.boundary_box.setCurrentIndex(2)
-        else:
-            # default is absorbing
-            self.boundary_box.setCurrentIndex(0)
+        # boundary and air_around are 6-value lists (xmin, xmax, ymin, ymax, zmin,
+        # zmax) or a single value. The most common value becomes the tab default,
+        # the other sides become overrides in the "Advanced..." dialog.
+        self._box_side_overrides = {}
+        boundary = saved_values.get("boundary", "")
+        bc_values = as_six_values(boundary)
+        if bc_values is None:
+            bc_values = [str(boundary).strip("[]() '\"")] * 6
+        # gds2palace treats PML the same as ABC; missing/unknown -> default Absorbing
+        bc_values = [v.upper() if v.upper() in BOUNDARY_SETTING_TO_DISPLAY else "ABC" for v in bc_values]
+        default_bc = most_common_value(bc_values, preferred_order=list(BOUNDARY_SETTING_TO_DISPLAY))
+        self.boundary_box.setCurrentText(BOUNDARY_SETTING_TO_DISPLAY[default_bc])
+        for (side, _), bc in zip(BOX_SIDES, bc_values):
+            if bc != default_bc:
+                self._box_side_overrides.setdefault(side, {})["bc"] = bc
 
-        # check if air layer is defined at all, or single value or list
-        air = saved_values.get("air_around","")
-        if air == "":
+        air = saved_values.get("air_around", "")
+        air_values = as_six_values(air)
+        if air_values is not None:
+            try:
+                air_values = [float(v) for v in air_values]
+            except ValueError:
+                air_values = None
+                air = ""
+        if air_values is not None:
+            default_air = most_common_value(air_values)
+            self.airaround_edit.setText(format_number_text(default_air))
+            for (side, _), value in zip(BOX_SIDES, air_values):
+                if value != default_air:
+                    self._box_side_overrides.setdefault(side, {})["air"] = value
+        elif str(air).strip() == "":
             # no value defined: an explicit air_around preference wins, otherwise
             # fall back to the (also preference-aware) dielectric margin value -
             # this mirrors the tab's original "same as margins" convenience default
@@ -1686,29 +1834,10 @@ class MeshTab(QWidget):
                 self.airaround_edit.setText(str(air_pref))
             else:
                 self.airaround_edit.setText(str(saved_values.get("margin", get_preference(self.MainWindow.APP_NAME, "margin", "200"))))
-            self.airaround_box.setCurrentIndex(0)
         else:
-            # native JSON round-trip stores this as a real list of floats;
-            # .py import stores it as a comma-separated string instead
-            if isinstance(air, list):
-                air_as_list = [str(v) for v in air]
-            elif "," in str(air):
-                air_as_list = [v.strip() for v in str(air).split(',')]
-            else:
-                air_as_list = None
-
-            if air_as_list and len(air_as_list) == 6:
-                self.airaround_box.setCurrentIndex(1)
-                self.airxmin_edit.setText(air_as_list[0])
-                self.airxmax_edit.setText(air_as_list[1])
-                self.airymin_edit.setText(air_as_list[2])
-                self.airymax_edit.setText(air_as_list[3])
-                self.airzmin_edit.setText(air_as_list[4])
-                self.airzmax_edit.setText(air_as_list[5])
-            else:
-                # we have air_around defined as a single value
-                self.airaround_box.setCurrentIndex(0)
-                self.airaround_edit.setText(str(air))
+            # we have air_around defined as a single value
+            self.airaround_edit.setText(str(air).strip("[]() "))
+        self._update_boundary_override_button_label()
 
         # MPI multithreading for Elmer
         n = saved_values.get('ELMER_MPI_THREADS',4)
@@ -2808,12 +2937,12 @@ class ModelEditorTab(QWidget):
             # leak into an Elmer-mode script; the synthesized settings['fdump'] line
             # (below, after special_keylist) is emitted instead when the checkbox is on.
             ignore_list.append('fdump')
-            # filled_metals (Conductor meshing) is Palace-only in the GUI (its combo box
-            # is hidden under Elmer mode) - gds2palace's filled_metals_em actually also
-            # covers Elmer EM, but that path is untested from setupEM so far, so exclude
-            # it here too, same as 'iterative' is excluded under Palace mode above,
+            # conductor_model (filled_metals with an older gds2palace) is Palace-only in the
+            # GUI (its combo box is hidden under Elmer mode) - gds2palace's volume conductors
+            # actually also cover Elmer EM, but that path is untested from setupEM so far, so
+            # exclude it here too, same as 'iterative' is excluded under Palace mode above,
             # rather than let a value set earlier in Palace mode leak into an Elmer script.
-            ignore_list.append('filled_metals')
+            ignore_list.extend(['conductor_model', 'filled_metals'])
             # an older gds2palace supports the via fill factor correction for Palace only
             if 'elmer' not in FILL_FACTOR_CORRECTION_SOLVERS:
                 ignore_list.append('fill_factor_correction')
@@ -2840,7 +2969,7 @@ class ModelEditorTab(QWidget):
                              'preprocess_gds', 'merge_polygon_size', 'fill_factor_correction']),
             ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
             ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
-                      'meshsize_max', 'order', 'filled_metals']),
+                      'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
             ("Simulation boundary", ['boundary', 'margin', 'air_around']),
@@ -3392,6 +3521,7 @@ class PreferencesDialog(QDialog):
 
 class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
+    MODEL_KIND = MODEL_KIND_EM
     CONFIG_SUFFIX = CONFIG_SUFFIX
 
     def __init__(self):
@@ -3513,8 +3643,8 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(False)
         self.mesh_tab.AMR_group.setVisible(True)
         self.mesh_tab.Elmer_group.setVisible(False)
-        self.mesh_tab.label_filled_metals.setVisible(True)
-        self.mesh_tab.filled_metals_box.setVisible(True)
+        self.mesh_tab.label_conductor_model.setVisible(True)
+        self.mesh_tab.conductor_model_box.setVisible(True)
         self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 
@@ -3537,8 +3667,8 @@ class MainWindow(MainWindowBase):
         self.frequencies_tab.fdump_enabled_checkbox.setVisible(True)
         self.mesh_tab.AMR_group.setVisible(False)
         self.mesh_tab.Elmer_group.setVisible(True)
-        self.mesh_tab.label_filled_metals.setVisible(False)
-        self.mesh_tab.filled_metals_box.setVisible(False)
+        self.mesh_tab.label_conductor_model.setVisible(False)
+        self.mesh_tab.conductor_model_box.setVisible(False)
         self.file_tab.show_fill_factor_correction()
         self.create_model_tab.apply_preference_visibility()
 

@@ -40,7 +40,7 @@ from PySide6.QtGui import (
     QColor, QBrush, QPen, QPolygonF, QPainter, QFont, QPainterPath, QTransform,
     QShortcut, QKeySequence,
     )
-from PySide6.QtCore import Qt, QPointF, QLineF, Signal
+from PySide6.QtCore import Qt, QPointF, QLineF, QRectF, Signal
 
 from gds2palace import gds_reader, stackup_reader
 
@@ -231,12 +231,28 @@ class _ClickableLegendRow(QWidget):
         super().mousePressEvent(event)
 
 
+MEASURE_COLOR = "#ffff00"
+# a left-button press/release closer together than this (viewport pixels) is a
+# click, not the start of a pan drag - see LayoutCanvas.mouseReleaseEvent()
+CLICK_MAX_MOVE_PX = 4
+
+
 class LayoutCanvas(QGraphicsView):
     """Pan/zoom GDS canvas - plain PySide6 QGraphicsView, no new dependency.
     Polygon/label points are stored with y already negated (see
     LayoutPreviewWindow.refresh), so GDS "up" (+y) renders near the top of
     the view without a separate view-level flip transform.
+
+    Emits cursorMoved(x, y) in GDS coordinates (um, +y up) while the mouse is
+    over the view, and cursorLeft() when it leaves. In measure mode (see
+    set_measure_mode()) a click without dragging sets the start point, the
+    next click the end point; a drag still pans as usual. measureChanged(text)
+    carries the current result text ("" when nothing is measured).
     """
+
+    cursorMoved = Signal(float, float)
+    cursorLeft = Signal()
+    measureChanged = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -245,10 +261,139 @@ class LayoutCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setBackgroundBrush(QColor("#303030"))
+        self.setMouseTracking(True)
+        self._measure_mode = False
+        self._measure_start = None   # scene coordinates (y negated, see above)
+        self._measure_end = None
+        self._measure_fixed = False  # True once the end point has been clicked
+        self._measure_items = []
+        self._press_pos = None
+        self._apply_idle_cursor()
 
     def wheelEvent(self, event):
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
         self.scale(factor, factor)
+
+    # ---------- Position readout ----------
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if event.buttons() == Qt.NoButton:
+            self._apply_idle_cursor()  # Qt re-sets the open hand on entering the view
+        pos = self.mapToScene(event.position().toPoint())
+        self.cursorMoved.emit(pos.x(), -pos.y())
+        if self._measure_mode and self._measure_start is not None and not self._measure_fixed:
+            self._measure_end = pos
+            self._update_measure_items()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.cursorLeft.emit()
+
+    # ---------- Distance measurement ----------
+
+    def set_measure_mode(self, enabled):
+        self._measure_mode = bool(enabled)
+        self.clear_measurement()
+        self._apply_idle_cursor()
+
+    def _apply_idle_cursor(self):
+        """Pointer (crosshair in measure mode) whenever no button is pressed, so
+        it is clear which position the readout refers to - ScrollHandDrag
+        would otherwise show an open hand; the closed hand while panning stays."""
+        self.viewport().setCursor(Qt.CrossCursor if self._measure_mode else Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        self._press_pos = event.position().toPoint() if event.button() == Qt.LeftButton else None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._apply_idle_cursor()
+        if not self._measure_mode:
+            return
+        if event.button() != Qt.LeftButton or self._press_pos is None:
+            return
+        release_pos = event.position().toPoint()
+        moved = (release_pos - self._press_pos).manhattanLength()
+        self._press_pos = None
+        if moved > CLICK_MAX_MOVE_PX:
+            return  # that was a pan drag, not a click
+        pos = self.mapToScene(release_pos)
+        if self._measure_start is None or self._measure_fixed:
+            self.clear_measurement()
+            # Measurement items outside the layout would otherwise grow the
+            # auto-computed scene rect and shift the view under the cursor
+            # while measuring - pin it until the measurement is cleared.
+            self.setSceneRect(self.scene().itemsBoundingRect())
+            self._measure_start = pos
+            self._measure_end = pos
+            self._measure_fixed = False
+        else:
+            self._measure_end = pos
+            self._measure_fixed = True
+        self._update_measure_items()
+
+    def forget_measurement_items(self):
+        """Drop the scene-item references without touching the scene - for
+        use right before scene.clear(), which destroys them (the measurement
+        points themselves are dropped too: a refreshed layout may differ)."""
+        self._measure_items = []
+        self._measure_start = self._measure_end = None
+        self._measure_fixed = False
+        self.setSceneRect(QRectF())
+        self.measureChanged.emit("")
+
+    def clear_measurement(self):
+        scene = self.scene()
+        for item in self._measure_items:
+            scene.removeItem(item)
+        self._measure_items = []
+        self._measure_start = self._measure_end = None
+        self._measure_fixed = False
+        self.setSceneRect(QRectF())
+        self.measureChanged.emit("")
+
+    def _update_measure_items(self):
+        scene = self.scene()
+        for item in self._measure_items:
+            scene.removeItem(item)
+        self._measure_items = []
+        if self._measure_start is None:
+            return
+        start, end = self._measure_start, self._measure_end
+        dx = end.x() - start.x() + 0.0
+        dy = start.y() - end.y()  # GDS orientation (+y up)
+        text = f"d = {(dx * dx + dy * dy) ** 0.5:.4g} um   dx = {dx:.4g}   dy = {dy:.4g}"
+
+        pen = QPen(QColor(MEASURE_COLOR))
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        line = QGraphicsLineItem(QLineF(start, end))
+        line.setPen(pen)
+        line.setZValue(1e9)
+        scene.addItem(line)
+        self._measure_items.append(line)
+        for point in (start, end):
+            marker = QGraphicsEllipseItem(-4, -4, 8, 8)
+            marker.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            marker.setPen(pen)
+            marker.setBrush(QBrush(QColor(MEASURE_COLOR)))
+            marker.setPos(point)
+            marker.setZValue(1e9)
+            scene.addItem(marker)
+            self._measure_items.append(marker)
+        label = QGraphicsSimpleTextItem(text)
+        label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        label.setBrush(QBrush(QColor(MEASURE_COLOR)))
+        font = QFont()
+        font.setBold(True)
+        label.setFont(font)
+        label.setPos((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
+        label.setZValue(1e9)
+        scene.addItem(label)
+        self._measure_items.append(label)
+        self.measureChanged.emit(text)
 
 
 class LayoutPreviewWindow(QDialog):
@@ -366,8 +511,22 @@ class LayoutPreviewWindow(QDialog):
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
 
+        # live cursor position (GDS coordinates, um) and, in measure mode, the
+        # current measurement - see LayoutCanvas's cursorMoved/measureChanged
+        self.position_label = QLabel("")
+        self.position_label.setMinimumWidth(190)
+        self.position_label.setFont(QFont("Consolas"))
+        self.measure_label = QLabel("")
+        self.measure_label.setFont(QFont("Consolas"))
+        self._measure_text = ""
+        self.canvas.cursorMoved.connect(self._on_cursor_moved)
+        self.canvas.cursorLeft.connect(lambda: self.position_label.setText(""))
+        self.canvas.measureChanged.connect(self._on_measure_changed)
+
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.info_label, 1)
+        button_layout.addWidget(self.measure_label)
+        button_layout.addWidget(self.position_label)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
         button_layout.addWidget(refresh_btn)
@@ -401,7 +560,37 @@ class LayoutPreviewWindow(QDialog):
         QShortcut(QKeySequence(Qt.Key_Down), self).activated.connect(
             lambda: self._cycle_highlighted_layer(1))
 
+        # M toggles distance measurement mode (see LayoutCanvas). Esc leaves it,
+        # but is only enabled while measuring - otherwise Esc keeps its normal
+        # dialog meaning (close the window).
+        self._measure_mode = False
+        QShortcut(QKeySequence(Qt.Key_M), self).activated.connect(
+            lambda: self._set_measure_mode(not self._measure_mode))
+        self._measure_escape = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._measure_escape.setEnabled(False)
+        self._measure_escape.activated.connect(lambda: self._set_measure_mode(False))
+        self.canvas.setToolTip("Press M to measure distances: click start point, click end point")
+
         self.refresh()
+
+    def _on_cursor_moved(self, x, y):
+        self.position_label.setText(f"X {x:10.3f}  Y {y:10.3f} um")
+
+    def _on_measure_changed(self, text):
+        self._measure_text = text
+        self._update_measure_label()
+
+    def _update_measure_label(self):
+        if not self._measure_mode:
+            self.measure_label.setText("")
+        else:
+            self.measure_label.setText(self._measure_text or "Measure: click start point (M or Esc to exit)")
+
+    def _set_measure_mode(self, enabled):
+        self._measure_mode = enabled
+        self._measure_escape.setEnabled(enabled)
+        self.canvas.set_measure_mode(enabled)
+        self._update_measure_label()
 
     def _copy_canvas_to_clipboard(self):
         QApplication.clipboard().setPixmap(self.canvas.grab())
@@ -674,6 +863,7 @@ class LayoutPreviewWindow(QDialog):
                 polygons_by_layer.setdefault(poly.layernum, []).append(poly)
 
             scene = self.canvas.scene()
+            self.canvas.forget_measurement_items()
             scene.clear()
             self._clear_legend()
 

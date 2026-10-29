@@ -1,3 +1,67 @@
+# What's New - October 21, 2026
+
+**Tools > Simplify GDS:** the simplification code moved to gds_prepare_for_EM (module `gds_simplify_for_em`), where the gds2palace MCP server uses it too. setupEM now requires gds_prepare_for_EM 1.6.0 or later; `pip install --upgrade setupEM` updates it.
+
+Fix: with **Merge via arrays** (and no fill removal or merging per layer), the simplified file still contained the original subcells as extra top-level cells. Without a cell name, gds2palace reads the first top-level cell, which could be one of them, e.g. a pad cell instead of the design. These left-over cells are now removed.
+
+
+
+# What's New - October 19, 2026
+
+**Stackup Editor, ADS Momentum (*.ltd) import:** metals with an EXPAND thickness operation now make the dielectric next to them thicker, as in ADS, instead of reaching into the dielectric below. Before, a thick EXPAND DOWN metal (e.g. MET1/MET2 in a GaAs stackup) overlapped the layers underneath it, and a via could end up with zero height. Files where long lines are wrapped or END_... markers follow the last entry on the same line now import too; before, they failed with "No usable dielectric slabs".
+
+
+
+# What's New - October 18, 2026
+
+**Touchstone files with different port impedances:** the option line of the combined `.sNp` file now has one Z0 per port, in port order. Before, ports with the same Z0 as port 1 were left out.
+
+
+
+# What's New - October 17, 2026
+
+**Conductor model** replaces **Conductor meshing** on the Mesh and Boundaries tab (Palace only), with a third choice: **Surface impedance** (default, as before), **Solve inside (volume mesh)** and the new **Solve inside + skin layers**, which adds thin layers along the conductor faces for accurate Q and loss at high frequency. Generated model scripts now use `settings['conductor_model']` instead of `settings['filled_metals']`. Older projects and model scripts with `filled_metals` still load. setupEM now requires gds2palace 0.9.0 or later; `pip install --upgrade setupEM` updates it.
+
+
+
+# What's New - October 16, 2026
+
+**Boundary conditions per side:** **Advanced...** next to **Boundary conditions** on the Mesh and Boundaries tab opens a table with the six sides of the simulation box. Each side can have its own boundary condition (**Absorbing**, **PEC** or **PMC**) and air layer thickness; a blank entry uses the value from the tab. For example, **PEC** at zmin with 0 µm air models a backside ground plane at the box boundary. This replaces the "same on all sides / different per side" choice for the air layer, which now lives in the same table.
+
+Loading a model with different boundary conditions per side no longer changes it to one condition for all sides: before, a single **PEC** side turned all six sides into PEC.
+
+**Stackup Editor:** while the stackup has errors, the cross-section preview can't be redrawn and keeps the last valid drawing. It is now marked as not up to date: dimmed, crossed by a thin red line, with a banner above it. **Show errors** in the banner opens the editor's XML Preview tab, which lists the errors. The status line now points there too, instead of to Save.
+
+
+
+# What's New - October 12, 2026
+
+**3D Field Viewer: value markers.** Check **Probe** in the View box (or press **P**), then click the model to place a numbered marker with the field value at that exact point. Clicking works from any angle, on the full model, the clipped solid, its cut face or the **2D plane only** section; dragging still rotates. Markers are drawn on top of the model, so a marker on a buried body stays visible. A **Markers** list opens beside the view with the marker number, value and x / y / z in µm, plus **Remove**, **Clear** and **Copy** (tab-separated, for spreadsheets). For Elmer thermal temperatures, a dropdown switches the list and labels between **K**, **°C** and **ΔT** (rise above the lowest temperature in the model, in K). Right-click the model for **Jump to Maximum in Cut Plane** (with the clip plane on), **Jump to Maximum on Surface of Body N** (the outer surface of the body you clicked, e.g. the chip; results without body IDs use the whole shown surface), **Add Marker Here**, **Remove Marker N** and **Clear Markers**. Markers are updated when you change the field, result file or cycle; markers outside the new model are removed. Ported from EMStudio's field viewer.
+
+**3D Field Viewer: keys.** With the 3D view focused: **R / F / Home** reset camera, **I** isometric, **X / Y / Z** axis views (**Shift**: negative side), **+ / −** zoom, arrow keys pan, **O** parallel projection, **M** find max., **A** arrows on/off, **P** probe, **PgUp / PgDn** move the clip plane. VTK's own letter keys (e.g. **w** wireframe, **3** stereo, **q** / **e** which stopped the interactor) no longer do anything. The right-click menu now opens only on a click: a right-drag zooms without the menu popping up afterwards.
+
+**3D Field Viewer:** the **Cycle** picker of a Palace field dump showed Palace's extra AMR error-indicator cycle as a frequency, e.g. "999 GHz (cycle 2)". It is now listed as "error indicator (cycle 2)". This happened when that cycle stores its Indicator/Rank values as point data. Dumps that store them as cell data were already listed as "geometry".
+
+**3D Field Viewer:** running `field_viewer.py` / `fieldViewer` standalone with a window failed in Python environments that also have PyQt5 installed. Fixed.
+
+**Port de-embedding in `scripts/combine_extend_snp.py` fixed** (the `_deembedded.sNp` and `_dc_deembedded.sNp` files): the negative inductance of all ports was put in series at port 1, and the other ports were not de-embedded. For a 3-port, port 1 got the sum of all three values. Now each port gets the value for its own port number; a port without geometry data in `port_information.json` is not de-embedded. The raw `.sNp` and the `_dc.sNp` files were not affected. Please run `combine_snp` again to create the de-embedded files again. The same bug was fixed in gds2palace, where Gianluca Simone and David Lurz (FAU) found it.
+
+
+
+# What's New - October 8, 2026
+
+**Loading the wrong kind of model:** setupEM and setupThermal now tell you when a file belongs to the other app. A `*.simcfg` file opened in setupThermal or a `*.tsimcfg` file opened in setupEM shows a message naming the app to use instead. An imported `*.py` model script that is a thermal model (`create_elmer_thermal`, heat sources) in setupEM, or an EM model (`create_palace`/`create_elmer`, ports) in setupThermal, asks for confirmation first; the default is not to import.
+
+
+
+# What's New - October 7, 2026
+
+**Layout Preview:** the bottom bar now shows the live cursor position (X/Y in um, GDS orientation). Press **M** to measure distances: click the start point, move the mouse to see the live distance, dx and dy, click the end point to fix it. The next click starts a new measurement, **M** or **Esc** leaves measure mode. Dragging still pans while measuring. The mouse pointer is now an arrow (a crosshair in measure mode) instead of a hand while no button is pressed, so the position is easier to identify.
+
+**3D Field Viewer:** new **Scaled** checkbox next to **Show arrows**. When on, arrow length and color follow the field value, using the same colormap, linear or log scale, and Min/Max (or dB Range) as the legend. Arrows below the lower limit are hidden; the smallest visible arrow is never shorter than 15% of the longest. The arrow color swatch is not used while Scaled is on. The command line field viewer has a matching `--arrows-scaled` option.
+
+
+
 # What's New - October 5, 2026
 
 **Import Model** (*.py) with several GDS purposes (datatypes), e.g. `settings['purpose'] = [0, 35, 4]`, now works: the purpose field shows "0, 35, 4" and the model uses all three. Before, the field showed "(0, 35, 4)" and no datatype matched, so the layout preview and the model had no polygons on any layer. Models with a single purpose were not affected. A single number in the script (`settings['purpose'] = 0`) is now also read as `[0]`.

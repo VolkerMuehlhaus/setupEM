@@ -174,7 +174,7 @@ Parameter "Mesh basis function" is an expert setting that controls the order of 
 
 Parameter "Adaptive mesh iterations" does what the name says: Palace offers adaptive mesh refinement (AMR) but if we use mesh basis function order 2 ("recommended") with mesh refinement of 2 micron or so, the initial mesh is usually fine enough and we don't need AMR. Starting from a coarse mesh plus AMR usually takes more simulation time than going for a finer initial mesh without AMR. If you experience something different, your feedback and example is much appreciated! When AMR iterations is non-zero, "AMR goal" (relative error tolerance) and "AMR maximum DOF" control when Palace stops refining, whichever limit is hit first - the defaults rarely need changing.
 
-For the boundary conditions, absorbing boundary and pefect electric conductor are supported at the present time. You can specify the oversize of the dielectric layers from the metal drawing, and the additional layer of air that srrounds everything. **Both these distances must NOT be zero, otherwise you will get mesh errors!**
+For the boundary conditions, absorbing boundary, perfect electric conductor (PEC) and perfect magnetic conductor (PMC) are supported, the same on all sides or per side of the simulation box with the "Advanced..." button. You can specify the oversize of the dielectric layers from the metal drawing, and the additional layer of air that srrounds everything. **Both these distances must NOT be zero, otherwise you will get mesh errors!**
 
 # Create model
 
