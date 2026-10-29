@@ -118,6 +118,29 @@ def _module_constants(tree):
     return known
 
 
+def _stackup_call_name(node):
+    """'name' for utilities.get_stackup_path("name") (or a bare get_stackup_path("name")),
+    the way gds2palace_mcp writes the stackup file of its models; None otherwise."""
+    if not isinstance(node, ast.Call) or node.keywords or len(node.args) != 1:
+        return None
+    func = node.func
+    func_name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
+    arg = node.args[0]
+    if func_name == "get_stackup_path" and isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
+def _bundled_stackup(name):
+    """Full path of a stackup file that ships with gds2palace, or None if it doesn't
+    ship that file (or is older than 0.9.1, without get_stackup_path())."""
+    try:
+        from gds2palace import utilities
+        return utilities.get_stackup_path(name)
+    except (ImportError, AttributeError, OSError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # where the GUI's keys live in a script
 # ---------------------------------------------------------------------------
@@ -354,6 +377,11 @@ class ScriptModel:
                 if stmt is None:
                     return self._read_only_last(key, stmts, 0, reason, kind, node, wrapper, depth)
                 return self._follow(key, stmt.value, "dict", wrapper, depth + 1)
+        stackup_name = _stackup_call_name(node)
+        if stackup_name is not None:
+            path = _bundled_stackup(stackup_name)
+            if path is not None:
+                return Site(key, node, path, True, "", kind, wrapper)
         # a value that refers to other names (e.g. fstop = 2*ftarget, or a sweep's
         # loop variable) would lose that link if overwritten - keep it read-only
         names = self._names_in(node)
@@ -739,6 +767,13 @@ def render_value(model, key, value):
             return _number(purposes[0])
         return "[" + ", ".join(_number(p) for p in purposes) + "]"
     if key in PATH_KEYS and isinstance(value, str):
+        if site is not None and _stackup_call_name(site.node) is not None:
+            # another stackup that ships with gds2palace stays a get_stackup_path() call
+            original = model.source(site.node.args[0])
+            name = os.path.basename(value)
+            bundled = _bundled_stackup(name)
+            if bundled and os.path.normcase(os.path.abspath(bundled)) == os.path.normcase(os.path.abspath(value)):
+                return f"{model.source(site.node.func)}({_render_string(name, original)})"
         path = value.replace("\\", "/")
         if model.path:
             script_dir = os.path.dirname(os.path.abspath(model.path))

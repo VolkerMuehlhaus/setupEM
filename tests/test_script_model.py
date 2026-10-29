@@ -17,6 +17,7 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
+from setupEM import script_model  # noqa: E402
 from setupEM.script_model import ScriptModel, Refused, patch_script  # noqa: E402
 
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -192,6 +193,45 @@ def test_path_written_relative_to_script(tmp_path):
     new = str(tmp_path / "layouts" / "new.gds")
     patch_script(model, {"GdsFile": str(tmp_path / "old.gds")}, {"GdsFile": new})
     assert 'settings[\'GdsFile\'] = "layouts/new.gds"' in model.result()   # keeps the quote style
+
+
+# the stackup the way gds2palace_mcp writes it: a file that ships with gds2palace
+MCP_STACKUP = 'XML_filename = utilities.get_stackup_path("SG13G2_FEM_200um.xml")\n'
+
+
+def bundled_stackup(name):
+    path = script_model._bundled_stackup(name)
+    if path is None:
+        pytest.skip(f"the installed gds2palace doesn't ship {name}")
+    return path
+
+
+def test_bundled_stackup_is_read():
+    path = bundled_stackup("SG13G2_FEM_200um.xml")
+    site = ScriptModel(MCP_STACKUP).site("SubstrateFile")
+    assert site.writable and site.value == path
+
+
+def test_other_bundled_stackup_stays_a_call():
+    old = bundled_stackup("SG13G2_FEM_200um.xml")
+    new = bundled_stackup("SG13G2_FEM_200um_passi3D.xml")
+    model = ScriptModel(MCP_STACKUP)
+    patch_script(model, {"SubstrateFile": old}, {"SubstrateFile": new})
+    assert model.result() == 'XML_filename = utilities.get_stackup_path("SG13G2_FEM_200um_passi3D.xml")\n'
+
+
+def test_own_stackup_replaces_the_call(tmp_path):
+    old = bundled_stackup("SG13G2_FEM_200um.xml")
+    script = tmp_path / "model.py"
+    script.write_bytes(MCP_STACKUP.encode())
+    model = load(str(script))
+    patch_script(model, {"SubstrateFile": old}, {"SubstrateFile": str(tmp_path / "my_stackup.xml")})
+    assert model.result() == 'XML_filename = "my_stackup.xml"\n'
+
+
+def test_unknown_bundled_stackup_is_read_only():
+    site = ScriptModel('XML_filename = utilities.get_stackup_path("no_such_stackup.xml")\n').site("SubstrateFile")
+    assert not site.writable and not site.resolved
 
 
 # ---------------------------------------------------------------------------
