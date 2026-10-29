@@ -230,8 +230,20 @@ def test_own_stackup_replaces_the_call(tmp_path):
 
 
 def test_unknown_bundled_stackup_is_read_only():
+    bundled_stackup("SG13G2_FEM_200um.xml")
     site = ScriptModel('XML_filename = utilities.get_stackup_path("no_such_stackup.xml")\n').site("SubstrateFile")
     assert not site.writable and not site.resolved
+    assert site.reason == "no_such_stackup.xml is not a stackup that ships with gds2palace"
+
+
+def test_old_gds2palace_says_why_the_stackup_is_read_only(monkeypatch):
+    # e.g. an old gds2palace checkout that setupEM.py put first on sys.path
+    bundled_stackup("SG13G2_FEM_200um.xml")
+    from gds2palace import utilities
+    monkeypatch.delattr(utilities, "get_stackup_path")
+    site = ScriptModel(MCP_STACKUP).site("SubstrateFile")
+    assert not site.writable and not site.resolved
+    assert "has no utilities.get_stackup_path(), it needs gds2palace 0.9.1 or later" in site.reason
 
 
 # ---------------------------------------------------------------------------

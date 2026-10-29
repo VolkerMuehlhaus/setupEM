@@ -131,14 +131,26 @@ def _stackup_call_name(node):
     return None
 
 
-def _bundled_stackup(name):
-    """Full path of a stackup file that ships with gds2palace, or None if it doesn't
-    ship that file (or is older than 0.9.1, without get_stackup_path())."""
+def _resolve_bundled_stackup(name):
+    """(full path, "") of a stackup file that ships with gds2palace, or (None, why not):
+    gds2palace missing, older than 0.9.1 (no get_stackup_path()), or not shipping that file."""
     try:
         from gds2palace import utilities
-        return utilities.get_stackup_path(name)
-    except (ImportError, AttributeError, OSError):
-        return None
+    except ImportError:
+        return None, "gds2palace is not installed"
+    if not hasattr(utilities, "get_stackup_path"):
+        # e.g. an old gds2palace checkout next to setupEM, which setupEM.py puts first on sys.path
+        return None, (f"the gds2palace in use ({os.path.dirname(utilities.__file__)}) has no "
+                      "utilities.get_stackup_path(), it needs gds2palace 0.9.1 or later")
+    try:
+        return utilities.get_stackup_path(name), ""
+    except OSError:
+        return None, f"{name} is not a stackup that ships with gds2palace"
+
+
+def _bundled_stackup(name):
+    """Full path of a stackup file that ships with gds2palace, or None."""
+    return _resolve_bundled_stackup(name)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +391,10 @@ class ScriptModel:
                 return self._follow(key, stmt.value, "dict", wrapper, depth + 1)
         stackup_name = _stackup_call_name(node)
         if stackup_name is not None:
-            path = _bundled_stackup(stackup_name)
+            path, problem = _resolve_bundled_stackup(stackup_name)
             if path is not None:
                 return Site(key, node, path, True, "", kind, wrapper)
+            return Site(key, node, _UNRESOLVED, False, problem, kind, wrapper)
         # a value that refers to other names (e.g. fstop = 2*ftarget, or a sweep's
         # loop variable) would lose that link if overwritten - keep it read-only
         names = self._names_in(node)
