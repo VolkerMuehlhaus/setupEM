@@ -61,10 +61,10 @@ from gds2palace import *
 
 if __package__ in (None, ""):
     import gds_hierarchy_scan
-    from script_model import eval_simple_python_expression, ScriptModel, patch_script
+    from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
 else:
     from . import gds_hierarchy_scan
-    from .script_model import eval_simple_python_expression, ScriptModel, patch_script
+    from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -5088,7 +5088,8 @@ class MainWindowBase(QMainWindow):
         "fstep": "fstep", "fpoint": "Discrete frequencies", "fdump": "Field dump",
         "refined_cellsize": "Mesh refinement", "refined_cellsize_override": "Mesh refinement overrides",
         "cells_per_wavelength": "Cells per wavelength", "meshsize_max": "Max. cell size",
-        "order": "Mesh basis function", "filled_metals": "Conductor meshing",
+        "order": "Mesh basis function", "conductor_model": "Conductor model",
+        "filled_metals": "Conductor model",
         "adaptive_mesh_iterations": "Adaptive mesh iterations", "amr_tol": "AMR goal",
         "amr_max_dof": "AMR max. DOF", "adaptive_mesh_conformal": "Conformal AMR",
         "complex_coarse_solve": "Complex coarse solve", "iterative": "Solver",
@@ -5199,6 +5200,8 @@ class MainWindowBase(QMainWindow):
             if key in never_written:
                 continue
             site = model.site(key)
+            if site is None and key in LEGACY_SETTINGS:
+                site = model.site(LEGACY_SETTINGS[key][0])
             if site is not None and not site.writable:
                 not_editable.append((key, site.reason))
         self._grey_out_script_settings(dict(not_editable))

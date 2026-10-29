@@ -3800,7 +3800,9 @@ class MainWindow(MainWindowBase):
         "cells_per_wavelength": ("mesh_tab", ["cells_lambda_edit"]),
         "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
         "order": ("mesh_tab", ["mesh_order_box"]),
-        "filled_metals": ("mesh_tab", ["filled_metals_box"]),
+        "conductor_model": ("mesh_tab", ["conductor_model_box"]),
+        # older gds2palace without conductor_model (see MeshTab.save_values())
+        "filled_metals": ("mesh_tab", ["conductor_model_box"]),
         "adaptive_mesh_iterations": ("mesh_tab", ["AMR_iterations_edit"]),
         "amr_tol": ("mesh_tab", ["amr_goal_edit"]),
         "amr_max_dof": ("mesh_tab", ["amr_maxdof_edit"]),

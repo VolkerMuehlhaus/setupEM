@@ -223,6 +223,35 @@ def test_crlf_is_kept():
     assert model.result() == "settings = {}\r\nsettings['fstop'] = 20e9\r\nsettings['margin'] = 30\r\n"
 
 
+# a script from before gds2palace 0.9.0 sets filled_metals, the GUI has conductor_model
+LEGACY = "settings = {}\nsettings['filled_metals'] = True  # volumes\nsettings['fstop'] = 10e9\n"
+
+
+def test_legacy_filled_metals_is_written_when_it_can_express_the_value():
+    model = ScriptModel(LEGACY)
+    written, refused = patch_script(model, {"conductor_model": "solve_inside"}, {"conductor_model": "surface"})
+    assert written == ["filled_metals"] and refused == []
+    assert model.result() == LEGACY.replace("= True  # volumes", "= False  # volumes")
+
+
+def test_legacy_filled_metals_becomes_conductor_model_otherwise():
+    # gds2palace refuses filled_metals next to a conductor_model it contradicts
+    model = ScriptModel(LEGACY)
+    written, refused = patch_script(model, {"conductor_model": "solve_inside"},
+                                    {"conductor_model": "solve_inside_skin"})
+    assert written == ["conductor_model"] and refused == []
+    assert model.result() == LEGACY.replace("settings['filled_metals'] = True",
+                                            "settings['conductor_model'] = 'solve_inside_skin'")
+
+
+def test_legacy_filled_metals_in_a_loop_is_read_only():
+    text = "settings = {}\nfor fm in [True, False]:\n    settings['filled_metals'] = fm\n"
+    model = ScriptModel(text)
+    written, refused = patch_script(model, {"conductor_model": "solve_inside"}, {"conductor_model": "surface"})
+    assert written == [] and refused and refused[0][0] == "conductor_model"
+    assert model.result() == text
+
+
 # ---------------------------------------------------------------------------
 # values the GUI must not overwrite
 # ---------------------------------------------------------------------------

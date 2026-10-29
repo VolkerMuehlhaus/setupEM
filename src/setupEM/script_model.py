@@ -35,7 +35,7 @@ import difflib
 import os
 
 __all__ = ["ScriptModel", "Refused", "eval_simple_python_expression",
-           "patch_script", "GUI_KEY_ALIASES"]
+           "patch_script", "GUI_KEY_ALIASES", "LEGACY_SETTINGS"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +127,14 @@ def _module_constants(tree):
 GUI_KEY_ALIASES = {
     "GdsFile": ("GdsFile", "gds_filename"),
     "SubstrateFile": ("SubstrateFile", "XML_filename"),
+}
+
+# GUI key -> (the older setting gds2palace replaced it by, older value for each
+# new value it can express). A script with the older setting keeps it when the
+# new value can be written that way; otherwise its line is turned into the new
+# setting - gds2palace refuses both together when they disagree.
+LEGACY_SETTINGS = {
+    "conductor_model": ("filled_metals", {"solve_inside": "True", "surface": "False"}),
 }
 
 # GUI key -> (function, positional index or None, keyword name) of the workflow
@@ -554,6 +562,20 @@ class ScriptModel:
         start, end = self.span(site.node)
         self._add_edit(start, end, script_text)
 
+    def replace_setting(self, old_key, new_key, script_text):
+        """Replace settings['old_key'] = ... by settings['new_key'] = script_text."""
+        site = self.site(old_key)
+        if site is None:
+            raise Refused(f"the script doesn't set {old_key}")
+        if not site.writable:
+            raise Refused(site.reason)
+        stmts = self._dict_assigns.get((self.settings_dict, old_key), []) if self.settings_dict else []
+        if len(stmts) != 1 or not isinstance(stmts[0], ast.Assign) or len(stmts[0].targets) != 1 \
+                or not isinstance(stmts[0].targets[0], ast.Subscript):
+            raise Refused(f"{old_key} is not a single {self.settings_dict or 'settings'}['{old_key}'] = ... line")
+        start, end = self.span(stmts[0])
+        self._add_edit(start, end, f"{self.settings_dict}['{new_key}'] = {script_text}")
+
     def unwrap_purpose(self):
         """Replace purposelist=[settings['purpose']] by purposelist=settings['purpose']."""
         site = self.site("purpose")
@@ -820,6 +842,15 @@ def patch_script(model, baseline, current, ignore_keys=(), baseline_ports=None, 
             continue
         try:
             text = render_value(model, key, current[key])
+            legacy_key, legacy_values = LEGACY_SETTINGS.get(key, (None, {}))
+            if legacy_key and model.site(key) is None and model.site(legacy_key) is not None:
+                if current[key] in legacy_values:
+                    model.set_value(legacy_key, legacy_values[current[key]])
+                    written.append(legacy_key)
+                else:
+                    model.replace_setting(legacy_key, key, text)
+                    written.append(key)
+                continue
             site = model.site(key)
             if key == "purpose" and site is not None and site.wrapper is not None and text.startswith("["):
                 model.unwrap_purpose()
