@@ -1,10 +1,12 @@
 # What's New - October 29, 2026
 
-**File > Edit \*.py model in place** (new, setupEM and setupThermal): edits a gds2palace model script directly, e.g. one from the gds2palace MCP server, an example or your own code. Create Model and **File > Save** write only the values you change; the script's loops, comments and custom code stay. Settings the script computes itself are greyed out. A script that builds several models (a parameter sweep) lists them on the Create Model tab, and Start Simulation runs the ticked ones. **File > Import from \*.py model** works as before; after importing a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**.
+**File > Edit \*.py model in place** (new, setupEM and setupThermal): edits a gds2palace model script directly, e.g. one from the gds2palace MCP server, an example or your own code. Create Model and **File > Save** write only the values you change; the script's loops, comments and custom code stay. Settings the script computes itself are greyed out. A script that builds several models (a parameter sweep) lists them on the Create Model tab, and Start Simulation runs the ticked ones. After importing a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**.
+
+**File > Import from \*.py model** now runs a gds2palace script to read it, without reading the GDSII file and without meshing. The run stops where the script builds the model, so its solver start never runs. The import now gets exactly what gds2palace would get, also values and ports the script computes. Before, ports made in a loop (as in many gds2palace MCP scripts) were left out, and the imported model was missing them. The script's own code before building the model does run, e.g. a script that generates its GDSII file writes it. If the run fails, the import reads the script text as before, and the bar below the menu says why.
 
 **File menu:** the three Recent submenus are now one **Open Recent** submenu, with sections for configs, imported \*.py models and \*.py models edited in place. A file reopens the way it was opened. The menu is grouped as open, recent, save, preferences. **Load Default Config** and **Save as Default Config** are removed: defaults for new models are set in **File > Preferences**. An existing `default.simcfg` / `default.tsimcfg` in your home directory still opens with **Load Config**, and **Save Config** can write it.
 
-Import and edit in place now read a stackup given as `utilities.get_stackup_path("SG13G2_FEM_200um.xml")`, the way the gds2palace MCP server writes it (needs gds2palace 0.9.1 or later). Before, an imported model had no stackup file.
+Import and edit in place now read a stackup given as `utilities.get_stackup_path("SG13G2_FEM_200um.xml")`, the way the gds2palace MCP server writes it (needs gds2palace 0.9.1 or later). Before, an imported model using that syntax had no stackup file.
 
 
 

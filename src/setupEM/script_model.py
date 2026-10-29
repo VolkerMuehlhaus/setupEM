@@ -556,6 +556,18 @@ class ScriptModel:
         return self.create_calls[0] if len(self.create_calls) == 1 else None
 
     @property
+    def builds_in_loop(self):
+        """True if a create_*() call is inside a loop: the script builds several
+        models, e.g. a parameter sweep."""
+        for call in self.create_calls:
+            node = self._parents.get(call)
+            while node is not None:
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    return True
+                node = self._parents.get(node)
+        return False
+
+    @property
     def tool(self):
         """'palace', 'elmer', 'elmer_thermal', 'openems' or None."""
         if any(isinstance(n, (ast.Import, ast.ImportFrom)) and
