@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QMessageBox, QGroupBox,
     QCheckBox, QPlainTextEdit, QDialog, QSizePolicy, QFrame, QRadioButton, QDialogButtonBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsRectItem, QToolTip,
+    QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsRectItem, QToolTip, QToolBar,
     )
 from PySide6.QtGui import (
     QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter,
@@ -112,6 +112,7 @@ GDS2PALACE_CONDUCTOR_MODELS = tuple(getattr(simulation_setup, "CONDUCTOR_MODELS"
 RECENT_FILES_ORG = "muehlhaus.com"
 RECENT_SETTINGS_KEY = "recentSettingsFiles"
 RECENT_MODEL_KEY = "recentModelFiles"
+RECENT_EDIT_KEY = "recentEditedScripts"
 MAX_RECENT_FILES = 10
 
 # Preferences (File > Preferences...): per-user, per-app defaults for fields
@@ -329,8 +330,8 @@ def is_setupem_generated(path):
 def protected_script_message(path):
     """Create Model refused to write a generated script over an opened one."""
     return (f"This would overwrite the opened model script\n\n{path}\n\nwith a generated one, so "
-            "this write was blocked.\n\nTo change that script itself, open it with File > Open "
-            "*.py model > Edit this script. For a new model, choose a different model name or "
+            "this write was blocked.\n\nTo change that script itself, open it with File > Edit "
+            "*.py model in place. For a new model, choose a different model name or "
             "output directory on the Create Model(s) tab.")
 
 
@@ -3758,9 +3759,10 @@ class CreateModelTabBase(QWidget):
                 # edit-in-place mode never falls back to a generated script
                 QMessageBox.warning(
                     self, "Create Model",
-                    f"In edit-in-place mode Create Model writes back to\n\n{MainWindow.script_model.path}\n\n"
-                    "and nowhere else. Use File > New, or Open *.py model with \"Use its settings "
-                    "for a new model\", to make a new model.")
+                    f"While {os.path.basename(MainWindow.script_model.path)} is edited in place, "
+                    f"Create Model writes back to\n\n{MainWindow.script_model.path}\n\n"
+                    "and nowhere else. Use File > New, or File > Import from *.py model, "
+                    "to make a new model.")
                 return None
             if not MainWindow.check_script_on_disk(saving=False):
                 return None
@@ -3810,7 +3812,7 @@ class CreateModelTabBase(QWidget):
             f.write(code)
 
     def _backup_before_first_overwrite(self, pymodel_filename):
-        """A *.py opened as "New model from its settings" is overwritten by the
+        """A *.py opened with "Import from *.py model" is overwritten by the
         generated script (as setupEM always did); if setupEM didn't write that
         script itself, keep a copy of it first, once."""
         MainWindow = self.MainWindow
@@ -4189,51 +4191,6 @@ class CreateModelTabBase(QWidget):
 
 # ---------- MAIN WINDOW (shared base) ----------
 
-class OpenPyModelDialog(QDialog):
-    """File > Open *.py model, when Preferences say "Ask each time": edit the
-    script in place, or make a new model from its settings."""
-
-    def __init__(self, parent, name, problem=""):
-        super().__init__(parent)
-        self.setWindowTitle("Open *.py model")
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Open <b>{name}</b> as:"))
-
-        self.edit_radio = QRadioButton("Edit this script")
-        edit_hint = QLabel(f"Not possible: {problem}." if problem else
-                           "Your changes are saved back into it. Loops and custom code stay.")
-        self.new_radio = QRadioButton("New model from its settings")
-        new_hint = QLabel("setupEM writes its own script next to it, this one is not changed.")
-        for radio, hint in ((self.edit_radio, edit_hint), (self.new_radio, new_hint)):
-            hint.setStyleSheet("color: #666;")
-            hint.setContentsMargins(22, 0, 0, 6)   # indented under the radio button text
-            hint.setWordWrap(True)
-            layout.addWidget(radio)
-            layout.addWidget(hint)
-        self.edit_radio.setEnabled(not problem)
-        (self.new_radio if problem else self.edit_radio).setChecked(True)
-
-        # bottom row: "Don't ask again" on the left, OK / Cancel on the right
-        layout.addSpacing(6)
-        bottom = QHBoxLayout()
-        self.remember = QCheckBox("Don't ask again")
-        self.remember.setToolTip("Change it later in File > Preferences > Files")
-        # a choice forced by this one script isn't a general setting
-        self.remember.setVisible(not problem)
-        bottom.addWidget(self.remember)
-        bottom.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Open")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        bottom.addWidget(buttons)
-        layout.addLayout(bottom)
-        self.setMinimumWidth(420)
-
-    def mode(self):
-        return "in_place" if self.edit_radio.isChecked() else "new_model"
-
-
 class MainWindowBase(QMainWindow):
     """Shared base for the setupEM and setupThermal MainWindow classes.
 
@@ -4322,13 +4279,14 @@ class MainWindowBase(QMainWindow):
         self.new_action.setShortcut(QKeySequence.New)
         self.load_settings_action = QAction("Load Config ...", self)
         self.save_action = QAction("Save Config ...", self)
-        # one entry for *.py models: edit in place or use the settings for a new
-        # model, as set in Preferences > Files (or asked each time)
-        self.import_model_action = QAction("Open *.py model ...", self)
-        # only shown while a script is edited in place
-        self.save_script_action = QAction("Save script", self)
+        # a *.py model: its settings for a new, generated model (Import), or the
+        # script itself, with only the changed values written back (Edit in place)
+        self.import_model_action = QAction("Import from *.py model ...", self)
+        self.edit_model_action = QAction("Edit *.py model in place ...", self)
+        # only shown while a script is edited in place, named after it
+        self.save_script_action = QAction("Save", self)
         self.save_script_action.setShortcut(QKeySequence.Save)
-        self.revert_script_action = QAction("Revert script to saved", self)
+        self.revert_script_action = QAction("Revert", self)
         self.export_model_action = QAction("Export to *.py model ...", self)
         self.preferences_action = QAction("Preferences ...", self)
         exit_action = QAction("Exit", self)
@@ -4340,7 +4298,8 @@ class MainWindowBase(QMainWindow):
         self.load_settings_action.triggered.connect(lambda: self.load_configuration_dialog())
         self.save_action.triggered.connect(lambda: self.save_ask_filenamefile())
 
-        self.import_model_action.triggered.connect(lambda: self.open_py_model())
+        self.import_model_action.triggered.connect(lambda: self.import_py_model())
+        self.edit_model_action.triggered.connect(lambda: self.edit_py_model())
         self.save_script_action.triggered.connect(lambda: self.save_script_in_place())
         self.revert_script_action.triggered.connect(lambda: self.revert_script_in_place())
         self.export_model_action.triggered.connect(lambda: self.export_to_python())
@@ -4350,11 +4309,12 @@ class MainWindowBase(QMainWindow):
         file_menu.addAction(self.new_action)
         file_menu.addSeparator()
         file_menu.addAction(self.load_settings_action)
-        self.recent_settings_menu = file_menu.addMenu("Load Recent Config")
-        file_menu.addAction(self.save_action)
-        file_menu.addSeparator()
         file_menu.addAction(self.import_model_action)
-        self.recent_model_menu = file_menu.addMenu("Recent Models")
+        file_menu.addAction(self.edit_model_action)
+        # one list for all three, in sections: a file reopens the way it was opened
+        self.recent_menu = file_menu.addMenu("Open Recent")
+        file_menu.addSeparator()
+        file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_script_action)
         file_menu.addAction(self.revert_script_action)
         file_menu.addAction(self.export_model_action)
@@ -4364,6 +4324,7 @@ class MainWindowBase(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
         self._populate_recent_menus()
+        self._create_info_bar()
 
         # hook for app-specific menus (e.g. setupEM's Simulator menu); no-op by default.
         # Placed before Tools so the menu order reads File, Simulator, Tools, Help.
@@ -4562,6 +4523,7 @@ class MainWindowBase(QMainWindow):
         """
         if not self.confirm_unsaved_script():
             return
+        self.hide_info_bar()
         self._stop_preserve_mode()
         self.protected_source_model_path = None
         self.backup_before_overwrite = None
@@ -4601,7 +4563,7 @@ class MainWindowBase(QMainWindow):
             f"Open the file with {owner_app} instead.")
 
     def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True):
-        # in_place: *.py only, from open_py_model() - edit this script in
+        # in_place: *.py only, from edit_py_model() - edit this script in
         # place (preserve mode) instead of importing its values for a new script.
         # ask_unsaved: offer to save a script edited in place first (False for Revert / Reload)
         saved_values = self.saved_values
@@ -4612,6 +4574,7 @@ class MainWindowBase(QMainWindow):
             def leave_current_script():
                 # only once the file is accepted - a wrong-app file that's refused
                 # leaves a script edited in place as it was
+                self.hide_info_bar()
                 self._stop_preserve_mode()
                 self.protected_source_model_path = None
                 self.backup_before_overwrite = None
@@ -4823,7 +4786,7 @@ class MainWindowBase(QMainWindow):
                     reuse = not is_openems_import
                     if reuse and get_preference_bool(self.APP_NAME, "confirm_reuse_import_filename", False):
                         reuse = QMessageBox.question(
-                            self, "Open *.py model",
+                            self, "Import from *.py model",
                             f"Use {os.path.basename(file_path)} as the output file for this model too?\n\n"
                             "Yes: Create Model overwrites it (a backup copy is kept).\n"
                             f"No: the new model is written as {pathlib.Path(file_path).stem}_new.py.",
@@ -4857,7 +4820,7 @@ class MainWindowBase(QMainWindow):
                     status = f"New model {saved_values['model_basename']} from the settings of {name}"
                 # Revert / Reload re-open the same script, that's not a new recent entry
                 if ask_unsaved:
-                    self._add_recent_file(RECENT_MODEL_KEY, file_path)
+                    self._add_recent_file(RECENT_EDIT_KEY if in_place else RECENT_MODEL_KEY, file_path)
                 known = {key for key, _reason in not_editable}
                 for key, reason in unresolved + self._import_notes:
                     if key not in known:
@@ -4881,6 +4844,13 @@ class MainWindowBase(QMainWindow):
                         log_lines.append(f"Create Model writes the generated script over {name}{keep}.")
                     else:
                         log_lines.append(f"Create Model writes {output} next to {name}, which itself is not changed.")
+                    if not is_setupem_generated(file_path) and not self._in_place_problem(file_path):
+                        log_lines.append(f"{name} has its own code (loops, comments). To keep it as it is, "
+                                         "use File > Edit *.py model in place instead.")
+                        self.show_info_bar(
+                            f"{name} has its own code (loops, comments). Import uses only its settings "
+                            "for a new, generated script.",
+                            "Edit in place instead", lambda path=file_path: self.edit_py_model(path))
                 log_lines.extend(path_messages)
                 if not_editable:
                     log_lines.append("Set by the script, not editable here:" if in_place else
@@ -4970,58 +4940,46 @@ class MainWindowBase(QMainWindow):
             return f"it can't be read ({e})"
         if model.tool == "openems":
             return "it is an openEMS model, setupEM edits gds2palace (Palace / Elmer) models"
+        if len(model.create_calls) > 1:
+            return ("it builds several models (e.g. thermal and EM), editing such a script "
+                    "in place is not supported yet")
         if model.tool is None:
-            return ("it doesn't call create_palace(), create_elmer() or create_elmer_thermal() "
-                    "exactly once")
+            return "it doesn't call create_palace(), create_elmer() or create_elmer_thermal()"
         if model.tool not in self.PRESERVE_TOOLS:
             other = "setupThermal" if model.tool == "elmer_thermal" else "setupEM"
             label = {"palace": "a Palace", "elmer": "an Elmer", "elmer_thermal": "an Elmer thermal"}[model.tool]
             return f"it is {label} model, open it in {other}"
         return ""
 
-    # Preferences > Files > "When opening a *.py model"
-    PY_OPEN_MODES = ("ask", "in_place", "new_model")
-
     def open_file(self, file_path):
-        """Open a file from Recent, drag & drop or Load Config: a *.py model the
-        way Preferences says, anything else as a settings file."""
-        if pathlib.Path(file_path).suffix.upper() == ".PY":
-            self.open_py_model(file_path)
-        else:
+        """Open a file from Recent, drag & drop or Load Config: a *.py model is
+        imported (File > Import from *.py model), anything else is a settings file."""
+        self.load_configuration_from_file(file_path)
+
+    def import_py_model(self):
+        """File > Import from *.py model: its settings for a new, generated model."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import from *.py Model", filter="*.py model code")
+        if file_path:
             self.load_configuration_from_file(file_path)
 
-    def open_py_model(self, file_path=None):
-        """File > Open *.py model: edit the script in place (Create Model writes
-        only the changed values back into it), or use its settings for a new,
-        generated model - as set in Preferences, or asked each time."""
+    def edit_py_model(self, file_path=None):
+        """File > Edit *.py model in place: Create Model / Save write only the
+        changed values back into the script, its own code stays."""
         if not file_path:
-            file_path, _ = QFileDialog.getOpenFileName(self, "Open *.py Model", filter="*.py model code")
+            file_path, _ = QFileDialog.getOpenFileName(self, "Edit *.py Model in Place", filter="*.py model code")
             if not file_path:
                 return
-        name = os.path.basename(file_path)
         problem = self._in_place_problem(file_path)
-        mode = get_preference(self.APP_NAME, "py_open_mode", "ask")
-        if mode not in self.PY_OPEN_MODES:
-            mode = "ask"
-
-        if mode == "ask":
-            dialog = OpenPyModelDialog(self, name, problem)
-            if dialog.exec() != QDialog.Accepted:
-                return
-            mode = dialog.mode()
-            if dialog.remember.isChecked():
-                set_preference(self.APP_NAME, "py_open_mode", mode)
-        elif mode == "in_place" and problem:
-            # say so instead of silently opening it the other way
+        if problem:
             answer = QMessageBox.question(
-                self, "Open *.py model",
-                f"{name} can't be edited in place ({problem}).\n\nOpen it as a new model from its settings?",
+                self, "Edit *.py model in place",
+                f"{os.path.basename(file_path)} can't be edited in place ({problem}).\n\n"
+                "Import its settings for a new model instead?",
                 QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
-            if answer != QMessageBox.Yes:
-                return
-            mode = "new_model"
-
-        self.load_configuration_from_file(file_path, in_place=(mode == "in_place"))
+            if answer == QMessageBox.Yes:
+                self.load_configuration_from_file(file_path)
+            return
+        self.load_configuration_from_file(file_path, in_place=True)
 
     def script_models_file(self):
         """Where run_with_overrides.py --record lists the models the script edited
@@ -5066,6 +5024,56 @@ class MainWindowBase(QMainWindow):
             run["label"] = label or run["model_basename"]
         self.script_runs = runs
 
+    def _create_info_bar(self):
+        """A slim bar below the menu for a note with one action, e.g. after
+        importing a script setupEM didn't write. Hidden until show_info_bar()."""
+        self.info_bar = QToolBar(self)
+        self.info_bar.setMovable(False)
+        self.info_bar.setFloatable(False)
+        self.info_bar.toggleViewAction().setVisible(False)   # not in the toolbar context menu
+        frame = QFrame()
+        frame.setObjectName("infoBar")
+        # explicit text colors too: Windows dark mode would give light text on the light background
+        frame.setStyleSheet("QFrame#infoBar { background-color: #E8F1FB; border: 1px solid #9DBCE0; "
+                            "border-radius: 3px; } QLabel { color: #1F3A5A; } "
+                            "QPushButton { color: #1F3A5A; background-color: #FFFFFF; "
+                            "border: 1px solid #9DBCE0; border-radius: 3px; padding: 3px 10px; } "
+                            "QPushButton:hover { background-color: #D6E6F7; } "
+                            "QPushButton#infoBarClose { border: none; background: transparent; padding: 0 4px; }")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 4, 4, 4)
+        self.info_bar_label = QLabel()
+        self.info_bar_label.setWordWrap(True)
+        self.info_bar_button = QPushButton()
+        self.info_bar_button.clicked.connect(self._info_bar_action_clicked)
+        close_button = QPushButton("\u2715")
+        close_button.setObjectName("infoBarClose")
+        close_button.setToolTip("Close")
+        close_button.clicked.connect(self.hide_info_bar)
+        layout.addWidget(self.info_bar_label, 1)
+        layout.addWidget(self.info_bar_button)
+        layout.addWidget(close_button)
+        self.info_bar.addWidget(frame)
+        self.addToolBar(Qt.TopToolBarArea, self.info_bar)
+        self._info_bar_action = None
+        self.info_bar.hide()
+
+    def show_info_bar(self, text, action_text, action):
+        self.info_bar_label.setText(text)
+        self.info_bar_button.setText(action_text)
+        self._info_bar_action = action
+        self.info_bar.show()
+
+    def hide_info_bar(self):
+        self._info_bar_action = None
+        self.info_bar.hide()
+
+    def _info_bar_action_clicked(self):
+        action = self._info_bar_action
+        self.hide_info_bar()
+        if action is not None:
+            action()
+
     def _update_in_place_menu(self):
         # Save script / Revert only in edit-in-place mode; Save Config (*.simcfg)
         # is hidden there, a config file next to the script would be a second,
@@ -5073,6 +5081,10 @@ class MainWindowBase(QMainWindow):
         in_place = getattr(self, "script_model", None) is not None
         self.save_script_action.setVisible(in_place)
         self.revert_script_action.setVisible(in_place)
+        if in_place:
+            name = os.path.basename(self.script_model.path)
+            self.save_script_action.setText(f"Save {name}")
+            self.revert_script_action.setText(f"Revert {name}")
         self.save_action.setVisible(not in_place)
 
     # saved_values key -> (tab attribute, [widget attributes]) of the fields that
@@ -5218,7 +5230,7 @@ class MainWindowBase(QMainWindow):
         model = getattr(self, "script_model", None)
         if model is not None and model.path:
             unsaved = "*" if getattr(self, "_script_dirty", False) else ""
-            title = f"{title} - editing {os.path.basename(model.path)}{unsaved} in place"
+            title = f"{title} - {os.path.basename(model.path)}{unsaved}"
         super().setWindowTitle(title)
 
     def _refresh_title(self):
@@ -5406,29 +5418,47 @@ class MainWindowBase(QMainWindow):
         QSettings(RECENT_FILES_ORG, self.APP_NAME).setValue(key, files)
         self._populate_recent_menus()
 
-    def _clear_recent_files(self, key):
-        QSettings(RECENT_FILES_ORG, self.APP_NAME).setValue(key, [])
+    def _clear_recent_files(self):
+        settings = QSettings(RECENT_FILES_ORG, self.APP_NAME)
+        for key, _heading in self.RECENT_SECTIONS:
+            settings.setValue(key, [])
         self._populate_recent_menus()
 
-    def _populate_recent_menus(self):
-        self._populate_recent_menu(self.recent_settings_menu, RECENT_SETTINGS_KEY)
-        self._populate_recent_menu(self.recent_model_menu, RECENT_MODEL_KEY)
+    # File > Open Recent: (stored list, section heading), in menu order
+    RECENT_SECTIONS = ((RECENT_SETTINGS_KEY, "Configs"),
+                       (RECENT_MODEL_KEY, "Imported *.py models"),
+                       (RECENT_EDIT_KEY, "*.py models edited in place"))
 
-    def _populate_recent_menu(self, menu, key):
+    def _populate_recent_menus(self):
+        menu = self.recent_menu
         menu.clear()
-        files = self._recent_files(key)
-        if not files:
+        any_files = False
+        for key, heading in self.RECENT_SECTIONS:
+            files = self._recent_files(key)
+            if not files:
+                continue
+            if any_files:
+                menu.addSeparator()
+            any_files = True
+            # a disabled entry as heading: QMenu.addSection() shows no text in some styles
+            heading_action = QAction(heading, self)
+            heading_action.setEnabled(False)
+            font = heading_action.font()
+            font.setBold(True)
+            heading_action.setFont(font)
+            menu.addAction(heading_action)
+            for filename in files:
+                action = QAction(filename, self)
+                action.triggered.connect(lambda checked=False, k=key, f=filename: self._open_recent_file(k, f))
+                menu.addAction(action)
+        if not any_files:
             empty_action = QAction("(none)", self)
             empty_action.setEnabled(False)
             menu.addAction(empty_action)
             return
-        for filename in files:
-            action = QAction(filename, self)
-            action.triggered.connect(lambda checked=False, f=filename: self._open_recent_file(key, f))
-            menu.addAction(action)
         menu.addSeparator()
         clear_action = QAction("Clear Recent Files", self)
-        clear_action.triggered.connect(lambda: self._clear_recent_files(key))
+        clear_action.triggered.connect(lambda: self._clear_recent_files())
         menu.addAction(clear_action)
 
     def _open_recent_file(self, key, filename):
@@ -5438,7 +5468,10 @@ class MainWindowBase(QMainWindow):
                 f"Could not find {filename}.\n\nIt will be removed from the recent files list.")
             self._remove_recent_file(key, filename)
             return
-        self.open_file(filename)
+        if key == RECENT_EDIT_KEY:
+            self.edit_py_model(filename)
+        else:
+            self.open_file(filename)
 
     def apply_native_config_data(self, data):
         # Hook: update the app-specific tab (ports / thermal objects) from

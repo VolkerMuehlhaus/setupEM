@@ -3179,23 +3179,8 @@ class PreferencesDialog(QDialog):
 
         self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", "0")
         self.viamerge_edit = add_row(files_form, "Default via array merge distance (µm)", "merge_polygon_size", "0.5")
-        # File > Open *.py model: edit the script in place, or use its settings for a new model
-        py_open_row = QHBoxLayout()
-        py_open_label = QLabel("When opening a *.py model")
-        py_open_label.setFixedWidth(label_width)
-        py_open_row.addWidget(py_open_label)
-        self.py_open_combo = QComboBox()
-        self.py_open_combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        self.py_open_combo.addItem("Ask each time", "ask")
-        self.py_open_combo.addItem("Edit the script in place", "in_place")
-        self.py_open_combo.addItem("New model from its settings", "new_model")
-        combo_index = self.py_open_combo.findData(get_preference(self.app_name, "py_open_mode", "ask"))
-        self.py_open_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
-        py_open_row.addWidget(self.py_open_combo)
-        files_form.addLayout(py_open_row)
-        self._reset_targets.append((self.py_open_combo, "py_open_mode", "ask", "combo"))
-        # "New model from its settings" writes back into the opened script, as setupEM always did
-        self.confirm_reuse_checkbox = QCheckBox("When opening a *.py as a new model: ask before writing over the imported script")
+        # Import from *.py model writes back into the imported script, as setupEM always did
+        self.confirm_reuse_checkbox = QCheckBox("When importing a *.py model: ask before writing over it")
         self.confirm_reuse_checkbox.setChecked(get_preference_bool(self.app_name, "confirm_reuse_import_filename", False))
         files_form.addWidget(self.confirm_reuse_checkbox)
         self._reset_targets.append((self.confirm_reuse_checkbox, "confirm_reuse_import_filename", False, "bool"))
@@ -3481,7 +3466,6 @@ class PreferencesDialog(QDialog):
 
         set_preference(self.app_name, "purpose", self.purpose_edit.text())
         set_preference(self.app_name, "in_place_save_without_asking", self.in_place_save_checkbox.isChecked())
-        set_preference(self.app_name, "py_open_mode", self.py_open_combo.currentData())
         set_preference(self.app_name, "confirm_reuse_import_filename", self.confirm_reuse_checkbox.isChecked())
         set_preference(self.app_name, "xml_browse_directory", self.xml_browse_dir_edit.text())
         set_preference(self.app_name, "merge_polygon_size", self.viamerge_edit.text())
@@ -3629,7 +3613,7 @@ class MainWindow(MainWindowBase):
             other = self.optionPalace if self.ElmerMode else self.optionElmer
             other.setEnabled(False)
             other.setToolTip("The script edited in place is a " + ("Elmer" if self.ElmerMode else "Palace") +
-                             " model. Open it as a new model from its settings to use the other solver.")
+                             " model. Import it (File > Import from *.py model) to use the other solver.")
 
     def setPalaceMode(self):
         self.optionPalace.setChecked(True)

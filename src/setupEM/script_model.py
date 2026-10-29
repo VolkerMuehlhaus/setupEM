@@ -537,8 +537,10 @@ class ScriptModel:
         return rest == "" or rest.startswith("#")
 
     def _find_create_call(self):
-        calls = [c for name in CREATE_CALLS for c in self._workflow_calls(name)]
-        return calls[0] if len(calls) == 1 else None
+        # every create_*() call; a script that builds several models (e.g. thermal,
+        # then EM) has no single one to edit
+        self.create_calls = [c for name in CREATE_CALLS for c in self._workflow_calls(name)]
+        return self.create_calls[0] if len(self.create_calls) == 1 else None
 
     @property
     def tool(self):
