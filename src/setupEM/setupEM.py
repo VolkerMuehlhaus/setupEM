@@ -778,8 +778,18 @@ class PortsTab(QWidget):
                     except Exception:
                         QMessageBox.warning(self, "Error", "Invalid input for port " + str(portnumber))
                         return False
+                    # gds2palace's simulation_port() exits the whole program on a direction that does not
+                    # match its layers, so check here and warn instead (e.g. an incomplete port from a .simcfg)
+                    via = "Z" in direction.upper()
+                    if direction.strip().upper() not in ("X", "Y", "Z", "-X", "-Y", "-Z") or \
+                            not ((from_name and to_name) if via else target_name):
+                        QMessageBox.warning(self, "Error",
+                                            f"Port {portnumber} is incomplete: direction X, Y, -X or -Y needs a "
+                                            "target layer (in-plane port), Z or -Z needs a from and a to layer "
+                                            "(via port).")
+                        return False
                     # create port
-                    if "Z" in direction:
+                    if via:
                         # via port
                         simulation_ports.add_port(simulation_setup.simulation_port(portnumber=portnumber,
                                                                                 voltage=voltage,
