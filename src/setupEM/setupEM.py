@@ -843,7 +843,7 @@ class PortsTab(QWidget):
                 self.portslist.setItem(portnum-1, 2, QTableWidgetItem(str(port.get("source_layernum",""))))
 
                 direction = str(port.get("direction","")).upper()
-                if direction == 'Z':
+                if "Z" in direction:
                     self.portslist.setItem(portnum-1, 4, QTableWidgetItem(str(port.get("from_layername",""))))
                     self.portslist.setItem(portnum-1, 5, QTableWidgetItem(str(port.get("to_layername",""))))
                     self.portslist.setItem(portnum-1, 3, QTableWidgetItem(""))
