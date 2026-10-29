@@ -636,7 +636,12 @@ class ResultViewerWindow(QDialog):
         # regardless of which solver produced it.
         saved_values = self.MainWindow.saved_values
         model_basename = saved_values.get('model_basename', '') if isinstance(saved_values, dict) else ''
-        current_model_dir = f"{model_basename}_data" if model_basename else None
+        current_model_dirs = {f"{model_basename}_data"} if model_basename else set()
+        # a script edited in place may create several models (e.g. a parameter
+        # sweep), each with its own run folder name: all of them are "this model"
+        script_runs = getattr(self.MainWindow, "script_runs", None) or []
+        if getattr(self.MainWindow, "script_model", None) is not None and script_runs:
+            current_model_dirs = {os.path.basename(os.path.normpath(run["sim_path"])) for run in script_runs}
 
         result = []
         for path in files:
@@ -645,8 +650,8 @@ class ResultViewerWindow(QDialog):
                 continue
             if not include_deembedded and '_deembedded' in name:
                 continue
-            if not include_all_models and current_model_dir:
-                if current_model_dir not in os.path.normpath(path).split(os.sep):
+            if not include_all_models and current_model_dirs:
+                if not current_model_dirs & set(os.path.normpath(path).split(os.sep)):
                     continue
             result.append(path)
         return result
