@@ -61,8 +61,10 @@ if __package__ in (None, ""):
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
+        protected_script_message,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
+    from script_model import ScriptModel
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -75,8 +77,10 @@ else:
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
+        protected_script_message,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
+    from .script_model import ScriptModel
 
 
 '''
@@ -94,8 +98,6 @@ sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxc
 
 CONFIG_SUFFIX = "simcfg"  # file suffix for native config file used here
 APP_NAME = "setupEM" # name of this application
-
-DEFAULT_SETTINGS_FILE = os.path.join(os.path.expanduser("~"),"default." + CONFIG_SUFFIX)
 
 
 saved_values = {} # dictionary of user input in this application
@@ -2009,7 +2011,7 @@ class CreateModelTab(CreateModelTabBase):
         in the log."""
         self._init_status_state()
         if self.MainWindow.PalaceMode:
-            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+            run_path = self.run_folder("palace_model")
             try:
                 with open(os.path.join(run_path, "config.json")) as f:
                     config_data = json.load(f)
@@ -2263,7 +2265,7 @@ class CreateModelTab(CreateModelTabBase):
         """
         try:
             if os.name == "nt":
-                run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+                run_path = self.run_folder("palace_model")
                 wsl_run_path = self._windows_to_wsl_path(run_path)
                 subprocess.run(
                     ["wsl.exe", "--cd", wsl_run_path, "--", "bash", "-lc",
@@ -2341,9 +2343,9 @@ class CreateModelTab(CreateModelTabBase):
             from .result_viewer import find_touchstone_files, is_amr_iteration_snapshot
 
         if self.MainWindow.PalaceMode:
-            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+            run_path = self.run_folder("palace_model")
         else:
-            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+            run_path = self.run_folder("elmer_model")
 
         raw_files = [
             path for path in find_touchstone_files(run_path)
@@ -2380,8 +2382,8 @@ class CreateModelTab(CreateModelTabBase):
     def _append_results_summary(self):
         # Palace-only: parse palace.json / error-indicators.csv and append a results summary
         # to the log. Called from on_finished() after a real simulation run.
-        run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
-        summary = build_results_summary(run_path, saved_values['model_basename'])
+        run_path = self.run_folder("palace_model")
+        summary = build_results_summary(run_path, self.run_basename())
         self.log_area.appendPlainText("\n" + summary + "\n")
 
     def _update_viewer_button(self):
@@ -2407,11 +2409,11 @@ class CreateModelTab(CreateModelTabBase):
         """(file_paths, not_found_message) for Palace's field-dump output - shared
         by launch_paraview() (external ParaView) and open_field_viewer() (in-app
         PyVista viewer), so both use the exact same file resolution."""
-        run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
-        file_paths = find_paraview_files(run_path, saved_values['model_basename'])
+        run_path = self.run_folder("palace_model")
+        file_paths = find_paraview_files(run_path, self.run_basename())
         not_found = (
             f"⚠️ No Palace field-dump output found under "
-            f"{find_output_dir(run_path, saved_values['model_basename'])}\n"
+            f"{find_output_dir(run_path, self.run_basename())}\n"
             "(set fdump to specific frequencies before running the simulation)\n"
         )
         return file_paths, not_found
@@ -2424,7 +2426,7 @@ class CreateModelTab(CreateModelTabBase):
         one file: Elmer has no per-frequency .pvd collection like Palace, so
         each solved frequency's fields_t000N.vtu/.pvtu is its own separate file -
         the viewer's Result File picker lets the user choose between them."""
-        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        run_path = self.run_folder("elmer_model")
         # Output File Name = File "fields" has no path prefix, so Elmer resolves it
         # relative to the Mesh DB directory ("mesh" under run_path) rather than
         # run_path itself - confirmed against a real run (same resolution mechanism
@@ -2554,31 +2556,25 @@ class CreateModelTab(CreateModelTabBase):
             # clear log
             self.log_area.clear()
 
-            # get code from model editor tab
-            self.MainWindow.modeleditor_tab.create_model_text()
-            code = self.MainWindow.modeleditor_tab.model_edit.toPlainText().strip()
+            # Python file to write
+            pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
+
+            # generated code, or the imported script with the changes (preserve mode)
+            code = self.model_code(pymodel_filename)
+            if code is None:
+                return
             if not code:
                 self.log_area.appendPlainText("⚠️ No code to run.\n")
                 return
 
-            # Write code to Python file
-            pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
-
-            # Refuse to overwrite an imported openEMS model script - setupEM can only
-            # generate Palace/Elmer code and has no way to regenerate an openEMS model.
-            # Normally load_configuration_from_file() already steers the output
-            # elsewhere for such an import (see protected_source_model_path), so this
-            # is a second-layer guard for the case where the user manually re-picks
-            # the same name/directory on the Create Model(s) tab afterwards.
+            # Never overwrite a protected script with a generated one: an openEMS
+            # script, or one opened as a new model where the user chose not to reuse
+            # its file name. load_configuration_from_file() names that new model
+            # <script>_new, so this guards against picking the same name/directory
+            # again on the Create Model(s) tab.
             protected_path = getattr(self.MainWindow, 'protected_source_model_path', None)
             if protected_path and os.path.normcase(pymodel_filename) == os.path.normcase(protected_path):
-                QMessageBox.warning(
-                    self, "Create Model",
-                    "This would overwrite the imported openEMS model script:\n\n"
-                    f"{pymodel_filename}\n\n"
-                    "setupEM cannot regenerate an openEMS model, so this write was "
-                    "blocked. Choose a different model name or output directory on "
-                    "the Create Model(s) tab.")
+                QMessageBox.warning(self, "Create Model", protected_script_message(pymodel_filename))
                 return
 
             # General overwrite protection: ask once per session before clobbering a
@@ -2598,9 +2594,7 @@ class CreateModelTab(CreateModelTabBase):
                 if not overwrite:
                     return
 
-            with open(pymodel_filename, "w", encoding="utf-8") as f:
-                f.write(code)
-                f.close()
+            self.write_model_code(pymodel_filename, code)
             confirmed_paths.add(normalized_path)
 
             # Run Python interpreter on that file
@@ -2614,7 +2608,7 @@ class CreateModelTab(CreateModelTabBase):
             # reports it as the generic FailedToStart. Reset it so this launch never
             # depends on what a previous, unrelated action last pointed it at.
             self.process.setWorkingDirectory("")
-            self.process.start(python_exe, [pymodel_filename])
+            self.process.start(python_exe, self.model_launch_args(pymodel_filename))
 
 
         else:
@@ -2639,9 +2633,9 @@ class CreateModelTab(CreateModelTabBase):
         is also checked, defensively, in case some variant writes there directly.
         """
         if self.MainWindow.PalaceMode:
-            output_dir = find_output_dir(run_path, saved_values['model_basename'])
+            output_dir = find_output_dir(run_path, self.run_basename())
             if not os.path.isdir(output_dir) or not os.listdir(output_dir):
-                return
+                return True
             targets = [output_dir]
         else:
             targets = []
@@ -2656,34 +2650,47 @@ class CreateModelTab(CreateModelTabBase):
                        fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
                         targets.append(full_path)
             if not targets:
-                return
+                return True
 
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("Previous simulation results found")
-        box.setText(
-            f"This run's output directory already contains results from a previous "
-            f"simulation:\n\n{run_path}\n\nDelete the existing results before starting?"
-        )
-        delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
-        box.addButton("Keep", QMessageBox.RejectRole)
-        box.setDefaultButton(delete_btn)
-        box.exec()
+        # in a Start Simulation queue (several models of one script), ask once
+        delete = getattr(self, "_queue_clear_choice", None) if self._active_run is not None else None
+        if delete is None:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Previous simulation results found")
+            more = (" (the same applies to the other models in this run)"
+                    if self._active_run is not None and self._run_queue else "")
+            box.setText(
+                f"This run's output directory already contains results from a previous "
+                f"simulation:\n\n{run_path}\n\nDelete the existing results before starting{more}?"
+            )
+            delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
+            keep_btn = box.addButton("Keep", QMessageBox.NoRole)
+            box.addButton("Cancel simulation", QMessageBox.RejectRole)
+            box.setDefaultButton(delete_btn)
+            box.exec()
+            if box.clickedButton() not in (delete_btn, keep_btn):
+                # Cancel (or the dialog closed): don't start the simulation at all
+                return False
+            delete = box.clickedButton() is delete_btn
+            if self._active_run is not None:
+                self._queue_clear_choice = delete
 
-        if box.clickedButton() is delete_btn:
+        if delete:
             for target in targets:
                 if os.path.isdir(target):
                     shutil.rmtree(target)
                 else:
                     os.remove(target)
+        return True
 
     def run_model(self):
         # Run model that we created before
 
         if self.MainWindow.PalaceMode:
-            run_path = saved_values['sim_path'] + "/palace_model/" + saved_values['model_basename'] + "_data"
+            run_path = self.run_folder("palace_model")
         else:
-            run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+            run_path = self.run_folder("elmer_model")
 
         # ---------- pre-flight checks: fail fast, before asking to delete
         # previous results or touching QProcess at all - see setup_common.py's
@@ -2733,10 +2740,14 @@ class CreateModelTab(CreateModelTabBase):
                         return
 
         try:
-            self._confirm_clear_previous_results(run_path)
+            if not self._confirm_clear_previous_results(run_path):
+                self.log_area.appendPlainText("Start Simulation cancelled, the existing results are kept.\n")
+                self._run_cancelled = True
+                return
 
-            # clear log
-            self.log_area.clear()
+            # clear log (not between the models of one Start Simulation queue)
+            if self.should_clear_log():
+                self.log_area.clear()
             self._reset_status_for_run()
             self._process_purpose = "run_simulation"
 
@@ -3086,11 +3097,14 @@ class ModelEditorTab(QWidget):
 
 
     def save_values(self):
-        self.create_model_text(forExport=True)  # show "external" code including run from Python model
+        # preserve mode shows the imported script with the changes instead
+        if not self.MainWindow.show_preserve_preview(self.model_edit):
+            self.create_model_text(forExport=True)  # show "external" code including run from Python model
         return True
 
     def load_values(self):
-        self.create_model_text(forExport=True)  # show "external" code including run from Python model
+        if not self.MainWindow.show_preserve_preview(self.model_edit):
+            self.create_model_text(forExport=True)  # show "external" code including run from Python model
 
 
 # ---------- PREFERENCES DIALOG ----------
@@ -3099,7 +3113,7 @@ class PreferencesDialog(QDialog):
     """File > Preferences ...: per-user defaults for fields that used to be plain
     hardcoded literals (e.g. FrequenciesTab's fstart/fstop). Persisted via
     get_preference()/set_preference() (setup_common.py) - a dedicated QSettings
-    store, separate from *.simcfg project files and from "Save as Default Config".
+    store, separate from *.simcfg project files.
     Editing a value here only changes what a brand-new/blank field starts out
     showing; it never touches the currently open project's saved_values.
     """
@@ -3165,10 +3179,15 @@ class PreferencesDialog(QDialog):
 
         self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", "0")
         self.viamerge_edit = add_row(files_form, "Default via array merge distance (µm)", "merge_polygon_size", "0.5")
-        self.confirm_reuse_checkbox = QCheckBox("Ask before reusing an imported model's filename as the output file")
+        # Import from *.py model writes back into the imported script, as setupEM always did
+        self.confirm_reuse_checkbox = QCheckBox("When importing a *.py model: ask before writing over it")
         self.confirm_reuse_checkbox.setChecked(get_preference_bool(self.app_name, "confirm_reuse_import_filename", False))
         files_form.addWidget(self.confirm_reuse_checkbox)
         self._reset_targets.append((self.confirm_reuse_checkbox, "confirm_reuse_import_filename", False, "bool"))
+        self.in_place_save_checkbox = QCheckBox("Save a script edited in place without asking before Create Mesh")
+        self.in_place_save_checkbox.setChecked(get_preference_bool(self.app_name, "in_place_save_without_asking", True))
+        files_form.addWidget(self.in_place_save_checkbox)
+        self._reset_targets.append((self.in_place_save_checkbox, "in_place_save_without_asking", True, "bool"))
 
         files_form.addStretch()
         self.tabs.addTab(files_widget, "Files")
@@ -3446,6 +3465,7 @@ class PreferencesDialog(QDialog):
             return
 
         set_preference(self.app_name, "purpose", self.purpose_edit.text())
+        set_preference(self.app_name, "in_place_save_without_asking", self.in_place_save_checkbox.isChecked())
         set_preference(self.app_name, "confirm_reuse_import_filename", self.confirm_reuse_checkbox.isChecked())
         set_preference(self.app_name, "xml_browse_directory", self.xml_browse_dir_edit.text())
         set_preference(self.app_name, "merge_polygon_size", self.viamerge_edit.text())
@@ -3487,7 +3507,6 @@ class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
     MODEL_KIND = MODEL_KIND_EM
     CONFIG_SUFFIX = CONFIG_SUFFIX
-    DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_FILE
 
     def __init__(self):
         super().__init__()
@@ -3555,12 +3574,6 @@ class MainWindow(MainWindowBase):
         # method's docstring.
         self.field_viewer_window = None
 
-        # Do not auto-load default values at this early startup stage,
-        # instead this is done from File menu
-        # self.user_inputs_file = DEFAULT_SETTINGS_FILE
-        # self.user_inputs = self.load_user_inputs(DEFAULT_SETTINGS_FILE)
-        # saved_values.update(self.user_inputs)
-
         # Load all saved data into tabs
         self.load_all_tabs()
 
@@ -3581,9 +3594,27 @@ class MainWindow(MainWindowBase):
         # Palace is default
         self.optionPalace.setChecked(True)
         self.simulator_menu.addActions(simulator_group.actions())
+        self.simulator_menu.setToolTipsVisible(True)
+        self._update_in_place_menu()
 
 
     # ---------- Menu actions ----------
+    def _update_in_place_menu(self):
+        # a script edited in place keeps its own solver: the other one is greyed out
+        # (switching changes more than one line of a script, a new model from its
+        # settings can use the other solver)
+        super()._update_in_place_menu()
+        if not hasattr(self, "optionElmer"):
+            return
+        for action in (self.optionPalace, self.optionElmer):
+            action.setEnabled(True)
+            action.setToolTip("")
+        if getattr(self, "script_model", None) is not None:
+            other = self.optionPalace if self.ElmerMode else self.optionElmer
+            other.setEnabled(False)
+            other.setToolTip("The script edited in place is a " + ("Elmer" if self.ElmerMode else "Palace") +
+                             " model. Import it (File > Import from *.py model) to use the other solver.")
+
     def setPalaceMode(self):
         self.optionPalace.setChecked(True)
         self.PalaceMode = True
@@ -3691,8 +3722,22 @@ class MainWindow(MainWindowBase):
             self.setPalaceMode()
 
     def apply_python_import_data(self, file_path):
-        # read port assignments in workflow syntax for gds2palace Python code
-        ports = parse_python_ports_definitions(file_path)
+        # read port assignments in workflow syntax for gds2palace Python code;
+        # ScriptModel also reads ports written over several lines and is what
+        # preserve mode patches, so both see the same ports
+        try:
+            model = ScriptModel.from_file(file_path)
+        except (SyntaxError, ValueError, OSError, UnicodeDecodeError):
+            model = None
+        if model is not None:
+            ports = [dict(c.args) for c in model.ports if c.static]
+            # reported in the import message (see load_configuration_from_file())
+            for c in model.ports:
+                if not c.static:
+                    number = c.args.get("portnumber")
+                    self._import_notes.append((f"port {number}" if number is not None else "a port", c.reason))
+        else:
+            ports = parse_python_ports_definitions(file_path)
         self.ports_tab.update_port_from_import(ports)
 
         # Elmer/Palace mode isn't captured by the general settings-dict import
@@ -3715,6 +3760,64 @@ class MainWindow(MainWindowBase):
 
     def native_config_extra_struct(self):
         return {"ports": simulation_ports_to_struct(simulation_ports), "elmer_mode": self.ElmerMode}
+
+    # ---------- Preserve mode hooks (see MainWindowBase) ----------
+    PRESERVE_TOOLS = ("palace", "elmer")
+
+    # fields to grey out when the script edited in place computes the setting
+    SETTING_WIDGETS = {
+        "GdsFile": ("file_tab", ["gds_file_edit"]),
+        "SubstrateFile": ("file_tab", ["XML_file_edit"]),
+        "cellname": ("file_tab", ["cellname_box"]),
+        "purpose": ("file_tab", ["purpose_edit"]),
+        "merge_polygon_size": ("file_tab", ["viamerge_edit"]),
+        "preprocess_gds": ("file_tab", ["preprocess_gds_checkbox"]),
+        "fill_factor_correction": ("file_tab", ["fill_factor_box"]),
+        "variable_overrides": ("file_tab", ["variable_overrides_table"]),
+        "fstart": ("frequencies_tab", ["start_edit"]),
+        "fstop": ("frequencies_tab", ["stop_edit"]),
+        "fstep": ("frequencies_tab", ["step_edit"]),
+        "fpoint": ("frequencies_tab", ["fpoint_edit"]),
+        "fdump": ("frequencies_tab", ["fdump_edit", "fdump_enabled_checkbox"]),
+        "refined_cellsize": ("mesh_tab", ["refinement_edit"]),
+        "refined_cellsize_override": ("mesh_tab", ["refined_override_btn"]),
+        "cells_per_wavelength": ("mesh_tab", ["cells_lambda_edit"]),
+        "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
+        "order": ("mesh_tab", ["mesh_order_box"]),
+        "conductor_model": ("mesh_tab", ["conductor_model_box"]),
+        # older gds2palace without conductor_model (see MeshTab.save_values())
+        "filled_metals": ("mesh_tab", ["conductor_model_box"]),
+        "adaptive_mesh_iterations": ("mesh_tab", ["AMR_iterations_edit"]),
+        "amr_tol": ("mesh_tab", ["amr_goal_edit"]),
+        "amr_max_dof": ("mesh_tab", ["amr_maxdof_edit"]),
+        "adaptive_mesh_conformal": ("mesh_tab", ["amr_conformal_box"]),
+        "complex_coarse_solve": ("mesh_tab", ["complex_coarse_box"]),
+        "iterative": ("mesh_tab", ["solver_box"]),
+        "boundary": ("mesh_tab", ["boundary_box"]),
+        "margin": ("mesh_tab", ["margins_edit"]),
+        "air_around": ("mesh_tab", ["airaround_edit", "airxmin_edit", "airxmax_edit", "airymin_edit",
+                                    "airymax_edit", "airzmin_edit", "airzmax_edit"]),
+        "ELMER_MPI_THREADS": ("mesh_tab", ["threads_box"]),
+    }
+
+    def preserve_objects(self):
+        return simulation_ports_to_struct(simulation_ports)
+
+    def preserve_object_kwargs(self, baseline_objects, current_objects):
+        return {"baseline_ports": baseline_objects, "current_ports": current_objects}
+
+    def preserve_create_call(self):
+        return "create_elmer" if self.ElmerMode else "create_palace"
+
+    def preserve_extra(self, baseline_values, current_values):
+        # fdump_enabled is Elmer's GUI-only field dump checkbox; in Elmer mode it
+        # decides settings['fdump'] (see create_model_text())
+        ignore, raw_values = ["fdump_enabled"], {}
+        if self.ElmerMode:
+            ignore.append("fdump")
+            if bool(baseline_values.get("fdump_enabled")) != bool(current_values.get("fdump_enabled")):
+                raw_values["fdump"] = "[settings['fstop']]" if current_values.get("fdump_enabled") else "[]"
+        return ignore, raw_values
 
     def update_target_layer_choices(self, metals_list):
         self.ports_tab.update_layers(metals_list)

@@ -56,8 +56,10 @@ if __package__ in (None, ""):
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
+        protected_script_message,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from script_model import ScriptModel
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -66,8 +68,10 @@ else:
         next_available_source_layer, update_missing_layer_column,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
+        protected_script_message,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from .script_model import ScriptModel
 
 
 '''
@@ -85,8 +89,6 @@ sudo apt install libxcb-cursor0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxc
 
 CONFIG_SUFFIX = "tsimcfg"  # file suffix for native config file used here
 APP_NAME = "setupThermal" # name of this application
-
-DEFAULT_SETTINGS_FILE = os.path.join(os.path.expanduser("~"),"default." + CONFIG_SUFFIX)
 
 
 saved_values = {} # dictionary of user input in this application
@@ -707,7 +709,7 @@ class CreateModelTab(CreateModelTabBase):
     def _append_thermal_results_summary(self):
         # Parse thermal_results.dat / thermal_results.vtu and append a results summary
         # to the log. Called from on_finished() after a real simulation run.
-        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        run_path = self.run_folder("elmer_model")
 
         # Heat sources first, then constant-temperature boundaries, regardless of the
         # order they were added in the GUI.
@@ -756,7 +758,7 @@ class CreateModelTab(CreateModelTabBase):
         self.open_field_viewer()
 
     def launch_paraview(self):
-        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        run_path = self.run_folder("elmer_model")
         vtu_path = find_thermal_paraview_file(run_path)
         self._open_in_paraview(
             [vtu_path] if vtu_path else [],
@@ -775,7 +777,7 @@ class CreateModelTab(CreateModelTabBase):
             self.MainWindow.field_viewer_window.activateWindow()
             return
 
-        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        run_path = self.run_folder("elmer_model")
         vtu_path = find_thermal_paraview_file(run_path)
         if not vtu_path:
             self.log_area.appendPlainText(f"⚠️ No thermal results .vtu found yet under {run_path}\n")
@@ -808,31 +810,25 @@ class CreateModelTab(CreateModelTabBase):
             # clear log
             self.log_area.clear()
 
-            # get code from model editor tab
-            self.MainWindow.modeleditor_tab.create_model_text()
-            code = self.MainWindow.modeleditor_tab.model_edit.toPlainText().strip()
+            # Python file to write
+            pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
+
+            # generated code, or the imported script with the changes (preserve mode)
+            code = self.model_code(pymodel_filename)
+            if code is None:
+                return
             if not code:
                 self.log_area.appendPlainText("⚠️ No code to run.\n")
                 return
 
-            # Write code to Python file
-            pymodel_filename = os.path.abspath(os.path.join(saved_values['sim_path'], saved_values['model_basename']+'.py'))
-
-            # Refuse to overwrite an imported openEMS model script - setupThermal can
-            # only generate Palace/Elmer code and has no way to regenerate an openEMS
-            # model. Normally load_configuration_from_file() already steers the output
-            # elsewhere for such an import (see protected_source_model_path), so this
-            # is a second-layer guard for the case where the user manually re-picks
-            # the same name/directory on the Create Model(s) tab afterwards.
+            # Never overwrite a protected script with a generated one: an openEMS
+            # script, or one opened as a new model where the user chose not to reuse
+            # its file name. load_configuration_from_file() names that new model
+            # <script>_new, so this guards against picking the same name/directory
+            # again on the Create Model(s) tab.
             protected_path = getattr(self.MainWindow, 'protected_source_model_path', None)
             if protected_path and os.path.normcase(pymodel_filename) == os.path.normcase(protected_path):
-                QMessageBox.warning(
-                    self, "Create Model",
-                    "This would overwrite the imported openEMS model script:\n\n"
-                    f"{pymodel_filename}\n\n"
-                    "setupThermal cannot regenerate an openEMS model, so this write was "
-                    "blocked. Choose a different model name or output directory on "
-                    "the Create Model(s) tab.")
+                QMessageBox.warning(self, "Create Model", protected_script_message(pymodel_filename))
                 return
 
             # General overwrite protection: ask once per session before clobbering a
@@ -852,9 +848,7 @@ class CreateModelTab(CreateModelTabBase):
                 if not overwrite:
                     return
 
-            with open(pymodel_filename, "w", encoding="utf-8") as f:
-                f.write(code)
-                f.close()
+            self.write_model_code(pymodel_filename, code)
             confirmed_paths.add(normalized_path)
 
             # Run Python interpreter on that file
@@ -868,7 +862,7 @@ class CreateModelTab(CreateModelTabBase):
             # as the generic FailedToStart. Reset it so this launch never depends on
             # what a previous, unrelated action last pointed it at.
             self.process.setWorkingDirectory("")
-            self.process.start(python_exe, [pymodel_filename])
+            self.process.start(python_exe, self.model_launch_args(pymodel_filename))
 
 
         else:
@@ -883,7 +877,7 @@ class CreateModelTab(CreateModelTabBase):
         # Run model that we created before
 
         # try to start from output directory
-        run_path = saved_values['sim_path'] + "/elmer_model/" + saved_values['model_basename'] + "_data"
+        run_path = self.run_folder("elmer_model")
 
         # ---------- pre-flight checks: fail fast, before touching QProcess ----------
         # ELMERSOLVER_STARTINFO (written by "Create Mesh", alongside case.sif) is
@@ -903,8 +897,9 @@ class CreateModelTab(CreateModelTabBase):
             return
 
         try:
-            # clear log
-            self.log_area.clear()
+            # clear log (not between the models of one Start Simulation queue)
+            if self.should_clear_log():
+                self.log_area.clear()
             self._process_purpose = "run_simulation"
 
             # Windows and Linux/Mac both just resolve ElmerSolver via PATH
@@ -1081,11 +1076,14 @@ class ModelEditorTab(QWidget):
 
 
     def save_values(self):
-        self.create_model_text(forExport=True)  # show "external" code including run from Python model
+        # preserve mode shows the imported script with the changes instead
+        if not self.MainWindow.show_preserve_preview(self.model_edit):
+            self.create_model_text(forExport=True)  # show "external" code including run from Python model
         return True
 
     def load_values(self):
-        self.create_model_text(forExport=True)  # show "external" code including run from Python model
+        if not self.MainWindow.show_preserve_preview(self.model_edit):
+            self.create_model_text(forExport=True)  # show "external" code including run from Python model
 
 
 # ---------- PREFERENCES DIALOG ----------
@@ -1094,7 +1092,7 @@ class PreferencesDialog(QDialog):
     """File > Preferences ...: per-user defaults for fields that used to be plain
     hardcoded literals. Persisted via get_preference()/set_preference()
     (setup_common.py) - a dedicated QSettings store, separate from *.tsimcfg
-    project files and from "Save as Default Config". Editing a value here only
+    project files. Editing a value here only
     changes what a brand-new/blank field starts out showing; it never touches
     the currently open project's saved_values. Smaller than setupEM's version
     of this dialog - no Frequencies tab (thermal has no frequency sweep), and
@@ -1161,10 +1159,15 @@ class PreferencesDialog(QDialog):
 
         self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", "0")
         self.viamerge_edit = add_row(files_form, "Default via array merge distance (µm)", "merge_polygon_size", "0.5")
-        self.confirm_reuse_checkbox = QCheckBox("Ask before reusing an imported model's filename as the output file")
+        # Import from *.py model writes back into the imported script, as setupEM always did
+        self.confirm_reuse_checkbox = QCheckBox("When importing a *.py model: ask before writing over it")
         self.confirm_reuse_checkbox.setChecked(get_preference_bool(self.app_name, "confirm_reuse_import_filename", False))
         files_form.addWidget(self.confirm_reuse_checkbox)
         self._reset_targets.append((self.confirm_reuse_checkbox, "confirm_reuse_import_filename", False, "bool"))
+        self.in_place_save_checkbox = QCheckBox("Save a script edited in place without asking before Create Mesh")
+        self.in_place_save_checkbox.setChecked(get_preference_bool(self.app_name, "in_place_save_without_asking", True))
+        files_form.addWidget(self.in_place_save_checkbox)
+        self._reset_targets.append((self.in_place_save_checkbox, "in_place_save_without_asking", True, "bool"))
 
         files_form.addStretch()
         self.tabs.addTab(files_widget, "Files")
@@ -1300,6 +1303,7 @@ class PreferencesDialog(QDialog):
 
         set_preference(self.app_name, "purpose", self.purpose_edit.text())
         set_preference(self.app_name, "merge_polygon_size", self.viamerge_edit.text())
+        set_preference(self.app_name, "in_place_save_without_asking", self.in_place_save_checkbox.isChecked())
         set_preference(self.app_name, "confirm_reuse_import_filename", self.confirm_reuse_checkbox.isChecked())
         set_preference(self.app_name, "xml_browse_directory", self.xml_browse_dir_edit.text())
         set_preference(self.app_name, "port_layer_min", self.port_layer_min_edit.text())
@@ -1467,7 +1471,6 @@ class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
     MODEL_KIND = MODEL_KIND_THERMAL
     CONFIG_SUFFIX = CONFIG_SUFFIX
-    DEFAULT_SETTINGS_FILE = DEFAULT_SETTINGS_FILE
 
     def __init__(self):
         super().__init__()
@@ -1521,12 +1524,6 @@ class MainWindow(MainWindowBase):
         # CreateModelTab.open_field_viewer()
         self.field_viewer_window = None
 
-        # Do not auto-load default values at this early startup stage,
-        # instead this is done from File menu
-        # self.user_inputs_file = DEFAULT_SETTINGS_FILE
-        # self.user_inputs = self.load_user_inputs(DEFAULT_SETTINGS_FILE)
-        # saved_values.update(self.user_inputs)
-
         # Load all saved data into tabs
         self.load_all_tabs()
 
@@ -1557,12 +1554,63 @@ class MainWindow(MainWindowBase):
         self.thermal_tab.update_thermalobjects_from_JSON (data.get("thermal", []))
 
     def apply_python_import_data(self, file_path):
-        # read thermal object assignments in workflow syntax for gds2palace Python code
-        heatsource_defs, consttemp_defs  = parse_python_thermal_definitions(file_path)
+        # read thermal object assignments in workflow syntax for gds2palace Python code;
+        # ScriptModel also reads definitions written over several lines and is what
+        # preserve mode patches, so both see the same objects
+        try:
+            model = ScriptModel.from_file(file_path)
+        except (SyntaxError, ValueError, OSError, UnicodeDecodeError):
+            model = None
+        if model is not None:
+            heatsource_defs = [dict(c.args) for c in model.thermal if c.static and c.kind == "heatsource"]
+            consttemp_defs = [dict(c.args) for c in model.thermal if c.static and c.kind == "constanttemp"]
+            # reported in the import message (see load_configuration_from_file())
+            for c in model.thermal:
+                if not c.static:
+                    name = "a heat source" if c.kind == "heatsource" else "a constant temperature"
+                    self._import_notes.append((name, c.reason))
+        else:
+            heatsource_defs, consttemp_defs  = parse_python_thermal_definitions(file_path)
         self.thermal_tab.update_thermalobjects_from_python (heatsource_defs, consttemp_defs)
 
     def native_config_extra_struct(self):
         return {"thermal": thermal_objects_to_struct(thermal_objects)}
+
+    # ---------- Preserve mode hooks (see MainWindowBase) ----------
+    PRESERVE_TOOLS = ("elmer_thermal",)
+
+    # fields to grey out when the script edited in place computes the setting
+    SETTING_WIDGETS = {
+        "GdsFile": ("file_tab", ["gds_file_edit"]),
+        "SubstrateFile": ("file_tab", ["XML_file_edit"]),
+        "cellname": ("file_tab", ["cellname_box"]),
+        "purpose": ("file_tab", ["purpose_edit"]),
+        "merge_polygon_size": ("file_tab", ["viamerge_edit"]),
+        "preprocess_gds": ("file_tab", ["preprocess_gds_checkbox"]),
+        "fill_factor_correction": ("file_tab", ["fill_factor_box"]),
+        "variable_overrides": ("file_tab", ["variable_overrides_table"]),
+        "refined_cellsize": ("mesh_tab", ["refinement_edit"]),
+        "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
+        "margin": ("mesh_tab", ["margins_edit"]),
+        "iterative": ("mesh_tab", ["solver_box"]),
+    }
+
+    def preserve_objects(self):
+        objects = []
+        for obj in thermal_objects.objects:
+            if isinstance(obj, simulation_setup.heatsource):
+                objects.append({"type": "heatsource", "power": obj.power,
+                                "source_layernum": obj.source_layernum, "target_layername": obj.target_layername})
+            elif isinstance(obj, simulation_setup.constanttemp):
+                objects.append({"type": "constanttemp", "temp": obj.temp,
+                                "source_layernum": obj.source_layernum, "target_layername": obj.target_layername})
+        return objects
+
+    def preserve_object_kwargs(self, baseline_objects, current_objects):
+        return {"baseline_thermal": baseline_objects, "current_thermal": current_objects}
+
+    def preserve_create_call(self):
+        return "create_elmer_thermal"
 
     def update_target_layer_choices(self, metals_list):
         self.thermal_tab.update_layers(metals_list)

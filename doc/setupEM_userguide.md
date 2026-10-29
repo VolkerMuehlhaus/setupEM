@@ -25,6 +25,7 @@ Document version: 2026-09-22
 [Model Fit](#model-fit)  
 [3D Field Viewer](#3d-field-viewer)  
 [File menu](#file-menu)  
+&ensp;[Edit \*.py model in place](#edit-py-model-in-place)  
 [Help menu and version check](#help-menu-and-version-check)  
 [KLayout integration](#klayout-integration)  
 [setupThermal](#setupthermal)  
@@ -314,13 +315,26 @@ Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If Pa
 
 ## File menu
 
-Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal), including a "Default Config" configuration (stored in your home directory) that's reloaded independently of any project. You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
+Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
 
-**Load Config ...** and **Import from \*.py model ...** each have a **Recent** submenu right below them, listing your last 10 files of that kind for quick reopening; saving a config file adds it to that list too. Use "Clear Recent Files" in either submenu to reset it.
+**Open Recent** lists your last 10 files of each kind for quick reopening, in three sections: configs, imported \*.py models and \*.py models edited in place. Saving a config file adds it to the list too. A file reopens the same way it was opened before. "Clear Recent Files" empties all three sections.
 
-**Import from \*.py model** loads settings from existing model code (e.g. the examples in the gds2palace repository), by detecting known keywords with or without the `settings[...]` dict syntax. setupEM warns when the script is a thermal model (use setupThermal for those), and setupThermal warns for EM models; a `*.simcfg` or `*.tsimcfg` file from the other app is refused with a note naming the right app. Importing also works for openEMS Python models, though you'll likely need to adjust `refined_cellsize` afterward (openEMS models the MIM differently and typically needs a finer mesh).
+setupEM warns when a \*.py script is a thermal model (use setupThermal for those), and setupThermal warns for EM models; a `*.simcfg` or `*.tsimcfg` file from the other app is refused with a note naming the right app.
 
-**Preferences ...** changes the built-in defaults that a brand-new/blank field starts out showing (e.g. fstart/fstop, mesh refinement, dielectric oversize margin, the Ports tab's auto-assign source layer range, the Palace tab's complex coarse solve, AMR goal/maximum DOF and conformal AMR) - saved per-user via Qt's settings mechanism, separate from any project's `.simcfg`/`.tsimcfg` file and from "Save as Default Config". The Palace tab's **Maximum solver iterations** and **Solver tolerance** are the exception: they are not just defaults but are used for every Palace run, since no project tab has a field for them.
+**Import from \*.py model** loads settings from existing model code (e.g. the examples in the gds2palace repository), by detecting known keywords with or without the `settings[...]` dict syntax. setupEM then writes its own script. As before, Create Model writes it over the imported script (**Preferences > Files > When importing a \*.py model: ask before writing over it** asks first; answering No writes *script*`_new.py` instead). A script that setupEM didn't generate itself is copied to *script*`_backup_`*date*`_`*time*`.py` before it is overwritten the first time. An openEMS script is never overwritten, the new model goes to *script*`_new.py`. Importing also works for openEMS Python models, though you'll likely need to adjust `refined_cellsize` afterward (openEMS models the MIM differently and typically needs a finer mesh).
+
+### Edit \*.py model in place
+
+**Edit \*.py model in place** keeps a gds2palace script as it is and edits it directly. This suits scripts that setupEM didn't write: a script from the gds2palace MCP server, an example, or your own code. Their loops, comments and custom code stay.
+
+- Create Model and **File > Save** *script* write only the values you change, nothing else in the script changes. **File > Revert** *script* goes back to the saved file. The title bar shows the script's name, with a `*` while there are unsaved changes.
+- Settings the script computes itself (e.g. from a loop variable or another name) are greyed out, the tooltip says why. Change them in the script.
+- A script that builds several models of one kind, like a parameter sweep, lists them on the Create Model tab, and Start Simulation runs the ticked ones one after another.
+- Only gds2palace (Palace / Elmer) scripts that build one kind of model can be edited this way. For any other script, setupEM offers to import its settings instead.
+
+When you import a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**, in case you want to keep the script's own code. Close it with × if importing was what you wanted.
+
+**Preferences ...** changes the built-in defaults that a brand-new/blank field starts out showing (e.g. fstart/fstop, mesh refinement, dielectric oversize margin, the Ports tab's auto-assign source layer range, the Palace tab's complex coarse solve, AMR goal/maximum DOF and conformal AMR) - saved per-user via Qt's settings mechanism, separate from any project's `.simcfg`/`.tsimcfg` file. The Palace tab's **Maximum solver iterations** and **Solver tolerance** are the exception: they are not just defaults but are used for every Palace run, since no project tab has a field for them.
 
 <img src="./png/preferences1.png" alt="preferences" width="500">
 

@@ -28,6 +28,9 @@ dependencies = [
 ]
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [project.urls]
 Homepage = "https://github.com/VolkerMuehlhaus/setupEM"
 Repository = "https://github.com/VolkerMuehlhaus/setupEM"
