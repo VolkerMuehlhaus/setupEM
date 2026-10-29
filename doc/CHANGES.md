@@ -4,7 +4,7 @@
 
 **File menu:** the three Recent submenus are now one **Open Recent** submenu, with sections for configs, imported \*.py models and \*.py models edited in place. A file reopens the way it was opened. The menu is grouped as open, recent, save, preferences. **Load Default Config** and **Save as Default Config** are removed: defaults for new models are set in **File > Preferences**. An existing `default.simcfg` / `default.tsimcfg` in your home directory still opens with **Load Config**, and **Save Config** can write it.
 
-Import and edit in place now read a stackup given as `utilities.get_stackup_path("SG13G2_FEM_200um.xml")`, the way the gds2palace MCP server writes it (needs gds2palace 0.9.1 or later). Before, an imported model had no stackup file.
+Import and edit in place now read a stackup given as `utilities.get_stackup_path("SG13G2_FEM_200um.xml")`, the way the gds2palace MCP server writes it (needs gds2palace 0.9.1 or later). Before, an imported model using that syntax had no stackup file.
 
 
 
