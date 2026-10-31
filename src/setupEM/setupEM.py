@@ -61,10 +61,11 @@ if __package__ in (None, ""):
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message,
+        protected_script_message, resolve_missing_file_paths,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
+    from config_update import LAYOUT_KEYS, layout_differences, port_differences
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -77,10 +78,11 @@ else:
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message,
+        protected_script_message, resolve_missing_file_paths,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
+    from .config_update import LAYOUT_KEYS, layout_differences, port_differences
 
 
 '''
@@ -778,8 +780,18 @@ class PortsTab(QWidget):
                     except Exception:
                         QMessageBox.warning(self, "Error", "Invalid input for port " + str(portnumber))
                         return False
+                    # gds2palace's simulation_port() exits the whole program on a direction that does not
+                    # match its layers, so check here and warn instead (e.g. an incomplete port from a .simcfg)
+                    via = "Z" in direction.upper()
+                    if direction.strip().upper() not in ("X", "Y", "Z", "-X", "-Y", "-Z") or \
+                            not ((from_name and to_name) if via else target_name):
+                        QMessageBox.warning(self, "Error",
+                                            f"Port {portnumber} is incomplete: direction X, Y, -X or -Y needs a "
+                                            "target layer (in-plane port), Z or -Z needs a from and a to layer "
+                                            "(via port).")
+                        return False
                     # create port
-                    if "Z" in direction:
+                    if via:
                         # via port
                         simulation_ports.add_port(simulation_setup.simulation_port(portnumber=portnumber,
                                                                                 voltage=voltage,
@@ -843,7 +855,7 @@ class PortsTab(QWidget):
                 self.portslist.setItem(portnum-1, 2, QTableWidgetItem(str(port.get("source_layernum",""))))
 
                 direction = str(port.get("direction","")).upper()
-                if direction == 'Z':
+                if "Z" in direction:
                     self.portslist.setItem(portnum-1, 4, QTableWidgetItem(str(port.get("from_layername",""))))
                     self.portslist.setItem(portnum-1, 5, QTableWidgetItem(str(port.get("to_layername",""))))
                     self.portslist.setItem(portnum-1, 3, QTableWidgetItem(""))
@@ -3812,6 +3824,27 @@ class MainWindow(MainWindowBase):
 
     def preserve_create_call(self):
         return "create_elmer" if self.ElmerMode else "create_palace"
+
+    # ---------- Update a script edited in place from a *.simcfg (see MainWindowBase) ----------
+    def config_update_supported(self):
+        return True
+
+    def config_update_differences(self, data, base_dir):
+        return (port_differences(self.preserve_objects(), data.get("ports", []))
+                + layout_differences(self.saved_values, data.get("saved_values") or {}, base_dir))
+
+    def apply_config_update(self, data, base_dir):
+        # ports, GDS file, stackup, cell and purpose from the settings file; everything else stays
+        saved = data.get("saved_values") or {}
+        layout = {key: saved[key] for key in LAYOUT_KEYS if key in saved}
+        for key in ("GdsFile", "SubstrateFile"):
+            if layout.get(key):
+                layout[key] = os.path.join(base_dir, layout[key]).replace("\\", "/")
+        resolve_missing_file_paths(layout, base_dir)
+        self.saved_values.update(layout)
+        self.ports_tab.update_port_from_import(data.get("ports", []))
+        self.load_all_tabs()
+        self.save_all_tabs()
 
     def preserve_extra(self, baseline_values, current_values):
         # fdump_enabled is Elmer's GUI-only field dump checkbox; in Elmer mode it
