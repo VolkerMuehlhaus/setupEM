@@ -1,9 +1,16 @@
-# What's New - October 31, 2026
+# What's New - October 31, 2026 (setupEM 0.16.0)
 
 **After a new export from the layout tool** (setupEM): a layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg`, and writes both again when the layout changes. The settings you made in setupEM since are only in your model script, because Create Model writes the script, not the `.simcfg`. setupEM now takes from such a `.simcfg` only the ports, GDSII file, stackup, cell and purpose, and keeps everything else as in the script:
 - Opening a `.simcfg` when a model script for the same GDSII file exists next to it asks whether to **Continue with the script** (edit it in place, ports and layout settings from the `.simcfg`) or **Start from the config**.
 - Loading a `.simcfg` while editing a script in place lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**. Before, loading it ended editing in place and replaced all settings.
 - While editing a script in place, the bar below the menu points out a newer `.simcfg` of the same GDSII file with other ports or layout settings, with **Update from it**.
+
+**Load Config, Import from \*.py model and Edit \*.py model in place** start in the folder of the model you are working on (the config or script loaded last, else the GDSII file). Before, they started in the folder setupEM was launched from, e.g. KLayout's when the KLayout plug-in opened setupEM.
+
+**Fixes:**
+- Via ports with direction `-Z` keep their from and to layers. Before, loading a `.simcfg` dropped them, and Create Model wrote such a port as an in-plane port.
+- An incomplete port (direction and layers that don't fit, e.g. from a `.simcfg` written by another tool) gives a warning in the Ports tab. Before, gds2palace exited and setupEM closed. A lowercase `z` counts as a via port too.
+- `combine_extend_snp` (Touchstone output after a Palace run) handles ports with several elements (several shapes on one port layer, gds2palace 0.9.3): one Z0 per port in the option line, and the elements' port inductances combined in parallel for de-embedding. Before, the last element overwrote the others.
 
 # What's New - October 29, 2026
 
