@@ -63,10 +63,12 @@ if __package__ in (None, ""):
     import gds_hierarchy_scan
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from script_probe import probe_script
+    from config_update import newer_configs, newer_scripts
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
+    from .config_update import newer_configs, newer_scripts
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -4480,6 +4482,8 @@ class MainWindowBase(QMainWindow):
         elif self.script_model is not None:
             # keep the unsaved-changes * in the title current
             self.script_has_unsaved_changes()
+        # a newer settings file of the same layout (e.g. after an export from KLayout): offer the update
+        self.refresh_config_notice()
 
         # Save model code only when model tab active
         self.export_model_action.setEnabled(index == modeleditor_index)
@@ -4596,6 +4600,27 @@ class MainWindowBase(QMainWindow):
                         data.get("application", "") in MODEL_KIND_APPS.values():
                     self._warn_wrong_app_file(file_path, data["application"])
                     return
+                if data.get("application", "") == self.APP_NAME and self.config_update_supported():
+                    if self.script_model is not None:
+                        # a script is edited in place: update it from this config, or open the config instead
+                        choice = self._ask_update_script_from_config(file_path, data)
+                        if choice == "cancel":
+                            return
+                        if choice == "update":
+                            self._update_script_from_config(file_path, data)
+                            return
+                    else:
+                        # a newer model script for the same layout has the settings made after this config
+                        script = self._newer_script_for_config(file_path, data)
+                        choice = self._ask_continue_with_script(file_path, script) if script else "config"
+                        if choice == "cancel":
+                            return
+                        if choice == "script":
+                            self.load_configuration_from_file(script, in_place=True, ask_unsaved=False)
+                            if self.script_model is not None:
+                                self.hide_info_bar()
+                                self._update_script_from_config(file_path, data)
+                            return
                 leave_current_script()
                 self.user_inputs_file = file_path
                 if data.get("application", "") == self.APP_NAME:
@@ -4894,6 +4919,8 @@ class MainWindowBase(QMainWindow):
                 if path_messages or not_editable:
                     status += " - see the log on the Create Model tab"
                 self.statusBar().showMessage(status, 15000)
+                if in_place:
+                    self.refresh_config_notice()
 
             else:
                 QMessageBox.information(self, "Error", f"Could not load file {file_path}")
@@ -4979,6 +5006,118 @@ class MainWindowBase(QMainWindow):
         return {"values": copy.deepcopy(dict(self.saved_values)),
                 "objects": copy.deepcopy(self.preserve_objects()),
                 "create_call": self.preserve_create_call()}
+
+    # ---------- Update a script edited in place from a settings file of the same layout ----------
+    # A layout tool (e.g. the KLayout plug-in klayout_em_export) writes the GDS file and a settings file next to
+    # it, and writes both again when the layout changes. The model script holds everything set later (Create Model
+    # writes the script, not the settings file). So the settings that belong to the layout (ports, GDS file,
+    # stackup, cell, purpose) come from the settings file, everything else stays as in the script. See
+    # config_update.py.
+
+    def config_update_supported(self):
+        """Hook: True if this app can update a script edited in place from its settings file."""
+        return False
+
+    def config_update_differences(self, data, base_dir):
+        """Hook: readable differences between the current settings and the layout part of data (a loaded
+        settings file from base_dir), [] if none. The caller saves the tabs first if needed."""
+        return []
+
+    def apply_config_update(self, data, base_dir):
+        """Hook: take the layout part of data (ports, GDS file, stackup, cell, purpose) into the tabs."""
+
+    def _update_script_from_config(self, file_path, data):
+        """Take the layout part of a settings file into the script edited in place (written on Create Model or
+        Save, like every change in edit-in-place mode)."""
+        self.apply_config_update(data, os.path.dirname(os.path.abspath(file_path)))
+        dirty = self.script_has_unsaved_changes()
+        if self.tabs_widget.currentWidget() is self.modeleditor_tab:
+            self.show_preserve_preview(self.modeleditor_tab.model_edit)
+        self.show_info_bar(f"Ports and layout settings taken from {os.path.basename(file_path)}. "
+                           + ("Create Model or File > Save writes them into the script." if dirty
+                              else "The script already had them."))
+
+    def _ask_update_script_from_config(self, file_path, data):
+        """Loading a settings file while a script is edited in place: "update", "new" or "cancel"."""
+        self.save_all_tabs()
+        differences = self.config_update_differences(data, os.path.dirname(os.path.abspath(file_path)))
+        name, script = os.path.basename(file_path), os.path.basename(self.script_model.path)
+        if differences:
+            found = (f"{name} has other ports or layout settings than the script:\n  "
+                     + "\n  ".join(differences[:8]) + ("\n  ..." if len(differences) > 8 else ""))
+        else:
+            found = f"{name} has the same ports and layout settings as the script."
+        box = QMessageBox(self)
+        box.setWindowTitle("Load Config")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"You are editing {script} in place.\n\n{found}\n\n"
+                    "Update the script from it: ports, GDSII file, stackup, cell and purpose come from the "
+                    "config, everything else (frequencies, mesh, your own code) stays.\n\n"
+                    "Open it as a new model: leave the script, the config's settings replace all.")
+        update = box.addButton("Update the script from it", QMessageBox.AcceptRole)
+        new = box.addButton("Open it as a new model", QMessageBox.ActionRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(update)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        return "update" if clicked is update else "new" if clicked is new else "cancel"
+
+    def _newer_script_for_config(self, file_path, data):
+        """A model script for the same layout that is newer than the settings file and can be edited in place,
+        else None: it holds the settings made after the settings file was saved."""
+        saved = data.get("saved_values") or {}
+        gds = saved.get("GdsFile")
+        if not gds:
+            return None
+        base = os.path.dirname(os.path.abspath(file_path))
+        gds = os.path.join(base, gds)
+        folders = [base, os.path.dirname(os.path.abspath(gds))]
+        if saved.get("sim_path"):
+            folders.append(os.path.join(base, saved["sim_path"]))
+        for script in newer_scripts(file_path, gds, folders):
+            if not self._in_place_problem(script):
+                return script
+        return None
+
+    def _ask_continue_with_script(self, file_path, script):
+        """A newer model script for the settings file's layout: "script", "config" or "cancel"."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Load Config")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"{os.path.basename(script)} is newer than {os.path.basename(file_path)} and has the "
+                    "settings you last used for this layout (frequencies, mesh, ...).\n\n"
+                    "Continue with the script: edit it in place, its settings and your own code stay, ports "
+                    "and layout settings come from the config.\n\n"
+                    "Start from the config: the config's settings for a new model.")
+        script_button = box.addButton("Continue with the script", QMessageBox.AcceptRole)
+        config_button = box.addButton("Start from the config", QMessageBox.ActionRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(script_button)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        return "script" if clicked is script_button else "config" if clicked is config_button else "cancel"
+
+    def refresh_config_notice(self):
+        """Edit-in-place mode: point out a settings file of the same layout that is newer than the script and has
+        other ports or layout settings, with an Update button (info bar; only when it shows nothing else)."""
+        if self.script_model is None or not self.config_update_supported() or not self.info_bar.isHidden():
+            return
+        gds = self.saved_values.get("GdsFile")
+        script = self.script_model.path
+        if not gds or not script:
+            return
+        folders = [os.path.dirname(os.path.abspath(script)), os.path.dirname(os.path.abspath(gds))]
+        for path, data in newer_configs(script, gds, folders, "." + self.CONFIG_SUFFIX, self.APP_NAME):
+            differences = self.config_update_differences(data, os.path.dirname(os.path.abspath(path)))
+            if differences:
+                stamp = time.localtime(os.path.getmtime(path))
+                when = time.strftime("%H:%M" if stamp[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M", stamp)
+                self.show_info_bar(f"{os.path.basename(path)} (saved {when}) has other ports or layout settings "
+                                   f"than this script ({len(differences)} difference(s)).", "Update from it",
+                                   lambda p=path, d=data: self._update_script_from_config(p, d))
+                return
 
     def _in_place_problem(self, file_path):
         """Why a script can't be opened for editing in place, or "" if it can."""

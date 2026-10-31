@@ -1,3 +1,10 @@
+# What's New - October 31, 2026
+
+**After a new export from the layout tool** (setupEM): a layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg`, and writes both again when the layout changes. The settings you made in setupEM since are only in your model script, because Create Model writes the script, not the `.simcfg`. setupEM now takes from such a `.simcfg` only the ports, GDSII file, stackup, cell and purpose, and keeps everything else as in the script:
+- Opening a `.simcfg` when a newer model script for the same GDSII file exists asks whether to **Continue with the script** (edit it in place, ports and layout settings from the `.simcfg`) or **Start from the config**.
+- Loading a `.simcfg` while editing a script in place lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**. Before, loading it ended editing in place and replaced all settings.
+- While editing a script in place, the bar below the menu points out a newer `.simcfg` of the same GDSII file with other ports or layout settings, with **Update from it**.
+
 # What's New - October 29, 2026
 
 **File > Edit \*.py model in place** (new, setupEM and setupThermal): edits a gds2palace model script directly, e.g. one from the gds2palace MCP server, an example or your own code. Create Model and **File > Save** write only the values you change; the script's loops, comments and custom code stay. Settings the script computes itself are greyed out. A script that builds several models (a parameter sweep) lists them on the Create Model tab, and Start Simulation runs the ticked ones. After importing a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**.
