@@ -725,12 +725,16 @@ class FileInputTab(QWidget):
 
         # settings['fill_factor_correction'], shown only for solvers where the installed
         # gds2palace supports it, see show_fill_factor_correction()
+        # Created with this tab as parent: show_fill_factor_correction() below calls setVisible() before the
+        # layout is installed, and a parentless widget made visible becomes a top-level window for a moment.
+        # On Wayland each such window requests an activation token that is never used, and GNOME shows a
+        # spinning cursor until it times out (about 10 s after setupEM starts).
         self.fill_factor_layout = QHBoxLayout()
-        self.fill_factor_label1 = QLabel("Correction for via array cross section is ")
+        self.fill_factor_label1 = QLabel("Correction for via array cross section is ", self)
         # minimum instead of fixed width: lines up with the rows above, but grows rather
         # than truncating if the text is wider at a larger font or DPI setting
         self.fill_factor_label1.setMinimumWidth(left_label_width)
-        self.fill_factor_box = QComboBox()
+        self.fill_factor_box = QComboBox(self)
         self.fill_factor_box.setStyleSheet(COMBO_STYLE_OPTIONAL)
         self.fill_factor_box.addItems(["enabled", "disabled"])
         self.fill_factor_box.setCurrentText("disabled")
@@ -740,7 +744,7 @@ class FileInputTab(QWidget):
             "each merged via polygon (heat conductivity for thermal models) is multiplied by\n"
             "its fill factor (original via area / merged polygon area). Only has an effect\n"
             "when via array merging is enabled.")
-        self.fill_factor_label2 = QLabel(" (conductivity × via fill factor)")
+        self.fill_factor_label2 = QLabel(" (conductivity × via fill factor)", self)
         self.fill_factor_layout.addWidget(self.fill_factor_label1)
         self.fill_factor_layout.addWidget(self.fill_factor_box)
         self.fill_factor_layout.addWidget(self.fill_factor_label2)
