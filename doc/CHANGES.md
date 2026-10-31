@@ -1,3 +1,9 @@
+# What's New - October 31, 2026
+
+Fix: on Linux with GNOME (Wayland), the mouse cursor kept spinning for about 10 seconds after setupEM started, although setupEM was ready and could be used. setupEM briefly opened three invisible windows while building the Input Files tab, and GNOME waited for them to finish starting.
+
+
+
 # What's New - October 29, 2026
 
 **File > Edit \*.py model in place** (new, setupEM and setupThermal): edits a gds2palace model script directly, e.g. one from the gds2palace MCP server, an example or your own code. Create Model and **File > Save** write only the values you change; the script's loops, comments and custom code stay. Settings the script computes itself are greyed out. A script that builds several models (a parameter sweep) lists them on the Create Model tab, and Start Simulation runs the ticked ones. After importing a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**.
