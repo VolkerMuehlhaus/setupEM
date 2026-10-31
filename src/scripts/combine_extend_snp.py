@@ -23,11 +23,19 @@
 # updated 19-Oct-2025 Mue: support more than 9 ports
 # updated 08-Nov-2025 Mue: added evaluation for optional port impedance file port_information.json that is created by new gds2palace code
 # updated 13-Nov-2025 Mue: added simple de-embedding of parasitic port inductance (flat ribbon calculation)
-# updated 26-Nov-2025 Mue: also read Elmer FEM files 
+# updated 26-Nov-2025 Mue: also read Elmer FEM files
+# updated 22-Sep-2026 Mue: handle an interrupted Palace run (e.g. killed by setupEM's
+#   memory limit, or OOM-killed) - a blank/truncated trailing CSV line, or Palace's own
+#   "NULL" placeholder for an unsolved excitation, no longer crashes with an IndexError
+#   or gets silently written into the Touchstone file; affected S-parameters are set to
+#   0.0 dB / 0 deg and flagged both on stdout and in a comment line in the output file
+# updated 12-Oct-2026 Mue: port de-embedding cascaded all negative port inductances at port 1
+#   (none at the other ports); each port now gets its own value, in port number order
+#   (bug found by Gianluca Simone and David Lurz, FAU)
 
 import os,re, json, math
 import skrf as rf
-from skrf.circuit import Circuit
+from   skrf.circuit import Circuit
 import numpy as np
 
 
@@ -173,6 +181,12 @@ def parse_palace_csv (input_filename, freq, S_dB, S_arg):
                 print('Number of ports: ', num_ports)
 
             else:
+                aline = aline.strip()
+                if not aline:
+                    # blank/truncated trailing line, e.g. the solver run was
+                    # interrupted (OOM-killed) mid-write and never finished it
+                    continue
+
                 # process data line
                 items = aline.split()
                 f = items[0]
@@ -180,8 +194,16 @@ def parse_palace_csv (input_filename, freq, S_dB, S_arg):
                     dB_index = 2*params.index(param) + 1
                     arg_index = dB_index+1
 
-                    dB[param] = items[dB_index]
-                    arg[param] = items[arg_index]
+                    # an interrupted solver run can leave a data line that is
+                    # missing trailing columns entirely (not even a "NULL"
+                    # placeholder) - treat those the same as Palace's own
+                    # "NULL" for a value it had not computed yet, rather than
+                    # raising an IndexError here
+                    dB_value  = items[dB_index]  if dB_index  < len(items) else 'NULL'
+                    arg_value = items[arg_index] if arg_index < len(items) else 'NULL'
+
+                    dB[param] = dB_value
+                    arg[param] = arg_value
 
                     # do we already have the frequency point?
                     if f in freq:
@@ -189,8 +211,8 @@ def parse_palace_csv (input_filename, freq, S_dB, S_arg):
                         dB_dict = S_dB[f_index]
                         arg_dict = S_arg[f_index]
 
-                        dB_dict[param] = items[dB_index]
-                        arg_dict[param] = items[arg_index]
+                        dB_dict[param] = dB_value
+                        arg_dict[param] = arg_value
 
                     else:
                         freq.append(f)
@@ -235,7 +257,13 @@ def extrapolate_to_DC (snp_filename):
                 # extrapolate to DC
                 extrapolated = nw.extrapolate_to_dc(points=None, dc_sparam=None,  kind='cubic', coords='polar')
                 filename, file_extension = os.path.splitext(snp_filename)
-                out_filename = filename + '_dc' # without extension
+                # keep the original .sNp extension explicitly, rather than relying on
+                # write_touchstone() to re-append it - it only does that when its own
+                # get_extn() finds no dot at all in the name, and a model name containing
+                # a literal '.' (e.g. a dimension "do82.41" or temperature "T125.0C")
+                # makes it mistake that trailing fragment for an existing extension,
+                # silently writing the file with no extension at all
+                out_filename = filename + '_dc' + file_extension
                 extrapolated.write_touchstone(out_filename, skrf_comment='DC point added by extrapolation', form='db', write_noise=True)
                 returnval = out_filename
                 print('Created file with DC extrapolation: ', out_filename,'\n')
@@ -311,7 +339,10 @@ def port_deembedding (snp_filename, port_info_available, port_info_data):
         ntwk = Circuit(connections).network
 
         filename, file_extension = os.path.splitext(snp_filename)
-        out_filename = filename + '_deembedded' # without extension
+        # keep the original .sNp extension explicitly - see the matching comment in
+        # extrapolate_to_DC() for why relying on write_touchstone()'s own extension
+        # auto-detection is unsafe here
+        out_filename = filename + '_deembedded' + file_extension
         ntwk.write_touchstone(out_filename, skrf_comment='De-embedded by adding negative series L at ports', form='db', write_noise=True)
         print('Created file with de-embedding (cascaded negative port L): ', out_filename,'\n')
     else:
@@ -319,32 +350,41 @@ def port_deembedding (snp_filename, port_info_available, port_info_data):
 
 
 
-workdir = os.getcwd()
-found_datafiles = []
+def main():
+    global found_datafiles
 
-# work recursively through directories
-traverse_directories(workdir)
+    workdir = os.getcwd()
+    found_datafiles = []
 
-# evaluate the found data files
-for found_filename in found_datafiles:
+    # work recursively through directories
+    traverse_directories(workdir)
+
+    # evaluate the found data files
+    for found_filename in found_datafiles:
+        _process_datafile(found_filename)
+
+
+def _process_datafile(found_filename):
     # print(str(f))
 
     # Before we evaluate S-parameters, also check if we have a file port_information.json
+    # Search upward from the data file's directory, since it can be one level
+    # further down for AMR iteration folders (.../output/<model>/iterationN/port-S.csv)
+    # than for a normal run (.../output/<model>/port-S.csv). Capped at a small fixed
+    # depth so we never wander off into unrelated directories further up the tree.
     port_info_available = False
-    # Get the directory two levels up
-    two_up_dir = os.path.abspath(os.path.join(os.path.dirname(found_filename), "..", ".."))
-    # Possible full filename for port_information.json
-    port_info_filename = os.path.join(two_up_dir, "port_information.json")
-    
-    # Check if it exists
-    if not os.path.isfile(port_info_filename):
-        # let's try one level above
-        one_up_dir = os.path.abspath(os.path.join(os.path.dirname(found_filename), ".."))
-        # Possible full filename for port_information.json
-        port_info_filename = os.path.join(one_up_dir, "port_information.json")
+    MAX_LEVELS_UP = 4
+    search_dir = os.path.abspath(os.path.dirname(found_filename))
+    port_info_filename = None
+    for _ in range(MAX_LEVELS_UP):
+        search_dir = os.path.abspath(os.path.join(search_dir, ".."))
+        candidate = os.path.join(search_dir, "port_information.json")
+        if os.path.isfile(candidate):
+            port_info_filename = candidate
+            break
 
-    # If we found the port file one or two levels above
-    if os.path.isfile(port_info_filename):
+    # If we found the port file within MAX_LEVELS_UP directories above
+    if port_info_filename is not None:
         print(f"Found extra file with port information: {port_info_filename}")
 
         # Load the JSON data
@@ -397,8 +437,10 @@ for found_filename in found_datafiles:
 
     data_lines = []
     
+    incomplete_points = []
+
     for frequency in freq:
-        # line = str(frequency) 
+        # line = str(frequency)
 
         index = freq.index(frequency)
         data_line = [frequency]
@@ -406,25 +448,38 @@ for found_filename in found_datafiles:
         for i in range(1,num_ports+1):
             for j in range(1, num_ports+1):
 
-                # special case 2-port data: the output is S11 S21 S12 S22 
+                # special case 2-port data: the output is S11 S21 S12 S22
                 if num_ports==2:
                     param = str(j) + ' ' + str(i)
-                else: 
+                else:
                     param = str(i) + ' ' + str(j)
 
                 found_params = S_dB[index].keys()
-                # assume that we also have phase data then
-                if param in found_params:
-                    Sij_dB  = S_dB[index].get(param)
+                raw_dB = S_dB[index].get(param) if param in found_params else None
+                # Palace writes the literal string "NULL" for an excitation that
+                # had not been solved yet when the solver run was interrupted
+                # (e.g. terminated after exceeding a memory limit). Treat that
+                # the same as a genuinely missing parameter below, rather than
+                # writing "NULL" into the Touchstone file, where it would only
+                # surface later as an unhandled parse error in skrf
+                if raw_dB is not None and raw_dB != 'NULL':
+                    Sij_dB  = raw_dB
                     Sij_arg = S_arg[index].get(param)
                 else:
                     Sij_dB  = 0.0
                     Sij_arg = 0.0
+                    if raw_dB == 'NULL':
+                        incomplete_points.append((frequency, param))
                 # write Sij data
                 data_line.append (Sij_dB)
                 data_line.append( Sij_arg)
-        
+
         data_lines.append(data_line)
+
+    if incomplete_points:
+        print(f'WARNING: solver run was interrupted before all excitations finished - '
+              f'{len(incomplete_points)} S-parameter value(s) were not computed and were '
+              f'set to 0.0 dB / 0 deg instead: {incomplete_points}')
 
     # sort data_lines by frequency (first value)
     data_lines.sort(key=lambda x:float(x[0]))
@@ -447,7 +502,13 @@ for found_filename in found_datafiles:
     output_filename = os.path.join(output_path, output_filename)
 
 
-    output_file = open(output_filename, "w") 
+    output_file = open(output_filename, "w")
+    # comment lines must come before the option ('#') line for compatibility
+    # with strict Touchstone readers
+    if incomplete_points:
+        incomplete_params = sorted({'S' + param.replace(' ', '') for _freq, param in incomplete_points})
+        output_file.write(f"! WARNING: incomplete S-parameters, solver run was interrupted - "
+                           f"{', '.join(incomplete_params)} set to 0.0 dB / 0 deg\n")
     # write Touchstone header line
     output_file.write(f"#  {freq_unit.upper()} S DB R {Z0_string}\n")
 
@@ -471,8 +532,11 @@ for found_filename in found_datafiles:
     if port_info_available: 
         port_deembedding (output_filename, port_info_available, port_info_data)
         if dc_extrapolated_filename != '':
-            # we need to add file extension
-            fn = dc_extrapolated_filename + '.s' + str(num_ports) + 'p'
-            if os.path.isfile(fn):
-                port_deembedding (fn, port_info_available, port_info_data)
-       
+            # dc_extrapolated_filename already includes the .sNp extension now
+            if os.path.isfile(dc_extrapolated_filename):
+                port_deembedding (dc_extrapolated_filename, port_info_available, port_info_data)
+
+
+if __name__ == "__main__":
+    main()
+
