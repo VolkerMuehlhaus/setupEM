@@ -7,7 +7,10 @@
 
 **Load Config, Import from \*.py model and Edit \*.py model in place** start in the folder of the model you are working on (the config or script loaded last, else the GDSII file). Before, they started in the folder setupEM was launched from, e.g. KLayout's when the KLayout plug-in opened setupEM.
 
+setupEM 0.16.0 needs gds2palace 0.9.3 or later: a layout with several shapes on one port layer (e.g. a transistor terminal on several fingers, from the KLayout plug-in) makes one port with several elements there; older gds2palace versions used only the last shape.
+
 **Fixes:**
+- `scripts/combine_extend_snp.py` is the same as gds2palace's again. It had missed three fixes made there in September: the port impedance lookup for AMR iterations, the missing `.sNp` extension for a model name that contains a dot, and Touchstone output after an interrupted Palace run.
 - On Linux with GNOME (Wayland), the mouse cursor no longer keeps spinning for about 10 seconds after setupEM starts. setupEM briefly opened three invisible windows while building the Input Files tab, and GNOME waited for them to finish starting.
 - Via ports with direction `-Z` keep their from and to layers. Before, loading a `.simcfg` dropped them, and Create Model wrote such a port as an in-plane port.
 - An incomplete port (direction and layers that don't fit, e.g. from a `.simcfg` written by another tool) gives a warning in the Ports tab. Before, gds2palace exited and setupEM closed. A lowercase `z` counts as a via port too.
