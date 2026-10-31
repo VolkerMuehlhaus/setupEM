@@ -86,10 +86,11 @@ def port_lines(code):
     return [line for line in code.splitlines() if "simulation_port(" in line and not line.lstrip().startswith("#")]
 
 
-def test_open_config_continues_with_newer_script(win, layout, monkeypatch):
+def test_open_config_continues_with_script(win, layout, monkeypatch):
     folder, write_config = layout
-    config = write_config("chip_em.simcfg", [via(1, 201), via(2, 202, "-Z"), via(3, 203)], age=100)
-    set_age(folder / "chip_em.py", 10)              # Create Model ran after the config was saved
+    # the usual order: Create Model wrote the script, then the layout tool exported again (a newer config)
+    set_age(folder / "chip_em.py", 100)
+    config = write_config("chip_em.simcfg", [via(1, 201), via(2, 202, "-Z"), via(3, 203)], age=10)
     asked = []
     monkeypatch.setattr(win, "_ask_continue_with_script",
                         lambda c, s: asked.append(os.path.basename(s)) or "script")
@@ -104,9 +105,9 @@ def test_open_config_continues_with_newer_script(win, layout, monkeypatch):
     assert "source_layernum=203" in lines[2]
 
 
-def test_open_config_without_newer_script_asks_nothing(win, layout, monkeypatch):
+def test_open_config_without_script_asks_nothing(win, layout, monkeypatch):
     folder, write_config = layout
-    set_age(folder / "chip_em.py", 100)
+    os.remove(folder / "chip_em.py")                # no model script for this layout yet
     config = write_config("chip_em.simcfg", [via(1, 201)], age=10)
     monkeypatch.setattr(win, "_ask_continue_with_script", lambda c, s: pytest.fail("asked"))
     win.load_configuration_from_file(config)

@@ -32,7 +32,7 @@ import glob
 import json
 import os
 
-__all__ = ["LAYOUT_KEYS", "port_differences", "layout_differences", "newer_configs", "newer_scripts"]
+__all__ = ["LAYOUT_KEYS", "port_differences", "layout_differences", "newer_configs", "model_scripts"]
 
 # saved_values that belong to the layout export, besides the ports
 LAYOUT_KEYS = ("GdsFile", "SubstrateFile", "cellname", "purpose")
@@ -159,13 +159,11 @@ def _reads_gds(script_path, gds_path):
                and _same_path(n.value, gds_path, folder) for n in ast.walk(tree))
 
 
-def newer_scripts(config_path, gds_path, folders):
-    """Model scripts (*.py) in folders that read gds_path and are newer than config_path, newest first: they hold
-    settings made after the config was saved (setupEM's Create Model writes the script, not the config)."""
-    try:
-        config_time = os.path.getmtime(config_path)
-    except OSError:
-        return []
+def model_scripts(gds_path, folders):
+    """Model scripts (*.py) in folders that read gds_path, newest first. Their age says nothing against a settings
+    file of the same layout: a layout tool writes that file again on every export, also after the script was made,
+    while the settings made in setupEM since are only in the script (Create Model writes the script, not the
+    settings file)."""
     seen, out = set(), []
     for folder in folders:
         if not folder or not os.path.isdir(folder):
@@ -175,11 +173,6 @@ def newer_scripts(config_path, gds_path, folders):
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                if os.path.getmtime(path) <= config_time:
-                    continue
-            except OSError:
-                continue
             if _reads_gds(path, gds_path):
                 out.append(path)
     out.sort(key=os.path.getmtime, reverse=True)

@@ -346,7 +346,7 @@ A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII fil
 
 setupEM therefore takes from the `.simcfg` only what belongs to the layout: the ports, GDSII file, stackup, cell and purpose. Everything else stays as in the script, including your own code. As always when editing in place, Create Model or **File > Save** writes the changes into the script.
 
-- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file is newer: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before).
+- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before).
 - **Loading the `.simcfg` while editing a script in place:** setupEM lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**.
 - **While editing a script in place**, when a `.simcfg` for the same GDSII file is newer than the script and has other ports or layout settings, the bar below the menu says so, with **Update from it**.
 

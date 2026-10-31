@@ -10,7 +10,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
-from setupEM.config_update import (layout_differences, newer_configs, newer_scripts,  # noqa: E402
+from setupEM.config_update import (layout_differences, model_scripts, newer_configs,  # noqa: E402
                                    port_differences)
 
 
@@ -70,12 +70,14 @@ def test_newer_configs_and_scripts(tmp_path):
 
     found = newer_configs(str(tmp_path / "chip_em.py"), str(gds), [str(tmp_path), str(tmp_path)])
     assert [os.path.basename(p) for p, _ in found] == ["chip_em.simcfg"]
-    assert newer_scripts(str(tmp_path / "chip_em.simcfg"), str(gds), [str(tmp_path)]) == []
 
-    # the script saved after the config (Create Model without Save Config)
-    _touch(tmp_path / "chip_em.py", script_text, 1)
+    # model scripts for the GDS, whatever their age against the config (the layout tool writes the config again on
+    # every export), newest first
     _touch(tmp_path / "relative.py", "settings = {}\nsettings['GdsFile'] = 'chip_em.gds'\n", 2)
     _touch(tmp_path / "unrelated.py", "x = 'chip_em_old.gds'\n", 1)
-    scripts = newer_scripts(str(tmp_path / "chip_em.simcfg"), str(gds), [str(tmp_path)])
-    assert [os.path.basename(p) for p in scripts] == ["chip_em.py", "relative.py"]
+    scripts = model_scripts(str(gds), [str(tmp_path), str(tmp_path)])
+    assert [os.path.basename(p) for p in scripts] == ["relative.py", "chip_em.py"]
+
+    # the script saved after the config: the config is no longer newer
+    _touch(tmp_path / "chip_em.py", script_text, 1)
     assert newer_configs(str(tmp_path / "chip_em.py"), str(gds), [str(tmp_path)]) == []

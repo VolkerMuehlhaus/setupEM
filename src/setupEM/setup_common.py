@@ -63,12 +63,12 @@ if __package__ in (None, ""):
     import gds_hierarchy_scan
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from script_probe import probe_script
-    from config_update import newer_configs, newer_scripts
+    from config_update import model_scripts, newer_configs
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
-    from .config_update import newer_configs, newer_scripts
+    from .config_update import model_scripts, newer_configs
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -4610,8 +4610,8 @@ class MainWindowBase(QMainWindow):
                             self._update_script_from_config(file_path, data)
                             return
                     else:
-                        # a newer model script for the same layout has the settings made after this config
-                        script = self._newer_script_for_config(file_path, data)
+                        # a model script for the same layout has the settings made in setupEM since
+                        script = self._model_script_for_config(file_path, data)
                         choice = self._ask_continue_with_script(file_path, script) if script else "config"
                         if choice == "cancel":
                             return
@@ -5063,9 +5063,11 @@ class MainWindowBase(QMainWindow):
         clicked = box.clickedButton()
         return "update" if clicked is update else "new" if clicked is new else "cancel"
 
-    def _newer_script_for_config(self, file_path, data):
-        """A model script for the same layout that is newer than the settings file and can be edited in place,
-        else None: it holds the settings made after the settings file was saved."""
+    def _model_script_for_config(self, file_path, data):
+        """The newest model script for the settings file's layout that can be edited in place, else None. It holds
+        the settings made in setupEM after the settings file was last saved (Create Model writes the script); the
+        settings file itself is written again by the layout tool on every export, so it is usually the newer
+        file and its age says nothing."""
         saved = data.get("saved_values") or {}
         gds = saved.get("GdsFile")
         if not gds:
@@ -5075,18 +5077,21 @@ class MainWindowBase(QMainWindow):
         folders = [base, os.path.dirname(os.path.abspath(gds))]
         if saved.get("sim_path"):
             folders.append(os.path.join(base, saved["sim_path"]))
-        for script in newer_scripts(file_path, gds, folders):
+        for script in model_scripts(gds, folders):
             if not self._in_place_problem(script):
                 return script
         return None
 
     def _ask_continue_with_script(self, file_path, script):
-        """A newer model script for the settings file's layout: "script", "config" or "cancel"."""
+        """A model script exists for the settings file's layout: "script", "config" or "cancel"."""
         box = QMessageBox(self)
         box.setWindowTitle("Load Config")
         box.setIcon(QMessageBox.Question)
-        box.setText(f"{os.path.basename(script)} is newer than {os.path.basename(file_path)} and has the "
-                    "settings you last used for this layout (frequencies, mesh, ...).\n\n"
+        stamp = time.localtime(os.path.getmtime(script))
+        when = time.strftime("%H:%M" if stamp[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M", stamp)
+        box.setText(f"{os.path.basename(script)} (changed {when}) is the model script for this layout. It has "
+                    "the settings you last used for it (frequencies, mesh, ...), also those not saved in "
+                    f"{os.path.basename(file_path)}.\n\n"
                     "Continue with the script: edit it in place, its settings and your own code stay, ports "
                     "and layout settings come from the config.\n\n"
                     "Start from the config: the config's settings for a new model.")
