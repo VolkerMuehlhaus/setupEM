@@ -112,6 +112,8 @@ def test_open_config_without_script_asks_nothing(win, layout, monkeypatch):
     monkeypatch.setattr(win, "_ask_continue_with_script", lambda c, s: pytest.fail("asked"))
     win.load_configuration_from_file(config)
     assert win.script_model is None and win.user_inputs_file == config
+    # Load Config / Import / Edit in place start in the folder of the config, not the working folder
+    assert os.path.normcase(win._open_dialog_folder()) == os.path.normcase(str(folder))
 
 
 def test_start_from_config(win, layout, monkeypatch):

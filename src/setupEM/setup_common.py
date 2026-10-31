@@ -4554,8 +4554,20 @@ class MainWindowBase(QMainWindow):
                 return {}
         return {}
 
+    def _open_dialog_folder(self):
+        """Where Load Config / Import / Edit in place start: the folder of the script edited in place or of the
+        settings file loaded last, else of the GDSII file; '' (the process' working folder) if there is none.
+        Started from a layout tool, that working folder is the tool's, not the one of its export."""
+        candidates = [getattr(getattr(self, "script_model", None), "path", None),
+                      getattr(self, "user_inputs_file", None), self.saved_values.get("GdsFile")]
+        for path in candidates:
+            if path and os.path.isdir(os.path.dirname(os.path.abspath(path))):
+                return os.path.dirname(os.path.abspath(path))
+        return ""
+
     def load_configuration_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Config File", filter=f"*.{self.CONFIG_SUFFIX};;Python model code *.py")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Config File", self._open_dialog_folder(),
+                                                   filter=f"*.{self.CONFIG_SUFFIX};;Python model code *.py")
         # we can load JSON or Python models, decide which suffix we have
         if file_path:
             self.open_file(file_path)
@@ -5152,7 +5164,8 @@ class MainWindowBase(QMainWindow):
 
     def import_py_model(self):
         """File > Import from *.py model: its settings for a new, generated model."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Import from *.py Model", filter="*.py model code")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import from *.py Model", self._open_dialog_folder(),
+                                                   filter="*.py model code")
         if file_path:
             self.load_configuration_from_file(file_path)
 
@@ -5160,7 +5173,8 @@ class MainWindowBase(QMainWindow):
         """File > Edit *.py model in place: Create Model / Save write only the
         changed values back into the script, its own code stays."""
         if not file_path:
-            file_path, _ = QFileDialog.getOpenFileName(self, "Edit *.py Model in Place", filter="*.py model code")
+            file_path, _ = QFileDialog.getOpenFileName(self, "Edit *.py Model in Place", self._open_dialog_folder(),
+                                                       filter="*.py model code")
             if not file_path:
                 return
         problem = self._in_place_problem(file_path)
