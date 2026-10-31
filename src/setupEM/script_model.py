@@ -830,7 +830,7 @@ def _port_values(port):
         "port_Z0": _number(port.get("port_Z0", 50)),
         "source_layernum": _number(int(port["source_layernum"])),
     }
-    if str(port.get("direction", "")).upper() == "Z":
+    if "Z" in str(port.get("direction", "")).upper():
         values["from_layername"] = repr(port.get("from_layername", ""))
         values["to_layername"] = repr(port.get("to_layername", ""))
     else:

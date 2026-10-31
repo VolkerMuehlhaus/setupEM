@@ -1,6 +1,6 @@
 # setupEM and setupThermal User's Guide
 
-Document version: 2026-09-22
+Document version: 2026-10-31
 
 ## Contents
 [What's New](#whats-new)  
@@ -339,6 +339,16 @@ As before, Create Model writes the new script over the imported one (**Preferenc
 - Only gds2palace (Palace / Elmer) scripts that build one kind of model can be edited this way. For any other script, setupEM offers to import its settings instead.
 
 When you import a script that setupEM didn't write, a bar below the menu offers **Edit in place instead**, in case you want to keep the script's own code. Close it with × if importing was what you wanted.
+
+#### After a new export from the layout tool
+
+A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg` next to it, and writes both again when you change the layout: same file names, new ports. The ports are numbered 1, 2, 3, ... without gaps, so a new or removed port can shift the numbers of others. Your model script still has the old ports, and the settings you made in setupEM since (frequencies, mesh, ...) are only in the script: Create Model writes the script, not the `.simcfg`.
+
+setupEM therefore takes from the `.simcfg` only what belongs to the layout: the ports, GDSII file, stackup, cell and purpose. Everything else stays as in the script, including your own code. As always when editing in place, Create Model or **File > Save** writes the changes into the script.
+
+- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before).
+- **Loading the `.simcfg` while editing a script in place:** setupEM lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**.
+- **While editing a script in place**, when a `.simcfg` for the same GDSII file is newer than the script and has other ports or layout settings, the bar below the menu says so, with **Update from it**.
 
 **Preferences ...** changes the built-in defaults that a brand-new/blank field starts out showing (e.g. fstart/fstop, mesh refinement, dielectric oversize margin, the Ports tab's auto-assign source layer range, the Palace tab's complex coarse solve, AMR goal/maximum DOF and conformal AMR) - saved per-user via Qt's settings mechanism, separate from any project's `.simcfg`/`.tsimcfg` file. The Palace tab's **Maximum solver iterations** and **Solver tolerance** are the exception: they are not just defaults but are used for every Palace run, since no project tab has a field for them.
 
