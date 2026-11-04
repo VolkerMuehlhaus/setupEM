@@ -414,6 +414,7 @@ setupThermal reuses the same **Input Files**, **Mesh**, **Create Model**, **Code
 - No **Frequencies** tab and no **Simulator** menu - a thermal model is a single steady-state solve, not a frequency sweep, and always targets Elmer.
 - The **Ports** tab is replaced by **Thermal Sources + Boundaries** (see below).
 - The Mesh tab omits the Palace-only adaptive mesh refinement group and any Palace/Elmer solver switch (always Elmer).
+- The layer purposes (datatypes) are 0 and 20 by default, not only 0. IHP's npn cells draw the silicon around each emitter on Activ.mask (1/20), not on Activ. Without it, the heat sources sit in oxide, and the temperatures come out much too high. Datatypes saved in your Preferences take precedence.
 
 ### Thermal Sources + Boundaries tab
 

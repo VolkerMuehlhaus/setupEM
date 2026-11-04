@@ -1146,7 +1146,7 @@ class FileInputTab(QWidget):
         self.fill_factor_box.setCurrentText("enabled" if saved_values.get("fill_factor_correction", False) else "disabled")
         self.preprocess_gds_checkbox.setChecked(bool(get_saved_value(saved_values, "preprocess_gds", True)))
 
-        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
+        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", self.MainWindow.DEFAULT_PURPOSE)
         int_list = normalize_purpose_list(saved_values.get("purpose", purpose_default),
                                           default=normalize_purpose_list(purpose_default))
         self.purpose_edit.setText(', '.join(map(str, int_list)))
@@ -1178,7 +1178,7 @@ class FileInputTab(QWidget):
             saved_values.pop("fill_factor_correction", None)
 
         # save as flat list of ints, empty text falls back to the preference default
-        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
+        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", self.MainWindow.DEFAULT_PURPOSE)
         saved_values["purpose"] = normalize_purpose_list(self.purpose_edit.text(),
                                                          default=normalize_purpose_list(purpose_default))
 
@@ -4354,6 +4354,8 @@ class MainWindowBase(QMainWindow):
     """
 
     TAB_HEADER_COLORS = ["#FFCDD2", "#C8E6C9", "#BBDEFB", "#FFF9C4", "#D1C4E9"]
+    # GDS datatypes read by default (the Preferences can change it); setupThermal adds IHP's Activ.mask (1/20)
+    DEFAULT_PURPOSE = "0"
 
     def __init__(self):
         super().__init__()

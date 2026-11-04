@@ -1368,7 +1368,7 @@ class PreferencesDialog(QDialog):
         files_form.addLayout(xml_dir_row)
         self._reset_targets.append((self.xml_browse_dir_edit, "xml_browse_directory", "", "text"))
 
-        self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", "0")
+        self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", MainWindow.DEFAULT_PURPOSE)
         self.viamerge_edit = add_row(files_form, "Default via array merge distance (µm)", "merge_polygon_size", "0.5")
         # Import from *.py model writes back into the imported script, as setupEM always did
         self.confirm_reuse_checkbox = QCheckBox("When importing a *.py model: ask before writing over it")
@@ -1681,6 +1681,9 @@ class ThermalConductivityLegend(QWidget):
 class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
     MODEL_KIND = MODEL_KIND_THERMAL
+    # IHP npn cells draw the silicon around each emitter on Activ.mask (1/20), not Activ: without it the heat
+    # sources sit in oxide (IHP's own thermal stack counts Activ.mask as silicon)
+    DEFAULT_PURPOSE = "0, 20"
     CONFIG_SUFFIX = CONFIG_SUFFIX
 
     def __init__(self):

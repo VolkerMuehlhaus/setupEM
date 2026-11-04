@@ -212,3 +212,22 @@ def test_refined_cellsize_override(app, monkeypatch, export):
     assert "settings['refined_cellsize_override']" not in win.modeleditor_tab.model_edit.toPlainText()
     win._script_dirty = False
     win.close()
+
+
+def test_default_purpose(app, monkeypatch):
+    """Without a saved preference, setupThermal reads datatypes 0 and 20 (IHP's Activ.mask, the silicon around each
+    npn emitter), setupEM only 0."""
+    import setupEM.setup_common as common
+    import setupEM.setupEM as setupem
+    import setupEM.setupThermal as setupthermal
+    monkeypatch.setattr(common, "get_preference", lambda app_name, key, default=None: default)
+    for module, expected in ((setupthermal, [0, 20]), (setupem, [0])):
+        win = module.MainWindow()
+        win.saved_values.pop("purpose", None)
+        win.file_tab.load_values()
+        assert win.file_tab.purpose_edit.text() == ", ".join(map(str, expected)), module.__name__
+        win.file_tab.purpose_edit.setText("")
+        win.file_tab.save_values()
+        assert win.saved_values["purpose"] == expected, module.__name__
+        win._script_dirty = False
+        win.close()
