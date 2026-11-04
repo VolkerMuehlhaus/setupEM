@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     )
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QSyntaxHighlighter, QPainter, QPen, QActionGroup, QLinearGradient
-from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths
+from PySide6.QtCore import Qt, QRegularExpression, QProcess, QProcessEnvironment, QRect, QStandardPaths
 
 
 # Local dev: if the gds2palace_ihp_sg13g2 fork is checked out as a sibling repo next to
@@ -1031,6 +1031,7 @@ class CreateModelTab(CreateModelTabBase):
             # Windows and Linux/Mac both just resolve ElmerSolver via PATH
             self.log_area.appendPlainText('Setting work directory ' + run_path)
             self.process.setWorkingDirectory(run_path)
+            self.process.setProcessEnvironment(elmer_environment())
             # start simulation
             self.process.start("ElmerSolver")
         except Exception as e:
@@ -1039,6 +1040,18 @@ class CreateModelTab(CreateModelTabBase):
             # unanticipated, so it never surfaces as an uncaught traceback
             self.log_area.appendPlainText(f"⚠️ Unexpected error while starting the simulation: {e}\n")
 
+
+
+def elmer_environment():
+    """The environment for ElmerSolver: the system's, with hwloc's OpenGL plug-in off unless HWLOC_COMPONENTS is set.
+    OpenMPI loads hwloc at startup, and its GL plug-in probes every X display; on a Linux desktop where one display
+    does not accept connections (hpz2, Ubuntu 26.04: gnome-shell's :1), ElmerSolver waits there forever after
+    "Authorization required, but no authorization protocol specified". The plug-in only finds GPUs for the hardware
+    topology, which Elmer does not use."""
+    environment = QProcessEnvironment.systemEnvironment()
+    if not environment.contains("HWLOC_COMPONENTS"):
+        environment.insert("HWLOC_COMPONENTS", "-gl")
+    return environment
 
 
 class ModelEditorTab(QWidget):

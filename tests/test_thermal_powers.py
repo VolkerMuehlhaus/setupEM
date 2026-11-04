@@ -130,3 +130,12 @@ def test_placeholder_boundary(app, monkeypatch, export):
     assert column(win, 1)[boundary] == "Activ" and column(win, 5)[boundary] == "region outline"
     win._script_dirty = False
     win.close()
+
+def test_elmer_environment(monkeypatch):
+    """ElmerSolver runs with hwloc's GL plug-in off (it hangs probing a display that does not accept connections),
+    unless HWLOC_COMPONENTS is set already."""
+    import setupEM.setupThermal as setupthermal
+    monkeypatch.delenv("HWLOC_COMPONENTS", raising=False)
+    assert setupthermal.elmer_environment().value("HWLOC_COMPONENTS") == "-gl"
+    monkeypatch.setenv("HWLOC_COMPONENTS", "-cuda")
+    assert setupthermal.elmer_environment().value("HWLOC_COMPONENTS") == "-cuda"
