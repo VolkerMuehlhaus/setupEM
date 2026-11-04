@@ -436,7 +436,7 @@ A model needs **both** a source and a constant-temperature boundary to be solvab
 
 **Mesh size at heat sources** sets the mesh in a box around each heat source: the source plus this distance on each side. Away from the sources, the mesh grows to **Mesh cell maximum size** over a distance of 30 times this value. Unlike in setupEM, metal edges are not refined: a thermal model needs its fine mesh where the heat is generated.
 
-Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. For an npn13G2 with 8 fingers, its average temperature stopped changing at 0.25 µm or finer; at 2 µm it came out about 20 % too low.
+Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. A small value alone is not enough: the mesh grows to the maximum size within 30 times this value, which is fast for a small value, and a mesh that grows too fast gives too low a temperature. For an npn13G2 with 8 fingers at 0.25 µm, the temperature rise came out about 20 % lower than with a slowly growing mesh.
 
 **Solver** chooses Elmer's direct or iterative solver. There is no adaptive mesh refinement: a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
 
