@@ -152,6 +152,8 @@ As explained in the [gds2palace documentation](https://github.com/VolkerMuehlhau
 
 In the upper part of the tab, you make your settings and then need to apply to the port list below.
 
+The port list grows with the ports: it always keeps a few empty rows below the last port, so there is no fixed maximum number of ports. Versions up to 0.16.0 had a fixed list of 32 rows and silently dropped port 33 and higher when loading a config or model script; load such a model again with this version to get all its ports back. The same applies to the Thermal Sources + Boundaries list in setupThermal.
+
 <img src="./doc/png/ports1.png" alt="ports" width="700">
 
 Palace does not evaluate the port voltage parameter, but we use it internally to specify if ports are "active" during S-parameter simulation. To get the full S-parameters, all ports must be simulated with non-zero voltage, which means that all ports are excited one after another. If you want to simulate only selected excitations, for faster total simulation time, you can set ports to zero voltage. In that case, you will **not** get full S-parameters data and the missing paths are set to 0 in the output file. 

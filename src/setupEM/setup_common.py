@@ -545,6 +545,21 @@ def next_available_source_layer(gds_layers_present, excluded_layers, start=201):
     return candidates[0] if candidates else None
 
 
+TABLE_MIN_ROWS = 32     # rows of an empty Ports / Thermal table
+TABLE_SPARE_ROWS = 8    # empty rows kept below the last used one, for new entries
+
+
+def ensure_table_rows(table, used):
+    """Grow table so that rows 0..used-1 exist plus TABLE_SPARE_ROWS empty
+    ones below them (never shrinks). setItem() beyond the last row is
+    silently ignored by Qt, so loaders call this before filling: a config
+    with more than 32 ports / thermal objects would otherwise load
+    incomplete and lose the rest on the next save."""
+    rows = max(TABLE_MIN_ROWS, used + TABLE_SPARE_ROWS)
+    if rows > table.rowCount():
+        table.setRowCount(rows)
+
+
 def update_missing_layer_column(table, source_col, comment_col, gds_layers_present):
     """Set comment_col to "(missing in layout)" for every row whose
     source_col holds a layer number not in gds_layers_present, and clear it

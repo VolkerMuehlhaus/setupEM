@@ -53,7 +53,7 @@ if __package__ in (None, ""):
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
-        next_available_source_layer, update_missing_layer_column,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
@@ -65,7 +65,7 @@ else:
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
-        next_available_source_layer, update_missing_layer_column,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
@@ -300,6 +300,7 @@ class PortsTab(QWidget):
 
             for col, value in enumerate(data):
                 self.thermalobjectslist.setItem(selected_row, col, QTableWidgetItem(str(value)))
+            ensure_table_rows(self.thermalobjectslist, selected_row + 1)     # empty rows below for the next objects
 
             self.refresh_missing_layer_annotations()
 
@@ -485,6 +486,7 @@ class PortsTab(QWidget):
         # update thermal definitions from Python model code
 
         self.thermalobjectslist.clearContents()
+        ensure_table_rows(self.thermalobjectslist, len(heatsource_defs) + len(consttemp_defs))
         n=-1
         for n, heatsource_def in enumerate(heatsource_defs):
             # each definition is a dictionary
@@ -515,6 +517,7 @@ class PortsTab(QWidget):
         # update thermal definitions from our native JSON format
 
         self.thermalobjectslist.clearContents()
+        ensure_table_rows(self.thermalobjectslist, len(thermal_defs))
         n=-1
         for n, thermal_def in enumerate(thermal_defs):
             # each definition is a dictionary

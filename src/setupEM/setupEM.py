@@ -56,7 +56,7 @@ if __package__ in (None, ""):
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
-        next_available_source_layer, update_missing_layer_column,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
@@ -73,7 +73,7 @@ else:
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
-        next_available_source_layer, update_missing_layer_column,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
@@ -635,6 +635,7 @@ class PortsTab(QWidget):
 
             for col, value in enumerate(data):
                 self.portslist.setItem(selected_row, col, QTableWidgetItem(str(value)))
+            ensure_table_rows(self.portslist, selected_row + 1)     # empty rows below for the next ports
 
             self.refresh_missing_layer_annotations()
 
@@ -844,6 +845,8 @@ class PortsTab(QWidget):
         # update ports from imported model code in our native JSON format
 
         self.portslist.clearContents()
+        numbers = [int(p["portnumber"]) for p in ports if p.get("portnumber") is not None]
+        ensure_table_rows(self.portslist, max(numbers, default=0))     # port n in row n-1
         for port in ports:
             # each port is a dictionary
             portnum = port.get("portnumber", None)
