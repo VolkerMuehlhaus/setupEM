@@ -449,6 +449,8 @@ After a run, the log lists the temperature of each heat source below the results
 
 **T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
 
+Resistor temperatures from a thermal export are not accurate yet: the heat source of a resistor sits in the silicon at the height of Activ, not in polysilicon on oxide, so the resistor comes out too cool.
+
 The temperatures include the heat of all devices in the model. For the self-heating of one device alone, run the model with only its power set.
 
 Without the GUI: `python -m setupEM.thermal_results <model>.tsimcfg` prints the table and writes the same file.
