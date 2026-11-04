@@ -2611,6 +2611,10 @@ class CreateModelTab(CreateModelTabBase):
 
             self.write_model_code(pymodel_filename, code)
             confirmed_paths.add(normalized_path)
+            # the settings also as <model>.simcfg / .tsimcfg next to it (write_model_config)
+            config_path = self.MainWindow.write_model_config(pymodel_filename)
+            if config_path:
+                self.log_area.appendPlainText(f"Settings saved with it: {config_path}")
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter

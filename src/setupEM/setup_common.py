@@ -4646,7 +4646,10 @@ class MainWindowBase(QMainWindow):
                     else:
                         # a model script for the same layout has the settings made in setupEM since
                         script = self._model_script_for_config(file_path, data)
-                        choice = self._ask_continue_with_script(file_path, script) if script else "config"
+                        if script and self._written_with(file_path, data, script):
+                            choice = "script"       # Create Model wrote the config with this script: no question
+                        else:
+                            choice = self._ask_continue_with_script(file_path, script) if script else "config"
                         if choice == "cancel":
                             return
                         if choice == "script":
@@ -5044,9 +5047,9 @@ class MainWindowBase(QMainWindow):
     # ---------- Update a script edited in place from a settings file of the same layout ----------
     # A layout tool (e.g. the KLayout plug-in klayout_em_export) writes the GDS file and a settings file next to
     # it, and writes both again when the layout changes. The model script holds everything set later (Create Model
-    # writes the script, not the settings file). So the settings that belong to the layout (ports, GDS file,
-    # stackup, cell, purpose) come from the settings file, everything else stays as in the script. See
-    # config_update.py.
+    # also copies the settings to <model>.simcfg, write_model_config). So the settings that belong to the layout
+    # (ports, GDS file, stackup, cell, purpose) come from the settings file, everything else stays as in the
+    # script. See config_update.py.
 
     def config_update_supported(self):
         """Hook: True if this app can update a script edited in place from its settings file."""
@@ -5099,9 +5102,9 @@ class MainWindowBase(QMainWindow):
 
     def _model_script_for_config(self, file_path, data):
         """The newest model script for the settings file's layout that can be edited in place, else None. It holds
-        the settings made in setupEM after the settings file was last saved (Create Model writes the script); the
-        settings file itself is written again by the layout tool on every export, so it is usually the newer
-        file and its age says nothing."""
+        the settings made in setupEM after the settings file was last saved (it is the model; Create Model copies
+        its settings to <model>.simcfg); the settings file itself is written again by the layout tool on every
+        export, so it is usually the newer file and its age says nothing."""
         saved = data.get("saved_values") or {}
         gds = saved.get("GdsFile")
         if not gds:
@@ -5115,6 +5118,39 @@ class MainWindowBase(QMainWindow):
             if not self._in_place_problem(script):
                 return script
         return None
+
+    @staticmethod
+    def _written_with(file_path, data, script):
+        """True if Create Model wrote the settings file together with script (write_model_config): same folder, its
+        "written_with" names the script. A layout tool's export keeps that key when it updates the file."""
+        return (data.get("written_with") == os.path.basename(script) and
+                os.path.normcase(os.path.dirname(os.path.abspath(file_path))) ==
+                os.path.normcase(os.path.dirname(os.path.abspath(script))))
+
+    def write_model_config(self, script_path):
+        """Write <model>.simcfg / .tsimcfg next to the model script Create Model wrote, with the settings of Save
+        Config, so that a layout tool's next export keeps them and the KLayout plug-in finds the stackup, datatypes
+        and thermal objects of the layout. The script stays the model; the file is a copy of the settings. Overwrites
+        only a settings file of this application (its own, or the layout tool's export file of the same name), never
+        another file. Returns the path written, or None."""
+        path = os.path.splitext(script_path)[0] + "." + self.CONFIG_SUFFIX
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                return None
+            if not isinstance(existing, dict) or existing.get("application") != self.APP_NAME:
+                return None
+        struct = {"application": self.APP_NAME, "data_format": "1.0", "saved_values": self.saved_values,
+                  "written_with": os.path.basename(script_path)}
+        struct.update(self.native_config_extra_struct())
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(struct, f, indent=4)
+        except OSError:
+            return None
+        return path
 
     def _ask_continue_with_script(self, file_path, script):
         """A model script exists for the settings file's layout: "script", "config" or "cancel"."""

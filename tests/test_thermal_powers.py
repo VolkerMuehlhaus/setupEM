@@ -139,3 +139,33 @@ def test_elmer_environment(monkeypatch):
     assert setupthermal.elmer_environment().value("HWLOC_COMPONENTS") == "-gl"
     monkeypatch.setenv("HWLOC_COMPONENTS", "-cuda")
     assert setupthermal.elmer_environment().value("HWLOC_COMPONENTS") == "-cuda"
+
+
+def test_create_model_writes_config(app, monkeypatch, export, tmp_path):
+    """Create Model writes <model>.tsimcfg next to the model script (the settings of Save Config, written_with the
+    script): the layout tool's next export keeps them, the KLayout plug-in finds the layout's stackup and thermal
+    objects. Opening it continues the script without asking; a foreign file of that name is not overwritten."""
+    win, setupthermal, shown = open_window(monkeypatch, export)
+    tab = win.create_model_tab
+    monkeypatch.setattr(tab.process, "start", lambda *a: None)
+    tab.create_model()
+    # the model goes where Create Model puts it: here next to the export's .tsimcfg, which it updates
+    import pathlib
+    folder, name = pathlib.Path(win.saved_values["sim_path"]), win.saved_values["model_basename"]
+    script, config = folder / (name + ".py"), folder / (name + ".tsimcfg")
+    assert script.is_file() and config.is_file(), (shown, tab.log_area.toPlainText()[-600:])
+    data = json.loads(config.read_text())
+    assert data["application"] == "setupThermal" and data["written_with"] == name + ".py"
+    assert sorted(t["source_layernum"] for t in data["thermal"]) == sorted(LAYERS + [201])
+    assert "Settings saved with it" in tab.log_area.toPlainText()
+
+    asked = []
+    monkeypatch.setattr(type(win), "_ask_continue_with_script", lambda self, *a: asked.append(a) or "cancel")
+    win.load_configuration_from_file(str(config))
+    assert not asked, "setupThermal loads the config as before (the script-or-config question is setupEM's)"
+
+    config.write_text(json.dumps({"application": "something else"}))
+    tab.create_model()
+    assert json.loads(config.read_text()) == {"application": "something else"}, "a foreign file stays"
+    win._script_dirty = False
+    win.close()

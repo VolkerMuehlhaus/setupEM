@@ -7,6 +7,7 @@ setupThermal works with the thermal export of the KLayout plug-in klayout_em_exp
 - **Temperature per device**: after a run, the log lists the average and peak temperature of each heat source and their rise above the fixed temperature, and `<model>_temperatures.csv` next to the model script has the same per instance. Command line: `python -m setupEM.thermal_results <model>.tsimcfg`.
 
 **Changes:**
+- **Create Model also writes the settings file**, `<model>.simcfg` / `<model>.tsimcfg` next to the model script (as Save Config would), so that a layout tool's next export keeps your settings and the KLayout plug-in finds the layout's stackup, datatypes and thermal objects. It overwrites only a settings file of the same application. Opening a `.simcfg` that Create Model wrote with a script continues that script without asking.
 - The Mesh tab's "Mesh refinement at metal edges" is now **"Mesh size at heat sources"**, which is what it sets in a thermal model (metal edges are not refined there).
 
 **Fixes:**

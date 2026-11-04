@@ -316,7 +316,7 @@ Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If Pa
 
 ## File menu
 
-Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
+Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Create Model also writes the settings to `<model>.simcfg` / `<model>.tsimcfg` next to the model script, so that a layout tool's next export keeps them and the KLayout plug-in finds the layout's stackup, datatypes and thermal objects; it overwrites only a settings file of the same application. The script stays the model. Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
 
 **Open Recent** lists your last 10 files of each kind for quick reopening, in three sections: configs, imported \*.py models and \*.py models edited in place. Saving a config file adds it to the list too. A file reopens the same way it was opened before. "Clear Recent Files" empties all three sections.
 
@@ -343,11 +343,11 @@ When you import a script that setupEM didn't write, a bar below the menu offers 
 
 #### After a new export from the layout tool
 
-A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg` next to it, and writes both again when you change the layout: same file names, new ports. The ports are numbered 1, 2, 3, ... without gaps, so a new or removed port can shift the numbers of others. Your model script still has the old ports, and the settings you made in setupEM since (frequencies, mesh, ...) are only in the script: Create Model writes the script, not the `.simcfg`.
+A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg` next to it, and writes both again when you change the layout: same file names, new ports. The ports are numbered 1, 2, 3, ... without gaps, so a new or removed port can shift the numbers of others. Your model script still has the old ports. The settings you made in setupEM since (frequencies, mesh, ...) are in the script, and in the `.simcfg` only if Create Model wrote that file with the script.
 
 setupEM therefore takes from the `.simcfg` only what belongs to the layout: the ports, GDSII file, stackup, cell and purpose. Everything else stays as in the script, including your own code. As always when editing in place, Create Model or **File > Save** writes the changes into the script.
 
-- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before).
+- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before). If Create Model wrote that `.simcfg` together with the script, setupEM continues with the script without asking.
 - **Loading the `.simcfg` while editing a script in place:** setupEM lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**.
 - **While editing a script in place**, when a `.simcfg` for the same GDSII file is newer than the script and has other ports or layout settings, the bar below the menu says so, with **Update from it**.
 
