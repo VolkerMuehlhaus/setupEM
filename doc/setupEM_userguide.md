@@ -446,7 +446,7 @@ Choose the value from the smallest heat source. An npn's heat areas are its emit
 
 After a run, the log lists the temperature of each heat source below the results summary, and setupThermal writes the same table to `<model>_temperatures.csv` next to the model script. For a thermal export from the KLayout plug-in, each row carries the device's schematic instance name, so the temperatures can go back to the circuit simulation.
 
-**T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating. For an npn13G2 with 8 fingers and a converged mesh, it gave about 25 % more temperature rise than the `rth` of IHP's model; the reason is not known yet. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
+**T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
 
 The temperatures include the heat of all devices in the model. For the self-heating of one device alone, run the model with only its power set.
 
