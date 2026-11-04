@@ -108,6 +108,8 @@ AWS Palace is not used/required in thermal workflow, although we use the same gd
 
 **Powers from a circuit simulation.** The thermal export of the KLayout EM Export plug-in makes one heat source per transistor and resistor and writes `<layout>_thermalmap.json` next to the GDSII file, which says which device each heat source layer belongs to and, from LVS, its schematic instance name. The Thermal Sources + Boundaries list then shows that name next to each heat source, and **Load powers...** below the list sets the powers from a file of your circuit simulation: one line per device with the instance name (as in the LVS netlist, e.g. `Q1` or `Xcore.Q1`) and the power in W, separated by a comma, semicolon, tab or spaces (`Xcore.Q1, 2.5m`). Heat sources without a power keep theirs; names that match no heat source, or several, are listed and not used. Without setupThermal: `python -m gds2palace.util_thermal_map <layout>_thermalmap.json powers.csv <layout>.tsimcfg`. Needs a gds2palace with `util_thermal_map`.
 
+**Boundary of a thermal export.** The export also writes the outline of the exported region on a layer of its own (201) and, as long as the model has no boundary yet, a constant-temperature row on it without a target layer. The list shows it as "region outline: choose the target layer"; pick the stackup layer where the temperature is fixed (e.g. the substrate backside) and Apply. Create Model refuses a boundary without a target layer.
+
 
 ## User Interface
 

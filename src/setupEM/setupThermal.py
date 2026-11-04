@@ -197,6 +197,7 @@ class PortsTab(QWidget):
         self.target_box.setFixedWidth(150)
         self.target_box.setStyleSheet(COMBO_STYLE_REQUIRED)
         self.target_box.addItems(["XML stackup missing"])
+        self.target_box.setPlaceholderText("choose...")     # a boundary from a thermal export has no target yet
         self.targetlayer_layout.addWidget(self.target_box)
 
         self.targetlayer_layout.addStretch()
@@ -350,6 +351,9 @@ class PortsTab(QWidget):
 
             safe_get_for_lineedit(0,self.sourcelayer_edit,"")
             safe_get_for_combobox(1,self.target_box,0)
+            target = self.thermalobjectslist.item(selected_row, 1)
+            if target is not None and target.text() == "":
+                self.target_box.setCurrentIndex(-1)     # not chosen yet: shown as such, not as the first layer
             safe_get_for_combobox(2,self.thermaltype_box,2)
             safe_get_for_lineedit(3,self.power_edit,"50")
             safe_get_for_lineedit(4,self.temp_edit,"1")
@@ -439,7 +443,7 @@ class PortsTab(QWidget):
         # a thermal export numbers its heat sources past 299 when there are many devices
         gds_layers = self.MainWindow.get_gds_layers_in_range(min([layer_min] + list(used)), max([layer_max] + list(used)))
         update_missing_layer_column(self.thermalobjectslist, source_col=0, comment_col=5, gds_layers_present=gds_layers,
-                                    labels=self._device_labels())
+                                    labels=self._layer_labels())
 
     def _thermal_map_path(self):
         """<layout>_thermalmap.json next to the GDS file (written by the thermal export), or None."""
@@ -448,17 +452,37 @@ class PortsTab(QWidget):
             return None
         return os.path.splitext(gdsfile)[0] + "_thermalmap.json"
 
-    def _device_labels(self):
-        """{heat source layer: instance name or device} from the layout's thermal map, if there is one."""
+    def _layer_labels(self):
+        """{layer: text} for the table: from the layout's thermal map, if there is one, the instance name or device of
+        each heat source and the region outline; for every boundary without a target layer, that it needs one."""
+        labels = {}
         path = self._thermal_map_path()
-        if thermal_map is None or path is None or not os.path.isfile(path):
-            return {}
-        try:
-            sources = thermal_map.read_thermal_map(path)["sources"]
-        except ValueError:
-            return {}
-        return {s["layer"]: (s.get("instance") or s.get("device", "")) + (f" ({s['pcell']})" if s.get("pcell") else "")
-                for s in sources if "layer" in s}
+        if thermal_map is not None and path is not None and os.path.isfile(path):
+            try:
+                tmap = thermal_map.read_thermal_map(path)
+            except ValueError:
+                tmap = {"sources": []}
+            labels = {s["layer"]: (s.get("instance") or s.get("device", "")) +
+                      (f" ({s['pcell']})" if s.get("pcell") else "") for s in tmap["sources"] if "layer" in s}
+            if tmap.get("outline_layer") is not None:
+                labels[tmap["outline_layer"]] = "region outline"
+        for layer in self._boundaries_without_target():
+            labels[layer] = labels.get(layer, "boundary") + ": choose the target layer"
+        return labels
+
+    def _boundaries_without_target(self):
+        """Layer numbers of the constant-temperature rows without a target layer (a thermal export's placeholder)."""
+        layers = []
+        for row in range(self.thermalobjectslist.rowCount()):
+            layer, target, kind = (self.thermalobjectslist.item(row, col) for col in (0, 1, 2))
+            if layer is None or not layer.text() or kind is None or "SOURCE" in kind.text().upper():
+                continue
+            if target is None or not target.text().strip():
+                try:
+                    layers.append(int(layer.text()))
+                except ValueError:
+                    pass
+        return layers
 
     def load_powers(self):
         """Set the heat sources' powers from a powers file of a circuit simulation, matched by instance name through
@@ -885,6 +909,15 @@ class CreateModelTab(CreateModelTabBase):
         # Request all tabs to save values again,
         # which can do some update to saved_values
         self.MainWindow.save_all_tabs()
+
+        # a boundary without a target layer (the placeholder of a thermal export) has no height to mesh at
+        missing_target = [o.source_layernum for o in thermal_objects.objects
+                          if isinstance(o, simulation_setup.constanttemp) and not (o.target_layername or "").strip()]
+        if missing_target:
+            QMessageBox.warning(self, "Error", "Model incomplete: the constant temperature boundary on layer " +
+                                ", ".join(map(str, missing_target)) + " has no target layer. Choose the stackup "
+                                "layer where the temperature is fixed (for example the substrate backside) and Apply.")
+            return
 
         # check if we have at leat one thermal source and one constant temp boundary
         thermal_source_exists = False

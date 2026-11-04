@@ -1,7 +1,8 @@
 # GUI test (offscreen): setupThermal's "Load powers..." on a thermal export of the KLayout EM Export plug-in. The
 # powers of a circuit simulation are matched to the heat sources by instance name through <layout>_thermalmap.json
-# (gds2palace thermal_map); what does not match is reported, not set. The table names the device of each heat source,
-# and a heat source layer past 299 (many devices) counts as present in the layout.
+# (gds2palace thermal_map); what does not match is reported, not set. The table names the device of each heat source
+# and the region outline, and a heat source layer past 299 (many devices) counts as present in the layout. The export's
+# placeholder boundary (no target layer) is listed as such and stops Create Model until a target is chosen.
 #
 # Run from the repo root:   python -m pytest tests
 
@@ -46,7 +47,8 @@ def export(tmp_path):
     sources = [{"layer": layer, "device": f"dev{n}@{n},0", "pcell": "npn13G2" if "Q" in name else "rhigh",
                 "instance": name, "lvs_name": "CORE." + name[-1] if "CORE" in name else name[1:]}
                for n, (layer, name) in enumerate(zip(LAYERS, NAMES))]
-    (tmp_path / "cascode_thermal_thermalmap.json").write_text(json.dumps({"format": 1, "sources": sources}))
+    (tmp_path / "cascode_thermal_thermalmap.json").write_text(json.dumps({"format": 1, "outline_layer": 201,
+                                                                                 "sources": sources}))
     tsimcfg = tmp_path / "cascode_thermal.tsimcfg"
     tsimcfg.write_text(json.dumps({
         "application": "setupThermal", "data_format": "1.0",
@@ -58,7 +60,7 @@ def export(tmp_path):
     return tsimcfg
 
 
-def load(app, monkeypatch, tsimcfg, powers_text):
+def open_window(monkeypatch, tsimcfg):
     import setupEM.setupThermal as setupthermal
     shown = []
     for name in ("information", "warning", "critical"):
@@ -66,6 +68,11 @@ def load(app, monkeypatch, tsimcfg, powers_text):
     win = setupthermal.MainWindow()
     monkeypatch.setattr(win, "_add_recent_file", lambda *a: None)
     win.load_configuration_from_file(str(tsimcfg))
+    return win, setupthermal, shown
+
+
+def load(app, monkeypatch, tsimcfg, powers_text):
+    win, setupthermal, shown = open_window(monkeypatch, tsimcfg)
     powers = tsimcfg.parent / "powers.csv"
     powers.write_text(powers_text)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(powers), "")))
@@ -97,6 +104,29 @@ def test_load_powers(app, monkeypatch, export):
 def test_device_names_and_layers_past_299(app, monkeypatch, export):
     win, _, shown = load(app, monkeypatch, export, "\n".join(f"{n},1m" for n in NAMES))
     assert shown == ["5 of 5 heat source(s) got a power."]
-    assert column(win, 5) == ["R1 (rhigh)", "R2 (rhigh)", "R3 (rhigh)", "XCORE.Q1 (npn13G2)", "XCORE.Q2 (npn13G2)", ""]
+    assert column(win, 5) == ["R1 (rhigh)", "R2 (rhigh)", "R3 (rhigh)", "XCORE.Q1 (npn13G2)", "XCORE.Q2 (npn13G2)",
+                              "region outline"]
+    win._script_dirty = False
+    win.close()
+
+
+def test_placeholder_boundary(app, monkeypatch, export):
+    cfg = json.loads(export.read_text())
+    cfg["thermal"][-1]["target_layername"] = ""         # as the export writes it
+    export.write_text(json.dumps(cfg))
+    win, setupthermal, shown = open_window(monkeypatch, export)
+    tab = win.thermal_tab
+    boundary = len(LAYERS)
+    assert column(win, 1)[boundary] == "" and column(win, 5)[boundary] == "region outline: choose the target layer"
+    tab.thermalobjectslist.selectRow(boundary)
+    assert tab.target_box.currentIndex() == -1, "an unchosen target is shown as such, not as the first layer"
+    started = []
+    monkeypatch.setattr(win.create_model_tab.process, "start", lambda *a: started.append(a))
+    shown.clear()
+    win.create_model_tab.create_model()
+    assert not started and len(shown) == 1 and "boundary on layer 201 has no target layer" in shown[0]
+    tab.target_box.setCurrentIndex(tab.target_box.findText("Activ"))
+    tab.apply_port_values_to_table()
+    assert column(win, 1)[boundary] == "Activ" and column(win, 5)[boundary] == "region outline"
     win._script_dirty = False
     win.close()
