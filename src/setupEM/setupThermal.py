@@ -44,6 +44,10 @@ _dev_gds2palace_dir = os.path.abspath(os.path.join(
 if os.path.isdir(os.path.join(_dev_gds2palace_dir, 'gds2palace')):
     sys.path.insert(0, _dev_gds2palace_dir)
 from gds2palace import *
+try:
+    from gds2palace import util_thermal_map as thermal_map   # powers through a thermal export's map (Load powers)
+except ImportError:     # an older gds2palace
+    thermal_map = None
 
 # shared building blocks used by both setupEM.py and setupThermal.py
 # __package__ is None/"" when this file is run directly (e.g. `python setupThermal.py`)
@@ -146,6 +150,20 @@ class PortsTab(QWidget):
 
         self.thermalobjectslist.setRowCount(32)
         self.thermalobjectslist.selectRow(0)
+
+        # powers per device from a circuit simulation, through the map of a thermal export (KLayout EM Export)
+        self.powers_layout = QHBoxLayout()
+        self.powers_layout.addStretch()
+        self.load_powers_button = QPushButton(text="Load powers...")
+        self.load_powers_button.setToolTip(
+            "Set the powers of the heat sources from a file of your circuit simulation (instance name, power in W), "
+            "through the <layout>_thermalmap.json of a thermal export from KLayout")
+        self.load_powers_button.clicked.connect(self.load_powers)
+        if thermal_map is None:
+            self.load_powers_button.setEnabled(False)
+            self.load_powers_button.setToolTip("Needs a newer gds2palace (with util_thermal_map)")
+        self.powers_layout.addWidget(self.load_powers_button)
+        self.bottom_layout.addLayout(self.powers_layout)
 
 
         # details is top group
@@ -414,10 +432,82 @@ class PortsTab(QWidget):
 
     def refresh_missing_layer_annotations(self):
         """Flag any thermal object row whose source layer has no geometry in
-        the currently loaded GDS - see update_missing_layer_column()."""
+        the currently loaded GDS - see update_missing_layer_column() - and name
+        the device of each heat source if the layout has a thermal map."""
         layer_min, layer_max = self._port_layer_range()
-        gds_layers = self.MainWindow.get_gds_layers_in_range(layer_min, layer_max)
-        update_missing_layer_column(self.thermalobjectslist, source_col=0, comment_col=5, gds_layers_present=gds_layers)
+        used = self._used_source_layers()
+        # a thermal export numbers its heat sources past 299 when there are many devices
+        gds_layers = self.MainWindow.get_gds_layers_in_range(min([layer_min] + list(used)), max([layer_max] + list(used)))
+        update_missing_layer_column(self.thermalobjectslist, source_col=0, comment_col=5, gds_layers_present=gds_layers,
+                                    labels=self._device_labels())
+
+    def _thermal_map_path(self):
+        """<layout>_thermalmap.json next to the GDS file (written by the thermal export), or None."""
+        gdsfile = self.MainWindow.file_tab.gds_file_edit.text()
+        if not gdsfile:
+            return None
+        return os.path.splitext(gdsfile)[0] + "_thermalmap.json"
+
+    def _device_labels(self):
+        """{heat source layer: instance name or device} from the layout's thermal map, if there is one."""
+        path = self._thermal_map_path()
+        if thermal_map is None or path is None or not os.path.isfile(path):
+            return {}
+        try:
+            sources = thermal_map.read_thermal_map(path)["sources"]
+        except ValueError:
+            return {}
+        return {s["layer"]: (s.get("instance") or s.get("device", "")) + (f" ({s['pcell']})" if s.get("pcell") else "")
+                for s in sources if "layer" in s}
+
+    def load_powers(self):
+        """Set the heat sources' powers from a powers file of a circuit simulation, matched by instance name through
+        the thermal map (gds2palace thermal_map), and report what did not match."""
+        map_path = self._thermal_map_path()
+        start = os.path.dirname(map_path) if map_path else ""
+        if map_path is None or not os.path.isfile(map_path):
+            map_path, _ = QFileDialog.getOpenFileName(self, "Thermal map of the layout", start,
+                                                      "Thermal map (*_thermalmap.json);;JSON (*.json)")
+            if not map_path:
+                return
+        try:
+            tmap = thermal_map.read_thermal_map(map_path)
+        except ValueError as e:
+            QMessageBox.warning(self, "Load powers", str(e))
+            return
+        powers_path, _ = QFileDialog.getOpenFileName(self, "Powers from the circuit simulation", start,
+                                                     "Powers (*.csv *.txt);;All files (*)")
+        if not powers_path:
+            return
+        try:
+            powers, problems = thermal_map.read_powers(powers_path)
+        except (OSError, UnicodeDecodeError) as e:
+            QMessageBox.warning(self, "Load powers", f"{powers_path} cannot be read: {e}")
+            return
+        layer_power, report = thermal_map.apply_powers(tmap, powers)
+        in_table = set()
+        for row in range(self.thermalobjectslist.rowCount()):
+            layer, kind = self.thermalobjectslist.item(row, 0), self.thermalobjectslist.item(row, 2)
+            if layer is None or kind is None or "SOURCE" not in kind.text().upper():
+                continue
+            try:
+                layernum = int(layer.text())
+            except ValueError:
+                continue
+            if layernum in layer_power:
+                self.thermalobjectslist.setItem(row, 3, QTableWidgetItem(str(layer_power[layernum])))
+                in_table.add(layernum)
+        lines = thermal_map.describe_report(report, len(tmap["sources"]))
+        missing = sorted(set(layer_power) - in_table)
+        if missing:
+            lines.append("Not in the table as heat sources (no power set): layer " + ", ".join(map(str, missing)))
+        lines += problems
+        self.get_port_values_from_table()
+        self.refresh_missing_layer_annotations()
+        if len(lines) > 1:
+            QMessageBox.warning(self, "Load powers", "\n\n".join(lines))
+        else:
+            QMessageBox.information(self, "Load powers", lines[0])
 
     def showEvent(self, event):
         super().showEvent(event)

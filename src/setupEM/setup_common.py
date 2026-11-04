@@ -560,10 +560,11 @@ def ensure_table_rows(table, used):
         table.setRowCount(rows)
 
 
-def update_missing_layer_column(table, source_col, comment_col, gds_layers_present):
+def update_missing_layer_column(table, source_col, comment_col, gds_layers_present, labels=None):
     """Set comment_col to "(missing in layout)" for every row whose
     source_col holds a layer number not in gds_layers_present, and clear it
-    otherwise. Purely a computed display hint, not real row data - existing
+    otherwise. labels: {layer number: text} shown in front of that (setupThermal:
+    the device of a heat source, from a thermal export's map). Purely a computed display hint, not real row data - existing
     save/export logic in both apps' Ports/Thermal tabs only ever reads
     source_col and the columns before it, so writing into this trailing
     (already otherwise-unused) column doesn't affect anything else.
@@ -579,6 +580,8 @@ def update_missing_layer_column(table, source_col, comment_col, gds_layers_prese
             else:
                 if layernum not in gds_layers_present:
                     comment = "(missing in layout)"
+                if labels and layernum in labels:
+                    comment = (labels[layernum] + " " + comment).strip()
         existing = table.item(row, comment_col)
         if existing is None or existing.text() != comment:
             table.setItem(row, comment_col, QTableWidgetItem(comment))
