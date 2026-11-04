@@ -434,7 +434,7 @@ A model needs **both** a source and a constant-temperature boundary to be solvab
 
 ### Mesh tab (setupThermal)
 
-**Mesh size at heat sources** sets the mesh in a box around each heat source: the source plus this distance on each side. Away from the sources, the mesh grows slowly to **Mesh cell maximum size** (default 50 µm): the cell size grows by 0.3 µm per µm of distance. Unlike in setupEM, metal edges are not refined: a thermal model needs its fine mesh where the heat is generated.
+**Mesh size at heat sources** sets the mesh in a box around each heat source: the source plus this distance on each side. Away from the sources, the mesh grows slowly to **Mesh cell maximum size**: the cell size grows by 0.3 µm per µm of distance. Unlike in setupEM, metal edges are not refined: a thermal model needs its fine mesh where the heat is generated.
 
 Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. The slow growth matters as much as the small value: the temperature falls steeply next to a small source, and a mesh that grows too fast there gives too low a temperature. For an npn13G2 with 8 fingers at 0.25 µm, the temperature rise came out about 20 % too low when the mesh grew to the maximum size within 30 times the mesh size.
 

@@ -694,7 +694,7 @@ class MeshTab(QWidget):
         self.label6 = QLabel("Mesh cell maximum size")
         self.label6.setFixedWidth(label_width)
         self.cells_maxsize_layout.addWidget(self.label6)
-        self.cells_maxsize_edit = QLineEdit("50")
+        self.cells_maxsize_edit = QLineEdit("100")
         self.cells_maxsize_edit.setFixedWidth(edit_width)
         self.cells_maxsize_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
         self.cells_maxsize_layout.addWidget(self.cells_maxsize_edit)
@@ -766,7 +766,7 @@ class MeshTab(QWidget):
             value = float(self.cells_maxsize_edit.text())
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value for max. meshsize")
-            self.cells_maxsize_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "meshsize_max", "50")))
+            self.cells_maxsize_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "meshsize_max", "100")))
             return False
         saved_values ["meshsize_max"] = float(value)
 
@@ -789,7 +789,7 @@ class MeshTab(QWidget):
     def load_values(self):
         app_name = self.MainWindow.APP_NAME
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize", get_preference(app_name, "refined_cellsize", "5"))))
-        self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max", get_preference(app_name, "meshsize_max", "50"))))
+        self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max", get_preference(app_name, "meshsize_max", "100"))))
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "100"))))
 
         if saved_values.get("iterative", False):
@@ -1360,7 +1360,7 @@ class PreferencesDialog(QDialog):
         mesh_form = QVBoxLayout(mesh_widget)
         mesh_form.setAlignment(Qt.AlignTop)
         self.refined_cellsize_edit = add_row(mesh_form, "Mesh size at heat sources (µm)", "refined_cellsize", "5")
-        self.meshsize_max_edit = add_row(mesh_form, "Mesh cell maximum size (µm)", "meshsize_max", "50")
+        self.meshsize_max_edit = add_row(mesh_form, "Mesh cell maximum size (µm)", "meshsize_max", "100")
         self.margin_edit = add_row(mesh_form, "Dielectric stackup oversize margin (µm)", "margin", "100")
         mesh_form.addStretch()
         self.tabs.addTab(mesh_widget, "Mesh")
