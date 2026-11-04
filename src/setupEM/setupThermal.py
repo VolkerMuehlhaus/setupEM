@@ -62,7 +62,8 @@ if __package__ in (None, ""):
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
-    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
+        device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from script_model import ScriptModel
 else:
     from .setup_common import (
@@ -74,7 +75,8 @@ else:
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
-    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
+        device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from .script_model import ScriptModel
 
 
@@ -847,6 +849,31 @@ class CreateModelTab(CreateModelTabBase):
 
         summary = build_thermal_summary(run_path, source_lines=source_lines)
         self.log_area.appendPlainText("\n" + summary + "\n")
+        self._append_device_temperatures(run_path)
+
+    def _append_device_temperatures(self, run_path):
+        """The temperature per heat source (with the instance names of a thermal export), in the log and as
+        <model>_temperatures.csv next to the model script: the temperatures back to the circuit simulation."""
+        thermal = [{"type": o.type, "source_layernum": o.source_layernum, "power": getattr(o, "power", None),
+                    "temp": getattr(o, "temp", None)} for o in thermal_objects.objects]
+        map_path = self.MainWindow.thermal_tab._thermal_map_path()
+        try:
+            rows, t_ref = device_temperatures(run_path, thermal, read_thermal_map(map_path) if map_path else None)
+        except Exception as e:      # an unreadable result must not hide the summary above
+            self.log_area.appendPlainText(f"Temperature per heat source not available: {e}\n")
+            return
+        if not rows:
+            return
+        lines = ["=== Temperature per heat source ==="] + format_temperature_table(rows)
+        if t_ref is not None:
+            lines.append(f"T mean: average over the heat source, T max: its hottest point; dT relative to {t_ref:g} K")
+        csv_path = os.path.join(self.MainWindow.saved_values["sim_path"], self.run_basename() + "_temperatures.csv")
+        try:
+            write_temperatures_csv(csv_path, rows, t_ref)
+            lines.append(f"Written to {csv_path}")
+        except OSError as e:
+            lines.append(f"Could not write {csv_path}: {e}")
+        self.log_area.appendPlainText("\n".join(lines) + "\n")
 
     def on_finished(self, exit_code, exit_status):
         super().on_finished(exit_code, exit_status)

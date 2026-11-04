@@ -33,6 +33,7 @@ Document version: 2026-10-31
 &ensp;[Differences from setupEM](#differences-from-setupem)  
 &ensp;[Thermal Sources + Boundaries tab](#thermal-sources--boundaries-tab)  
 &ensp;[Mesh tab](#mesh-tab-setupthermal)  
+&ensp;[Temperature per device](#temperature-per-device-setupthermal)  
 [The Stackup Editor](#the-stackup-editor)  
 &ensp;[Launching the editor](#launching-the-editor)  
 &ensp;[Variables tab](#variables-tab)  
@@ -438,6 +439,16 @@ A model needs **both** a source and a constant-temperature boundary to be solvab
 Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. For an npn13G2 with 8 fingers, its average temperature stopped changing at 0.25 µm or finer; at 2 µm it came out about 20 % too low.
 
 **Solver** chooses Elmer's direct or iterative solver. There is no adaptive mesh refinement: a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
+
+### Temperature per device (setupThermal)
+
+After a run, the log lists the temperature of each heat source below the results summary, and setupThermal writes the same table to `<model>_temperatures.csv` next to the model script. For a thermal export from the KLayout plug-in, each row carries the device's schematic instance name, so the temperatures can go back to the circuit simulation.
+
+**T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating: for an npn13G2 with 8 fingers, the average gave a thermal resistance close to the `rth` of IHP's model. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
+
+The temperatures include the heat of all devices in the model. For the self-heating of one device alone, run the model with only its power set.
+
+Without the GUI: `python -m setupEM.thermal_results <model>.tsimcfg` prints the table and writes the same file.
 
 ## The Stackup Editor
 

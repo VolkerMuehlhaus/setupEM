@@ -110,6 +110,8 @@ AWS Palace is not used/required in thermal workflow, although we use the same gd
 
 **Boundary of a thermal export.** The export also writes the outline of the exported region on a layer of its own (201) and, as long as the model has no boundary yet, a constant-temperature row on it without a target layer. The list shows it as "region outline: choose the target layer"; pick the stackup layer where the temperature is fixed (e.g. the substrate backside) and Apply. Create Model refuses a boundary without a target layer.
 
+**Temperature per device.** After each run, setupThermal lists the temperature of every heat source below the results summary and writes it to `<model>_temperatures.csv` next to the model script: instance name (from the thermal map), device, layer, power, the average temperature over the heat source and its hottest point, and both as rise above the fixed temperature of the model (for a circuit simulator's temperature rise per instance, e.g. `trise` / `dtemp`). Without setupThermal: `python -m setupEM.thermal_results <model>.tsimcfg`.
+
 
 ## User Interface
 
