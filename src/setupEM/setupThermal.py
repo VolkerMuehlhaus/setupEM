@@ -672,7 +672,11 @@ class MeshTab(QWidget):
         self.mesh_layout = QVBoxLayout()
 
         self.refinement_layout = QHBoxLayout()
-        self.label2 = QLabel("Mesh refinement at metal edges")
+        self.label2 = QLabel("Mesh size at heat sources")
+        self.label2.setToolTip("The mesh size in a box around each heat source (the source plus this distance on "
+                               "each side); away from the sources the mesh grows to the maximum size. Metal edges are "
+                               "not refined in thermal models. Choose it from the smallest heat source, e.g. an npn's "
+                               "emitter fingers.")
         self.label2.setFixedWidth(label_width)
         self.refinement_layout.addWidget(self.label2)
         self.refinement_edit = QLineEdit("5")
@@ -751,7 +755,7 @@ class MeshTab(QWidget):
         try:
             value = float(self.refinement_edit.text())
         except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for mesh refinement")
+            QMessageBox.warning(self, "Error", "Not a valid value for the mesh size at heat sources")
             self.refinement_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "refined_cellsize", "5")))
             return False
         saved_values ["refined_cellsize"] = float(value)
@@ -1324,7 +1328,7 @@ class PreferencesDialog(QDialog):
         mesh_widget = QWidget()
         mesh_form = QVBoxLayout(mesh_widget)
         mesh_form.setAlignment(Qt.AlignTop)
-        self.refined_cellsize_edit = add_row(mesh_form, "Mesh refinement at metal edges (µm)", "refined_cellsize", "5")
+        self.refined_cellsize_edit = add_row(mesh_form, "Mesh size at heat sources (µm)", "refined_cellsize", "5")
         self.meshsize_max_edit = add_row(mesh_form, "Mesh cell maximum size (µm)", "meshsize_max", "100")
         self.margin_edit = add_row(mesh_form, "Dielectric stackup oversize margin (µm)", "margin", "100")
         mesh_form.addStretch()
