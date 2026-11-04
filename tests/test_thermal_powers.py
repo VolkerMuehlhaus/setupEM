@@ -169,3 +169,46 @@ def test_create_model_writes_config(app, monkeypatch, export, tmp_path):
     assert json.loads(config.read_text()) == {"application": "something else"}, "a foreign file stays"
     win._script_dirty = False
     win.close()
+
+
+def test_refined_cellsize_override(app, monkeypatch, export):
+    """The Mesh tab's Advanced... sets a mesh size per heat source (source_<layer>) or metal layer. It is written to
+    the model script only when set, and comes back from the config file."""
+    win, setupthermal, shown = open_window(monkeypatch, export)
+    chosen = {}
+
+    class FakeDialog:
+        def __init__(self, parent, layer_choices, current_overrides, info_text=""):
+            chosen["choices"], chosen["current"] = layer_choices, current_overrides
+
+        def exec(self):
+            return setupthermal.QDialog.Accepted
+
+        def get_overrides(self):
+            return chosen["result"]
+
+    monkeypatch.setattr(setupthermal, "RefinedCellsizeOverrideDialog", FakeDialog)
+    mesh = win.mesh_tab
+    chosen["result"] = [["source_205", 0.25], ["Metal1", 1.0]]
+    mesh.open_refined_cellsize_override_dialog()
+    assert chosen["choices"][:len(LAYERS)] == [f"source_{layer}" for layer in LAYERS], "heat sources, not boundaries"
+    assert "Metal1" in chosen["choices"] and mesh.refined_override_btn.text() == "Advanced... (2)"
+
+    assert win.save_all_tabs()
+    win.modeleditor_tab.create_model_text()
+    script = win.modeleditor_tab.model_edit.toPlainText()
+    assert "settings['refined_cellsize_override'] = [['source_205', 0.25], ['Metal1', 1.0]]" in script
+
+    win.saved_values["refined_cellsize_override"] = [["source_301", 0.5]]
+    mesh.load_values()
+    assert mesh.refined_override_btn.text() == "Advanced... (1)"
+
+    chosen["result"] = []
+    mesh.open_refined_cellsize_override_dialog()
+    assert chosen["current"] == [["source_301", 0.5]] and mesh.refined_override_btn.text() == "Advanced..."
+    assert win.save_all_tabs() and "refined_cellsize_override" not in win.saved_values
+    win.modeleditor_tab.model_edit.clear()
+    win.modeleditor_tab.create_model_text()
+    assert "settings['refined_cellsize_override']" not in win.modeleditor_tab.model_edit.toPlainText()
+    win._script_dirty = False
+    win.close()

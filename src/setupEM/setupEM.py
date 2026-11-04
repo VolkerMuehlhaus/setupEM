@@ -54,7 +54,7 @@ if __package__ in (None, ""):
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -71,7 +71,7 @@ else:
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -872,130 +872,6 @@ class PortsTab(QWidget):
         self.portslist.selectRow(1)
         self.portslist.selectRow(0)
 
-
-
-class RefinedCellsizeOverrideDialog(QDialog):
-    """Popup editor for settings['refined_cellsize_override'], opened from
-    MeshTab's "Advanced..." button. Lets the user set a different mesh
-    refinement cell size for specific metal/sheet layers, instead of the
-    single global "Mesh refinement at metal edges" value. The Layer column
-    is restricted to metals_list.getallplanarmetals() (conductor/sheet
-    layers) - vias and dielectrics never produce boundary curves in
-    gds2palace's meshing code, so a name outside that list would silently
-    have no effect if it were allowed to be typed in.
-    """
-
-    def __init__(self, parent, layer_choices, current_overrides):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        self.setWindowTitle("Mesh Refinement Overrides")
-        self.resize(420, 400)
-        self.setModal(True)
-
-        self._layer_choices = layer_choices
-        self._result = []
-
-        layout = QVBoxLayout()
-
-        info = QLabel("Override the mesh refinement cell size for specific layers\n"
-                      "(all other layers keep using the default set above).")
-        layout.addWidget(info)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Layer", "Cell size (µm)", ""])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self.table)
-
-        for name, value in current_overrides:
-            self._add_row(name, value)
-
-        add_row_layout = QHBoxLayout()
-        add_btn = QPushButton("+ Add Row")
-        add_btn.clicked.connect(lambda: self._add_row())
-        add_row_layout.addWidget(add_btn)
-        add_row_layout.addStretch()
-        layout.addLayout(add_row_layout)
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        ok_btn = QPushButton("OK")
-        ok_btn.clicked.connect(self._on_ok)
-        button_layout.addWidget(ok_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
-        layout.addLayout(button_layout)
-
-        self.setLayout(layout)
-
-    def _add_row(self, name="", value=""):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-
-        combo = QComboBox()
-        combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
-        combo.addItem("")
-        combo.addItems(self._layer_choices)
-        if name and name not in self._layer_choices:
-            # tolerate a saved override for a layer no longer in the current
-            # stackup, same tolerant style as the Cellname combo box
-            combo.addItem(name)
-        if name:
-            combo.setCurrentText(name)
-        self.table.setCellWidget(row, 0, combo)
-
-        value_text = "" if value == "" else str(value)
-        self.table.setItem(row, 1, QTableWidgetItem(value_text))
-
-        remove_btn = QPushButton("✕")
-        remove_btn.setFixedWidth(28)
-        remove_btn.clicked.connect(lambda: self._remove_row_containing(remove_btn))
-        self.table.setCellWidget(row, 2, remove_btn)
-
-    def _remove_row_containing(self, button):
-        # look up the row by identity rather than a captured index, since
-        # row indices shift whenever an earlier row is removed
-        for row in range(self.table.rowCount()):
-            if self.table.cellWidget(row, 2) is button:
-                self.table.removeRow(row)
-                return
-
-    def _on_ok(self):
-        overrides = []
-        seen_layers = set()
-        for row in range(self.table.rowCount()):
-            combo = self.table.cellWidget(row, 0)
-            layer = combo.currentText().strip() if combo else ""
-            if not layer:
-                continue  # blank row - not yet configured, skip silently
-
-            value_item = self.table.item(row, 1)
-            value_text = value_item.text().strip() if value_item else ""
-            try:
-                value = float(value_text)
-                if value <= 0:
-                    raise ValueError
-            except ValueError:
-                QMessageBox.warning(self, "Error", f"Not a valid cell size for layer '{layer}'")
-                return
-
-            if layer in seen_layers:
-                QMessageBox.warning(self, "Error", f"Layer '{layer}' is selected more than once")
-                return
-            seen_layers.add(layer)
-            overrides.append([layer, value])
-
-        self._result = overrides
-        self.accept()
-
-    def get_overrides(self):
-        return self._result
 
 
 # the 6 sides of the simulation box, in the order of gds2palace's 6-value

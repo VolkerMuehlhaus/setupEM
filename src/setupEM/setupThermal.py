@@ -56,7 +56,7 @@ if __package__ in (None, ""):
     from setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
@@ -69,7 +69,7 @@ else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
@@ -677,8 +677,8 @@ class MeshTab(QWidget):
         self.label2 = QLabel("Mesh size at heat sources")
         self.label2.setToolTip("The mesh size in a box around each heat source (the source plus this distance on "
                                "each side); away from the sources the mesh grows slowly to the maximum size. Metal edges are "
-                               "not refined in thermal models. Choose it from the smallest heat source, e.g. an npn's "
-                               "emitter fingers.")
+                               "only refined when set under Advanced... Choose it from the smallest heat source, e.g. "
+                               "an npn's emitter fingers.")
         self.label2.setFixedWidth(label_width)
         self.refinement_layout.addWidget(self.label2)
         self.refinement_edit = QLineEdit("5")
@@ -687,8 +687,17 @@ class MeshTab(QWidget):
         self.refinement_layout.addWidget(self.refinement_edit)
         self.label3 = QLabel(" µm ")
         self.refinement_layout.addWidget(self.label3)
+        self.refined_override_btn = QPushButton("Advanced...")
+        self.refined_override_btn.setToolTip("A different mesh size for single heat sources, or edge refinement for "
+                                             "metal layers")
+        self.refined_override_btn.clicked.connect(self.open_refined_cellsize_override_dialog)
+        self.refinement_layout.addWidget(self.refined_override_btn)
         self.refinement_layout.addStretch()
         self.mesh_layout.addLayout(self.refinement_layout)
+
+        # in-memory copy of settings['refined_cellsize_override'] (list of [name, value] pairs, name a heat source
+        # source_<GDS layer> or a metal layer), edited via the "Advanced..." dialog
+        self._refined_cellsize_override = []
 
         self.cells_maxsize_layout = QHBoxLayout()
         self.label6 = QLabel("Mesh cell maximum size")
@@ -761,6 +770,11 @@ class MeshTab(QWidget):
             self.refinement_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "refined_cellsize", "5")))
             return False
         saved_values ["refined_cellsize"] = float(value)
+        # only when set, so models without overrides keep their script unchanged
+        if self._refined_cellsize_override:
+            saved_values["refined_cellsize_override"] = self._refined_cellsize_override
+        else:
+            saved_values.pop("refined_cellsize_override", None)
 
         try:
             value = float(self.cells_maxsize_edit.text())
@@ -789,6 +803,8 @@ class MeshTab(QWidget):
     def load_values(self):
         app_name = self.MainWindow.APP_NAME
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize", get_preference(app_name, "refined_cellsize", "5"))))
+        self._refined_cellsize_override = list(saved_values.get("refined_cellsize_override", []))
+        self._update_refined_override_button_label()
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max", get_preference(app_name, "meshsize_max", "100"))))
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "100"))))
 
@@ -797,6 +813,27 @@ class MeshTab(QWidget):
         else:
             self.solver_box.setCurrentIndex(1)
 
+
+    def _update_refined_override_button_label(self):
+        n = len(self._refined_cellsize_override)
+        self.refined_override_btn.setText(f"Advanced... ({n})" if n > 0 else "Advanced...")
+
+    def open_refined_cellsize_override_dialog(self):
+        metals_list = self.MainWindow.metals_list
+        if metals_list is None:
+            QMessageBox.warning(self, "Error", "Load a GDSII file and XML stackup first")
+            return
+
+        sources = [f"source_{o.source_layernum}" for o in thermal_objects.objects
+                   if isinstance(o, simulation_setup.heatsource)]
+        layer_choices = sources + [metal.name for metal in metals_list.getallplanarmetals()]
+        dialog = RefinedCellsizeOverrideDialog(
+            self, layer_choices, self._refined_cellsize_override,
+            info_text="Mesh size for single heat sources (source_<GDS layer>), or edge\n"
+                      "refinement for metal layers. All others use the value set above.")
+        if dialog.exec() == QDialog.Accepted:
+            self._refined_cellsize_override = dialog.get_overrides()
+            self._update_refined_override_button_label()
 
 
 class CreateModelTab(CreateModelTabBase):
@@ -1769,6 +1806,7 @@ class MainWindow(MainWindowBase):
         "fill_factor_correction": ("file_tab", ["fill_factor_box"]),
         "variable_overrides": ("file_tab", ["variable_overrides_table"]),
         "refined_cellsize": ("mesh_tab", ["refinement_edit"]),
+        "refined_cellsize_override": ("mesh_tab", ["refined_override_btn"]),
         "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
         "margin": ("mesh_tab", ["margins_edit"]),
         "iterative": ("mesh_tab", ["solver_box"]),

@@ -438,6 +438,8 @@ A model needs **both** a source and a constant-temperature boundary to be solvab
 
 Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. The slow growth matters as much as the small value: the temperature falls steeply next to a small source, and a mesh that grows too fast there gives too low a temperature. For an npn13G2 with 8 fingers at 0.25 µm, the temperature rise came out about 20 % too low when the mesh grew to the maximum size within 30 times the mesh size.
 
+**Advanced...** next to the mesh size sets a different value for single heat sources or metal layers. A heat source is listed as `source_<GDS layer>`. Use it when one source needs a much finer mesh than the others, e.g. an npn's emitter fingers next to large resistors: a fine mesh at every source makes the mesh large for nothing. A metal layer in the list gets a fine mesh along its edges, which is not done otherwise. Use it where a thin metal carries the heat away from a source.
+
 **Solver** chooses Elmer's direct or iterative solver. There is no adaptive mesh refinement: a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
 
 ### Temperature per device (setupThermal)
