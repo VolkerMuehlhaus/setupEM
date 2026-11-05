@@ -545,10 +545,26 @@ def next_available_source_layer(gds_layers_present, excluded_layers, start=201):
     return candidates[0] if candidates else None
 
 
-def update_missing_layer_column(table, source_col, comment_col, gds_layers_present):
+TABLE_MIN_ROWS = 32     # rows of an empty Ports / Thermal table
+TABLE_SPARE_ROWS = 8    # empty rows kept below the last used one, for new entries
+
+
+def ensure_table_rows(table, used):
+    """Grow table so that rows 0..used-1 exist plus TABLE_SPARE_ROWS empty
+    ones below them (never shrinks). setItem() beyond the last row is
+    silently ignored by Qt, so loaders call this before filling: a config
+    with more than 32 ports / thermal objects would otherwise load
+    incomplete and lose the rest on the next save."""
+    rows = max(TABLE_MIN_ROWS, used + TABLE_SPARE_ROWS)
+    if rows > table.rowCount():
+        table.setRowCount(rows)
+
+
+def update_missing_layer_column(table, source_col, comment_col, gds_layers_present, labels=None):
     """Set comment_col to "(missing in layout)" for every row whose
     source_col holds a layer number not in gds_layers_present, and clear it
-    otherwise. Purely a computed display hint, not real row data - existing
+    otherwise. labels: {layer number: text} shown in front of that (setupThermal:
+    the device of a heat source, from a thermal export's map). Purely a computed display hint, not real row data - existing
     save/export logic in both apps' Ports/Thermal tabs only ever reads
     source_col and the columns before it, so writing into this trailing
     (already otherwise-unused) column doesn't affect anything else.
@@ -564,6 +580,8 @@ def update_missing_layer_column(table, source_col, comment_col, gds_layers_prese
             else:
                 if layernum not in gds_layers_present:
                     comment = "(missing in layout)"
+                if labels and layernum in labels:
+                    comment = (labels[layernum] + " " + comment).strip()
         existing = table.item(row, comment_col)
         if existing is None or existing.text() != comment:
             table.setItem(row, comment_col, QTableWidgetItem(comment))
@@ -1128,7 +1146,7 @@ class FileInputTab(QWidget):
         self.fill_factor_box.setCurrentText("enabled" if saved_values.get("fill_factor_correction", False) else "disabled")
         self.preprocess_gds_checkbox.setChecked(bool(get_saved_value(saved_values, "preprocess_gds", True)))
 
-        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
+        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", self.MainWindow.DEFAULT_PURPOSE)
         int_list = normalize_purpose_list(saved_values.get("purpose", purpose_default),
                                           default=normalize_purpose_list(purpose_default))
         self.purpose_edit.setText(', '.join(map(str, int_list)))
@@ -1160,7 +1178,7 @@ class FileInputTab(QWidget):
             saved_values.pop("fill_factor_correction", None)
 
         # save as flat list of ints, empty text falls back to the preference default
-        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", "0")
+        purpose_default = get_preference(self.MainWindow.APP_NAME, "purpose", self.MainWindow.DEFAULT_PURPOSE)
         saved_values["purpose"] = normalize_purpose_list(self.purpose_edit.text(),
                                                          default=normalize_purpose_list(purpose_default))
 
@@ -3326,6 +3344,131 @@ class ChipletSwitcher(QWidget):
         self.combo.setCurrentIndex(self._chiplet_ids.index(chiplet_id) + 1)
 
 
+class RefinedCellsizeOverrideDialog(QDialog):
+    """Popup editor for settings['refined_cellsize_override'], opened from
+    MeshTab's "Advanced..." button. Lets the user set a different mesh
+    size for specific layers instead of the single global value. The Layer
+    column is restricted to layer_choices: in setupEM the planar metals
+    (conductor/sheet layers) - vias and dielectrics never produce boundary
+    curves in gds2palace's meshing code, so a name outside that list would
+    silently have no effect if it were allowed to be typed in; in
+    setupThermal also the heat sources (source_<GDS layer>).
+    """
+
+    def __init__(self, parent, layer_choices, current_overrides,
+                 info_text="Override the mesh refinement cell size for specific layers\n"
+                           "(all other layers keep using the default set above)."):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Mesh Refinement Overrides")
+        self.resize(420, 400)
+        self.setModal(True)
+
+        self._layer_choices = layer_choices
+        self._result = []
+
+        layout = QVBoxLayout()
+
+        info = QLabel(info_text)
+        layout.addWidget(info)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Layer", "Cell size (µm)", ""])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table)
+
+        for name, value in current_overrides:
+            self._add_row(name, value)
+
+        add_row_layout = QHBoxLayout()
+        add_btn = QPushButton("+ Add Row")
+        add_btn.clicked.connect(lambda: self._add_row())
+        add_row_layout.addWidget(add_btn)
+        add_row_layout.addStretch()
+        layout.addLayout(add_row_layout)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self._on_ok)
+        button_layout.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def _add_row(self, name="", value=""):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        combo = QComboBox()
+        combo.setStyleSheet(COMBO_STYLE_OPTIONAL)
+        combo.addItem("")
+        combo.addItems(self._layer_choices)
+        if name and name not in self._layer_choices:
+            # tolerate a saved override for a layer no longer in the current
+            # stackup, same tolerant style as the Cellname combo box
+            combo.addItem(name)
+        if name:
+            combo.setCurrentText(name)
+        self.table.setCellWidget(row, 0, combo)
+
+        value_text = "" if value == "" else str(value)
+        self.table.setItem(row, 1, QTableWidgetItem(value_text))
+
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedWidth(28)
+        remove_btn.clicked.connect(lambda: self._remove_row_containing(remove_btn))
+        self.table.setCellWidget(row, 2, remove_btn)
+
+    def _remove_row_containing(self, button):
+        # look up the row by identity rather than a captured index, since
+        # row indices shift whenever an earlier row is removed
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, 2) is button:
+                self.table.removeRow(row)
+                return
+
+    def _on_ok(self):
+        overrides = []
+        seen_layers = set()
+        for row in range(self.table.rowCount()):
+            combo = self.table.cellWidget(row, 0)
+            layer = combo.currentText().strip() if combo else ""
+            if not layer:
+                continue  # blank row - not yet configured, skip silently
+
+            value_item = self.table.item(row, 1)
+            value_text = value_item.text().strip() if value_item else ""
+            try:
+                value = float(value_text)
+                if value <= 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Error", f"Not a valid cell size for layer '{layer}'")
+                return
+
+            if layer in seen_layers:
+                QMessageBox.warning(self, "Error", f"Layer '{layer}' is selected more than once")
+                return
+            seen_layers.add(layer)
+            overrides.append([layer, value])
+
+        self._result = overrides
+        self.accept()
+
+    def get_overrides(self):
+        return self._result
+
+
 class PopUpWindow(QDialog):
     """This window shows the substrate stackup preview.
 
@@ -4211,6 +4354,8 @@ class MainWindowBase(QMainWindow):
     """
 
     TAB_HEADER_COLORS = ["#FFCDD2", "#C8E6C9", "#BBDEFB", "#FFF9C4", "#D1C4E9"]
+    # GDS datatypes read by default (the Preferences can change it); setupThermal adds IHP's Activ.mask (1/20)
+    DEFAULT_PURPOSE = "0"
 
     def __init__(self):
         super().__init__()
@@ -4628,7 +4773,10 @@ class MainWindowBase(QMainWindow):
                     else:
                         # a model script for the same layout has the settings made in setupEM since
                         script = self._model_script_for_config(file_path, data)
-                        choice = self._ask_continue_with_script(file_path, script) if script else "config"
+                        if script and self._written_with(file_path, data, script):
+                            choice = "script"       # Create Model wrote the config with this script: no question
+                        else:
+                            choice = self._ask_continue_with_script(file_path, script) if script else "config"
                         if choice == "cancel":
                             return
                         if choice == "script":
@@ -5026,9 +5174,9 @@ class MainWindowBase(QMainWindow):
     # ---------- Update a script edited in place from a settings file of the same layout ----------
     # A layout tool (e.g. the KLayout plug-in klayout_em_export) writes the GDS file and a settings file next to
     # it, and writes both again when the layout changes. The model script holds everything set later (Create Model
-    # writes the script, not the settings file). So the settings that belong to the layout (ports, GDS file,
-    # stackup, cell, purpose) come from the settings file, everything else stays as in the script. See
-    # config_update.py.
+    # also copies the settings to <model>.simcfg, write_model_config). So the settings that belong to the layout
+    # (ports, GDS file, stackup, cell, purpose) come from the settings file, everything else stays as in the
+    # script. See config_update.py.
 
     def config_update_supported(self):
         """Hook: True if this app can update a script edited in place from its settings file."""
@@ -5081,9 +5229,9 @@ class MainWindowBase(QMainWindow):
 
     def _model_script_for_config(self, file_path, data):
         """The newest model script for the settings file's layout that can be edited in place, else None. It holds
-        the settings made in setupEM after the settings file was last saved (Create Model writes the script); the
-        settings file itself is written again by the layout tool on every export, so it is usually the newer
-        file and its age says nothing."""
+        the settings made in setupEM after the settings file was last saved (it is the model; Create Model copies
+        its settings to <model>.simcfg); the settings file itself is written again by the layout tool on every
+        export, so it is usually the newer file and its age says nothing."""
         saved = data.get("saved_values") or {}
         gds = saved.get("GdsFile")
         if not gds:
@@ -5097,6 +5245,39 @@ class MainWindowBase(QMainWindow):
             if not self._in_place_problem(script):
                 return script
         return None
+
+    @staticmethod
+    def _written_with(file_path, data, script):
+        """True if Create Model wrote the settings file together with script (write_model_config): same folder, its
+        "written_with" names the script. A layout tool's export keeps that key when it updates the file."""
+        return (data.get("written_with") == os.path.basename(script) and
+                os.path.normcase(os.path.dirname(os.path.abspath(file_path))) ==
+                os.path.normcase(os.path.dirname(os.path.abspath(script))))
+
+    def write_model_config(self, script_path):
+        """Write <model>.simcfg / .tsimcfg next to the model script Create Model wrote, with the settings of Save
+        Config, so that a layout tool's next export keeps them and the KLayout plug-in finds the stackup, datatypes
+        and thermal objects of the layout. The script stays the model; the file is a copy of the settings. Overwrites
+        only a settings file of this application (its own, or the layout tool's export file of the same name), never
+        another file. Returns the path written, or None."""
+        path = os.path.splitext(script_path)[0] + "." + self.CONFIG_SUFFIX
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                return None
+            if not isinstance(existing, dict) or existing.get("application") != self.APP_NAME:
+                return None
+        struct = {"application": self.APP_NAME, "data_format": "1.0", "saved_values": self.saved_values,
+                  "written_with": os.path.basename(script_path)}
+        struct.update(self.native_config_extra_struct())
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(struct, f, indent=4)
+        except OSError:
+            return None
+        return path
 
     def _ask_continue_with_script(self, file_path, script):
         """A model script exists for the settings file's layout: "script", "config" or "cancel"."""

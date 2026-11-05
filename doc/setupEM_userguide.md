@@ -33,6 +33,7 @@ Document version: 2026-10-31
 &ensp;[Differences from setupEM](#differences-from-setupem)  
 &ensp;[Thermal Sources + Boundaries tab](#thermal-sources--boundaries-tab)  
 &ensp;[Mesh tab](#mesh-tab-setupthermal)  
+&ensp;[Temperature per device](#temperature-per-device-setupthermal)  
 [The Stackup Editor](#the-stackup-editor)  
 &ensp;[Launching the editor](#launching-the-editor)  
 &ensp;[Variables tab](#variables-tab)  
@@ -315,7 +316,7 @@ Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If Pa
 
 ## File menu
 
-Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
+Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Create Model also writes the settings to `<model>.simcfg` / `<model>.tsimcfg` next to the model script, so that a layout tool's next export keeps them and the KLayout plug-in finds the layout's stackup, datatypes and thermal objects; it overwrites only a settings file of the same application. The script stays the model. Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
 
 **Open Recent** lists your last 10 files of each kind for quick reopening, in three sections: configs, imported \*.py models and \*.py models edited in place. Saving a config file adds it to the list too. A file reopens the same way it was opened before. "Clear Recent Files" empties all three sections.
 
@@ -342,11 +343,11 @@ When you import a script that setupEM didn't write, a bar below the menu offers 
 
 #### After a new export from the layout tool
 
-A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg` next to it, and writes both again when you change the layout: same file names, new ports. The ports are numbered 1, 2, 3, ... without gaps, so a new or removed port can shift the numbers of others. Your model script still has the old ports, and the settings you made in setupEM since (frequencies, mesh, ...) are only in the script: Create Model writes the script, not the `.simcfg`.
+A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg` next to it, and writes both again when you change the layout: same file names, new ports. The ports are numbered 1, 2, 3, ... without gaps, so a new or removed port can shift the numbers of others. Your model script still has the old ports. The settings you made in setupEM since (frequencies, mesh, ...) are in the script, and in the `.simcfg` only if Create Model wrote that file with the script.
 
 setupEM therefore takes from the `.simcfg` only what belongs to the layout: the ports, GDSII file, stackup, cell and purpose. Everything else stays as in the script, including your own code. As always when editing in place, Create Model or **File > Save** writes the changes into the script.
 
-- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before).
+- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before). If Create Model wrote that `.simcfg` together with the script, setupEM continues with the script without asking.
 - **Loading the `.simcfg` while editing a script in place:** setupEM lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**.
 - **While editing a script in place**, when a `.simcfg` for the same GDSII file is newer than the script and has other ports or layout settings, the bar below the menu says so, with **Update from it**.
 
@@ -413,6 +414,7 @@ setupThermal reuses the same **Input Files**, **Mesh**, **Create Model**, **Code
 - No **Frequencies** tab and no **Simulator** menu - a thermal model is a single steady-state solve, not a frequency sweep, and always targets Elmer.
 - The **Ports** tab is replaced by **Thermal Sources + Boundaries** (see below).
 - The Mesh tab omits the Palace-only adaptive mesh refinement group and any Palace/Elmer solver switch (always Elmer).
+- The layer purposes (datatypes) are 0 and 20 by default, not only 0. IHP's npn cells draw the silicon around each emitter on Activ.mask (1/20), not on Activ. Without it, the heat sources sit in oxide, and the temperatures come out much too high. Datatypes saved in your Preferences take precedence.
 
 ### Thermal Sources + Boundaries tab
 
@@ -433,7 +435,25 @@ A model needs **both** a source and a constant-temperature boundary to be solvab
 
 ### Mesh tab (setupThermal)
 
-Same **Mesh refinement at the edges** / **Mesh cell maximum size absolute** / basis function order controls as setupEM's Mesh and Boundaries tab, minus the Palace-specific adaptive mesh refinement settings - a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
+**Mesh size at heat sources** sets the mesh in a box around each heat source: the source plus this distance on each side. Away from the sources, the mesh grows slowly to **Mesh cell maximum size**: the cell size grows by 0.3 µm per µm of distance. Unlike in setupEM, metal edges are not refined: a thermal model needs its fine mesh where the heat is generated.
+
+Choose the value from the smallest heat source. An npn's heat areas are its emitter fingers, about 0.17 µm wide. The slow growth matters as much as the small value: the temperature falls steeply next to a small source, and a mesh that grows too fast there gives too low a temperature. For an npn13G2 with 8 fingers at 0.25 µm, the temperature rise came out about 20 % too low when the mesh grew to the maximum size within 30 times the mesh size.
+
+**Advanced...** next to the mesh size sets a different value for single heat sources or metal layers. A heat source is listed as `source_<GDS layer>`. Use it when one source needs a much finer mesh than the others, e.g. an npn's emitter fingers next to large resistors: a fine mesh at every source makes the mesh large for nothing. A metal layer in the list gets a fine mesh along its edges, which is not done otherwise. Use it where a thin metal carries the heat away from a source.
+
+**Solver** chooses Elmer's direct or iterative solver. There is no adaptive mesh refinement: a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
+
+### Temperature per device (setupThermal)
+
+After a run, the log lists the temperature of each heat source below the results summary, and setupThermal writes the same table to `<model>_temperatures.csv` next to the model script. For a thermal export from the KLayout plug-in, each row carries the device's schematic instance name, so the temperatures can go back to the circuit simulation.
+
+**T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
+
+Resistor temperatures from a thermal export are not accurate yet: the heat source of a resistor sits in the silicon at the height of Activ, not in polysilicon on oxide, so the resistor comes out too cool.
+
+The temperatures include the heat of all devices in the model. For the self-heating of one device alone, run the model with only its power set.
+
+Without the GUI: `python -m setupEM.thermal_results <model>.tsimcfg` prints the table and writes the same file.
 
 ## The Stackup Editor
 

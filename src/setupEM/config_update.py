@@ -161,9 +161,9 @@ def _reads_gds(script_path, gds_path):
 
 def model_scripts(gds_path, folders):
     """Model scripts (*.py) in folders that read gds_path, newest first. Their age says nothing against a settings
-    file of the same layout: a layout tool writes that file again on every export, also after the script was made,
-    while the settings made in setupEM since are only in the script (Create Model writes the script, not the
-    settings file)."""
+    file of the same layout: a layout tool writes that file again on every export, also after the script was made.
+    The script is the model; Create Model also writes the settings to <model>.simcfg, but another settings file of
+    the layout (or one saved before) does not have the settings made in setupEM since."""
     seen, out = set(), []
     for folder in folders:
         if not folder or not os.path.isdir(folder):

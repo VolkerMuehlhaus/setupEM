@@ -1,3 +1,18 @@
+# What's New - November 5, 2026 (setupEM 0.17.0)
+
+setupThermal works with the thermal export of the KLayout plug-in klayout_em_export (one heat source per transistor and resistor, with the schematic instance names from LVS in `<layout>_thermalmap.json`):
+- **Load powers...** below the Thermal Sources + Boundaries list sets the powers from a file of your circuit simulation, by instance name. Needs gds2palace with `util_thermal_map`.
+- The list names the device of each heat source (instance and pcell) and the region outline. Heat source layers above 299 count as present in the layout.
+- The export's placeholder boundary (constant temperature on the region outline, no target layer) is listed as "region outline: choose the target layer"; Create Model refuses a boundary without a target layer.
+- **Temperature per device**: after a run, the log lists the average and peak temperature of each heat source and their rise above the fixed temperature, and `<model>_temperatures.csv` next to the model script has the same per instance. Command line: `python -m setupEM.thermal_results <model>.tsimcfg`.
+
+**Changes:**
+- **Create Model also writes the settings file**, `<model>.simcfg` / `<model>.tsimcfg` next to the model script (as Save Config would), so that a layout tool's next export keeps your settings and the KLayout plug-in finds the layout's stackup, datatypes and thermal objects. It overwrites only a settings file of the same application. Opening a `.simcfg` that Create Model wrote with a script continues that script without asking.
+- The Mesh tab's "Mesh refinement at metal edges" is now **"Mesh size at heat sources"**, which is what it sets in a thermal model (metal edges are not refined there).
+
+**Fixes:**
+- ElmerSolver no longer hangs at start on a Linux desktop where an X display does not accept connections ("Authorization required, but no authorization protocol specified"): setupThermal starts it with hwloc's OpenGL plug-in off (`HWLOC_COMPONENTS=-gl`, unless you set that variable).
+
 # What's New - October 31, 2026 (setupEM 0.16.0)
 
 **After a new export from the layout tool** (setupEM): a layout tool such as the KLayout plug-in klayout_em_export writes the GDSII file and a `.simcfg`, and writes both again when the layout changes. The settings you made in setupEM since are only in your model script, because Create Model writes the script, not the `.simcfg`. setupEM now takes from such a `.simcfg` only the ports, GDSII file, stackup, cell and purpose, and keeps everything else as in the script:

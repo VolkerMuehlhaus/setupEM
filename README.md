@@ -106,6 +106,12 @@ The package now includes setupThermal also, which is the equivalent of setupEM f
 
 AWS Palace is not used/required in thermal workflow, although we use the same gds2palace package. 
 
+**Powers from a circuit simulation.** The thermal export of the KLayout EM Export plug-in makes one heat source per transistor and resistor and writes `<layout>_thermalmap.json` next to the GDSII file, which says which device each heat source layer belongs to and, from LVS, its schematic instance name. The Thermal Sources + Boundaries list then shows that name next to each heat source, and **Load powers...** below the list sets the powers from a file of your circuit simulation: one line per device with the instance name (as in the LVS netlist, e.g. `Q1` or `Xcore.Q1`) and the power in W, separated by a comma, semicolon, tab or spaces (`Xcore.Q1, 2.5m`). Heat sources without a power keep theirs; names that match no heat source, or several, are listed and not used. Without setupThermal: `python -m gds2palace.util_thermal_map <layout>_thermalmap.json powers.csv <layout>.tsimcfg`. Needs a gds2palace with `util_thermal_map`.
+
+**Boundary of a thermal export.** The export also writes the outline of the exported region on a layer of its own (201) and, as long as the model has no boundary yet, a constant-temperature row on it without a target layer. The list shows it as "region outline: choose the target layer"; pick the stackup layer where the temperature is fixed (e.g. the substrate backside) and Apply. Create Model refuses a boundary without a target layer.
+
+**Temperature per device.** After each run, setupThermal lists the temperature of every heat source below the results summary and writes it to `<model>_temperatures.csv` next to the model script: instance name (from the thermal map), device, layer, power, the average temperature over the heat source and its hottest point, and both as rise above the fixed temperature of the model (for a circuit simulator's temperature rise per instance, e.g. `trise` / `dtemp`). Without setupThermal: `python -m setupEM.thermal_results <model>.tsimcfg`.
+
 
 ## User Interface
 
@@ -151,6 +157,8 @@ FEM simulation can't simulate at 0 Hz DC, but in setupEM you can specify start f
 As explained in the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf), ports are created by drawing rectangles on special layers to the GDSII file. For in-plane ports these must be rectangles, for via ports it must be lines (box with zero size in x or y direction). In setupEM, you then map the source layer for each of these ports, and define direction and target layer(s). Direction matters for polarity if multiple ports are connected to the same ground.
 
 In the upper part of the tab, you make your settings and then need to apply to the port list below.
+
+The port list grows with the ports: it always keeps a few empty rows below the last port, so there is no fixed maximum number of ports. Versions up to 0.16.0 had a fixed list of 32 rows and silently dropped port 33 and higher when loading a config or model script; load such a model again with this version to get all its ports back. The same applies to the Thermal Sources + Boundaries list in setupThermal.
 
 <img src="./doc/png/ports1.png" alt="ports" width="700">
 

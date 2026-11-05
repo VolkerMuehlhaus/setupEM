@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     )
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QSyntaxHighlighter, QPainter, QPen, QActionGroup, QLinearGradient
-from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths
+from PySide6.QtCore import Qt, QRegularExpression, QProcess, QProcessEnvironment, QRect, QStandardPaths
 
 
 # Local dev: if the gds2palace_ihp_sg13g2 fork is checked out as a sibling repo next to
@@ -44,6 +44,10 @@ _dev_gds2palace_dir = os.path.abspath(os.path.join(
 if os.path.isdir(os.path.join(_dev_gds2palace_dir, 'gds2palace')):
     sys.path.insert(0, _dev_gds2palace_dir)
 from gds2palace import *
+try:
+    from gds2palace import util_thermal_map as thermal_map   # powers through a thermal export's map (Load powers)
+except ImportError:     # an older gds2palace
+    thermal_map = None
 
 # shared building blocks used by both setupEM.py and setupThermal.py
 # __package__ is None/"" when this file is run directly (e.g. `python setupThermal.py`)
@@ -52,25 +56,27 @@ if __package__ in (None, ""):
     from setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
-        next_available_source_layer, update_missing_layer_column,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
-    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
+        device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from script_model import ScriptModel
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
-        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase,
-        next_available_source_layer, update_missing_layer_column,
+        VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
-    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file
+    from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
+        device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from .script_model import ScriptModel
 
 
@@ -147,6 +153,20 @@ class PortsTab(QWidget):
         self.thermalobjectslist.setRowCount(32)
         self.thermalobjectslist.selectRow(0)
 
+        # powers per device from a circuit simulation, through the map of a thermal export (KLayout EM Export)
+        self.powers_layout = QHBoxLayout()
+        self.powers_layout.addStretch()
+        self.load_powers_button = QPushButton(text="Load powers...")
+        self.load_powers_button.setToolTip(
+            "Set the powers of the heat sources from a file of your circuit simulation (instance name, power in W), "
+            "through the <layout>_thermalmap.json of a thermal export from KLayout")
+        self.load_powers_button.clicked.connect(self.load_powers)
+        if thermal_map is None:
+            self.load_powers_button.setEnabled(False)
+            self.load_powers_button.setToolTip("Needs a newer gds2palace (with util_thermal_map)")
+        self.powers_layout.addWidget(self.load_powers_button)
+        self.bottom_layout.addLayout(self.powers_layout)
+
 
         # details is top group
         self.details_layout = QVBoxLayout()
@@ -179,6 +199,7 @@ class PortsTab(QWidget):
         self.target_box.setFixedWidth(150)
         self.target_box.setStyleSheet(COMBO_STYLE_REQUIRED)
         self.target_box.addItems(["XML stackup missing"])
+        self.target_box.setPlaceholderText("choose...")     # a boundary from a thermal export has no target yet
         self.targetlayer_layout.addWidget(self.target_box)
 
         self.targetlayer_layout.addStretch()
@@ -300,6 +321,7 @@ class PortsTab(QWidget):
 
             for col, value in enumerate(data):
                 self.thermalobjectslist.setItem(selected_row, col, QTableWidgetItem(str(value)))
+            ensure_table_rows(self.thermalobjectslist, selected_row + 1)     # empty rows below for the next objects
 
             self.refresh_missing_layer_annotations()
 
@@ -331,6 +353,9 @@ class PortsTab(QWidget):
 
             safe_get_for_lineedit(0,self.sourcelayer_edit,"")
             safe_get_for_combobox(1,self.target_box,0)
+            target = self.thermalobjectslist.item(selected_row, 1)
+            if target is not None and target.text() == "":
+                self.target_box.setCurrentIndex(-1)     # not chosen yet: shown as such, not as the first layer
             safe_get_for_combobox(2,self.thermaltype_box,2)
             safe_get_for_lineedit(3,self.power_edit,"50")
             safe_get_for_lineedit(4,self.temp_edit,"1")
@@ -413,10 +438,102 @@ class PortsTab(QWidget):
 
     def refresh_missing_layer_annotations(self):
         """Flag any thermal object row whose source layer has no geometry in
-        the currently loaded GDS - see update_missing_layer_column()."""
+        the currently loaded GDS - see update_missing_layer_column() - and name
+        the device of each heat source if the layout has a thermal map."""
         layer_min, layer_max = self._port_layer_range()
-        gds_layers = self.MainWindow.get_gds_layers_in_range(layer_min, layer_max)
-        update_missing_layer_column(self.thermalobjectslist, source_col=0, comment_col=5, gds_layers_present=gds_layers)
+        used = self._used_source_layers()
+        # a thermal export numbers its heat sources past 299 when there are many devices
+        gds_layers = self.MainWindow.get_gds_layers_in_range(min([layer_min] + list(used)), max([layer_max] + list(used)))
+        update_missing_layer_column(self.thermalobjectslist, source_col=0, comment_col=5, gds_layers_present=gds_layers,
+                                    labels=self._layer_labels())
+
+    def _thermal_map_path(self):
+        """<layout>_thermalmap.json next to the GDS file (written by the thermal export), or None."""
+        gdsfile = self.MainWindow.file_tab.gds_file_edit.text()
+        if not gdsfile:
+            return None
+        return os.path.splitext(gdsfile)[0] + "_thermalmap.json"
+
+    def _layer_labels(self):
+        """{layer: text} for the table: from the layout's thermal map, if there is one, the instance name or device of
+        each heat source and the region outline; for every boundary without a target layer, that it needs one."""
+        labels = {}
+        path = self._thermal_map_path()
+        if thermal_map is not None and path is not None and os.path.isfile(path):
+            try:
+                tmap = thermal_map.read_thermal_map(path)
+            except ValueError:
+                tmap = {"sources": []}
+            labels = {s["layer"]: (s.get("instance") or s.get("device", "")) +
+                      (f" ({s['pcell']})" if s.get("pcell") else "") for s in tmap["sources"] if "layer" in s}
+            if tmap.get("outline_layer") is not None:
+                labels[tmap["outline_layer"]] = "region outline"
+        for layer in self._boundaries_without_target():
+            labels[layer] = labels.get(layer, "boundary") + ": choose the target layer"
+        return labels
+
+    def _boundaries_without_target(self):
+        """Layer numbers of the constant-temperature rows without a target layer (a thermal export's placeholder)."""
+        layers = []
+        for row in range(self.thermalobjectslist.rowCount()):
+            layer, target, kind = (self.thermalobjectslist.item(row, col) for col in (0, 1, 2))
+            if layer is None or not layer.text() or kind is None or "SOURCE" in kind.text().upper():
+                continue
+            if target is None or not target.text().strip():
+                try:
+                    layers.append(int(layer.text()))
+                except ValueError:
+                    pass
+        return layers
+
+    def load_powers(self):
+        """Set the heat sources' powers from a powers file of a circuit simulation, matched by instance name through
+        the thermal map (gds2palace thermal_map), and report what did not match."""
+        map_path = self._thermal_map_path()
+        start = os.path.dirname(map_path) if map_path else ""
+        if map_path is None or not os.path.isfile(map_path):
+            map_path, _ = QFileDialog.getOpenFileName(self, "Thermal map of the layout", start,
+                                                      "Thermal map (*_thermalmap.json);;JSON (*.json)")
+            if not map_path:
+                return
+        try:
+            tmap = thermal_map.read_thermal_map(map_path)
+        except ValueError as e:
+            QMessageBox.warning(self, "Load powers", str(e))
+            return
+        powers_path, _ = QFileDialog.getOpenFileName(self, "Powers from the circuit simulation", start,
+                                                     "Powers (*.csv *.txt);;All files (*)")
+        if not powers_path:
+            return
+        try:
+            powers, problems = thermal_map.read_powers(powers_path)
+        except (OSError, UnicodeDecodeError) as e:
+            QMessageBox.warning(self, "Load powers", f"{powers_path} cannot be read: {e}")
+            return
+        layer_power, report = thermal_map.apply_powers(tmap, powers)
+        in_table = set()
+        for row in range(self.thermalobjectslist.rowCount()):
+            layer, kind = self.thermalobjectslist.item(row, 0), self.thermalobjectslist.item(row, 2)
+            if layer is None or kind is None or "SOURCE" not in kind.text().upper():
+                continue
+            try:
+                layernum = int(layer.text())
+            except ValueError:
+                continue
+            if layernum in layer_power:
+                self.thermalobjectslist.setItem(row, 3, QTableWidgetItem(str(layer_power[layernum])))
+                in_table.add(layernum)
+        lines = thermal_map.describe_report(report, len(tmap["sources"]))
+        missing = sorted(set(layer_power) - in_table)
+        if missing:
+            lines.append("Not in the table as heat sources (no power set): layer " + ", ".join(map(str, missing)))
+        lines += problems
+        self.get_port_values_from_table()
+        self.refresh_missing_layer_annotations()
+        if len(lines) > 1:
+            QMessageBox.warning(self, "Load powers", "\n\n".join(lines))
+        else:
+            QMessageBox.information(self, "Load powers", lines[0])
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -485,6 +602,7 @@ class PortsTab(QWidget):
         # update thermal definitions from Python model code
 
         self.thermalobjectslist.clearContents()
+        ensure_table_rows(self.thermalobjectslist, len(heatsource_defs) + len(consttemp_defs))
         n=-1
         for n, heatsource_def in enumerate(heatsource_defs):
             # each definition is a dictionary
@@ -515,6 +633,7 @@ class PortsTab(QWidget):
         # update thermal definitions from our native JSON format
 
         self.thermalobjectslist.clearContents()
+        ensure_table_rows(self.thermalobjectslist, len(thermal_defs))
         n=-1
         for n, thermal_def in enumerate(thermal_defs):
             # each definition is a dictionary
@@ -555,7 +674,11 @@ class MeshTab(QWidget):
         self.mesh_layout = QVBoxLayout()
 
         self.refinement_layout = QHBoxLayout()
-        self.label2 = QLabel("Mesh refinement at metal edges")
+        self.label2 = QLabel("Mesh size at heat sources")
+        self.label2.setToolTip("The mesh size in a box around each heat source (the source plus this distance on "
+                               "each side); away from the sources the mesh grows slowly to the maximum size. Metal edges are "
+                               "only refined when set under Advanced... Choose it from the smallest heat source, e.g. "
+                               "an npn's emitter fingers.")
         self.label2.setFixedWidth(label_width)
         self.refinement_layout.addWidget(self.label2)
         self.refinement_edit = QLineEdit("5")
@@ -564,8 +687,17 @@ class MeshTab(QWidget):
         self.refinement_layout.addWidget(self.refinement_edit)
         self.label3 = QLabel(" µm ")
         self.refinement_layout.addWidget(self.label3)
+        self.refined_override_btn = QPushButton("Advanced...")
+        self.refined_override_btn.setToolTip("A different mesh size for single heat sources, or edge refinement for "
+                                             "metal layers")
+        self.refined_override_btn.clicked.connect(self.open_refined_cellsize_override_dialog)
+        self.refinement_layout.addWidget(self.refined_override_btn)
         self.refinement_layout.addStretch()
         self.mesh_layout.addLayout(self.refinement_layout)
+
+        # in-memory copy of settings['refined_cellsize_override'] (list of [name, value] pairs, name a heat source
+        # source_<GDS layer> or a metal layer), edited via the "Advanced..." dialog
+        self._refined_cellsize_override = []
 
         self.cells_maxsize_layout = QHBoxLayout()
         self.label6 = QLabel("Mesh cell maximum size")
@@ -634,10 +766,15 @@ class MeshTab(QWidget):
         try:
             value = float(self.refinement_edit.text())
         except Exception:
-            QMessageBox.warning(self, "Error", "Not a valid value for mesh refinement")
+            QMessageBox.warning(self, "Error", "Not a valid value for the mesh size at heat sources")
             self.refinement_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "refined_cellsize", "5")))
             return False
         saved_values ["refined_cellsize"] = float(value)
+        # only when set, so models without overrides keep their script unchanged
+        if self._refined_cellsize_override:
+            saved_values["refined_cellsize_override"] = self._refined_cellsize_override
+        else:
+            saved_values.pop("refined_cellsize_override", None)
 
         try:
             value = float(self.cells_maxsize_edit.text())
@@ -666,6 +803,8 @@ class MeshTab(QWidget):
     def load_values(self):
         app_name = self.MainWindow.APP_NAME
         self.refinement_edit.setText(str(saved_values.get("refined_cellsize", get_preference(app_name, "refined_cellsize", "5"))))
+        self._refined_cellsize_override = list(saved_values.get("refined_cellsize_override", []))
+        self._update_refined_override_button_label()
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max", get_preference(app_name, "meshsize_max", "100"))))
         self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "100"))))
 
@@ -674,6 +813,27 @@ class MeshTab(QWidget):
         else:
             self.solver_box.setCurrentIndex(1)
 
+
+    def _update_refined_override_button_label(self):
+        n = len(self._refined_cellsize_override)
+        self.refined_override_btn.setText(f"Advanced... ({n})" if n > 0 else "Advanced...")
+
+    def open_refined_cellsize_override_dialog(self):
+        metals_list = self.MainWindow.metals_list
+        if metals_list is None:
+            QMessageBox.warning(self, "Error", "Load a GDSII file and XML stackup first")
+            return
+
+        sources = [f"source_{o.source_layernum}" for o in thermal_objects.objects
+                   if isinstance(o, simulation_setup.heatsource)]
+        layer_choices = sources + [metal.name for metal in metals_list.getallplanarmetals()]
+        dialog = RefinedCellsizeOverrideDialog(
+            self, layer_choices, self._refined_cellsize_override,
+            info_text="Mesh size for single heat sources (source_<GDS layer>), or edge\n"
+                      "refinement for metal layers. All others use the value set above.")
+        if dialog.exec() == QDialog.Accepted:
+            self._refined_cellsize_override = dialog.get_overrides()
+            self._update_refined_override_button_label()
 
 
 class CreateModelTab(CreateModelTabBase):
@@ -726,6 +886,31 @@ class CreateModelTab(CreateModelTabBase):
 
         summary = build_thermal_summary(run_path, source_lines=source_lines)
         self.log_area.appendPlainText("\n" + summary + "\n")
+        self._append_device_temperatures(run_path)
+
+    def _append_device_temperatures(self, run_path):
+        """The temperature per heat source (with the instance names of a thermal export), in the log and as
+        <model>_temperatures.csv next to the model script: the temperatures back to the circuit simulation."""
+        thermal = [{"type": o.type, "source_layernum": o.source_layernum, "power": getattr(o, "power", None),
+                    "temp": getattr(o, "temp", None)} for o in thermal_objects.objects]
+        map_path = self.MainWindow.thermal_tab._thermal_map_path()
+        try:
+            rows, t_ref = device_temperatures(run_path, thermal, read_thermal_map(map_path) if map_path else None)
+        except Exception as e:      # an unreadable result must not hide the summary above
+            self.log_area.appendPlainText(f"Temperature per heat source not available: {e}\n")
+            return
+        if not rows:
+            return
+        lines = ["=== Temperature per heat source ==="] + format_temperature_table(rows)
+        if t_ref is not None:
+            lines.append(f"T mean: average over the heat source, T max: its hottest point; dT relative to {t_ref:g} K")
+        csv_path = os.path.join(self.MainWindow.saved_values["sim_path"], self.run_basename() + "_temperatures.csv")
+        try:
+            write_temperatures_csv(csv_path, rows, t_ref)
+            lines.append(f"Written to {csv_path}")
+        except OSError as e:
+            lines.append(f"Could not write {csv_path}: {e}")
+        self.log_area.appendPlainText("\n".join(lines) + "\n")
 
     def on_finished(self, exit_code, exit_status):
         super().on_finished(exit_code, exit_status)
@@ -793,6 +978,15 @@ class CreateModelTab(CreateModelTabBase):
         # which can do some update to saved_values
         self.MainWindow.save_all_tabs()
 
+        # a boundary without a target layer (the placeholder of a thermal export) has no height to mesh at
+        missing_target = [o.source_layernum for o in thermal_objects.objects
+                          if isinstance(o, simulation_setup.constanttemp) and not (o.target_layername or "").strip()]
+        if missing_target:
+            QMessageBox.warning(self, "Error", "Model incomplete: the constant temperature boundary on layer " +
+                                ", ".join(map(str, missing_target)) + " has no target layer. Choose the stackup "
+                                "layer where the temperature is fixed (for example the substrate backside) and Apply.")
+            return
+
         # check if we have at leat one thermal source and one constant temp boundary
         thermal_source_exists = False
         thermal_boundary_exists = False
@@ -850,6 +1044,10 @@ class CreateModelTab(CreateModelTabBase):
 
             self.write_model_code(pymodel_filename, code)
             confirmed_paths.add(normalized_path)
+            # the settings also as <model>.simcfg / .tsimcfg next to it (write_model_config)
+            config_path = self.MainWindow.write_model_config(pymodel_filename)
+            if config_path:
+                self.log_area.appendPlainText(f"Settings saved with it: {config_path}")
 
             # Run Python interpreter on that file
             python_exe = sys.executable  # Use the same Python interpreter
@@ -905,6 +1103,7 @@ class CreateModelTab(CreateModelTabBase):
             # Windows and Linux/Mac both just resolve ElmerSolver via PATH
             self.log_area.appendPlainText('Setting work directory ' + run_path)
             self.process.setWorkingDirectory(run_path)
+            self.process.setProcessEnvironment(elmer_environment())
             # start simulation
             self.process.start("ElmerSolver")
         except Exception as e:
@@ -913,6 +1112,18 @@ class CreateModelTab(CreateModelTabBase):
             # unanticipated, so it never surfaces as an uncaught traceback
             self.log_area.appendPlainText(f"⚠️ Unexpected error while starting the simulation: {e}\n")
 
+
+
+def elmer_environment():
+    """The environment for ElmerSolver: the system's, with hwloc's OpenGL plug-in off unless HWLOC_COMPONENTS is set.
+    OpenMPI loads hwloc at startup, and its GL plug-in probes every X display; on a Linux desktop where one display
+    does not accept connections (seen on Ubuntu 26.04: gnome-shell's :1), ElmerSolver waits there forever after
+    "Authorization required, but no authorization protocol specified". The plug-in only finds GPUs for the hardware
+    topology, which Elmer does not use."""
+    environment = QProcessEnvironment.systemEnvironment()
+    if not environment.contains("HWLOC_COMPONENTS"):
+        environment.insert("HWLOC_COMPONENTS", "-gl")
+    return environment
 
 
 class ModelEditorTab(QWidget):
@@ -1157,7 +1368,7 @@ class PreferencesDialog(QDialog):
         files_form.addLayout(xml_dir_row)
         self._reset_targets.append((self.xml_browse_dir_edit, "xml_browse_directory", "", "text"))
 
-        self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", "0")
+        self.purpose_edit = add_row(files_form, "Default GDS layer purpose", "purpose", MainWindow.DEFAULT_PURPOSE)
         self.viamerge_edit = add_row(files_form, "Default via array merge distance (µm)", "merge_polygon_size", "0.5")
         # Import from *.py model writes back into the imported script, as setupEM always did
         self.confirm_reuse_checkbox = QCheckBox("When importing a *.py model: ask before writing over it")
@@ -1185,7 +1396,7 @@ class PreferencesDialog(QDialog):
         mesh_widget = QWidget()
         mesh_form = QVBoxLayout(mesh_widget)
         mesh_form.setAlignment(Qt.AlignTop)
-        self.refined_cellsize_edit = add_row(mesh_form, "Mesh refinement at metal edges (µm)", "refined_cellsize", "5")
+        self.refined_cellsize_edit = add_row(mesh_form, "Mesh size at heat sources (µm)", "refined_cellsize", "5")
         self.meshsize_max_edit = add_row(mesh_form, "Mesh cell maximum size (µm)", "meshsize_max", "100")
         self.margin_edit = add_row(mesh_form, "Dielectric stackup oversize margin (µm)", "margin", "100")
         mesh_form.addStretch()
@@ -1470,6 +1681,9 @@ class ThermalConductivityLegend(QWidget):
 class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
     MODEL_KIND = MODEL_KIND_THERMAL
+    # IHP npn cells draw the silicon around each emitter on Activ.mask (1/20), not Activ: without it the heat
+    # sources sit in oxide
+    DEFAULT_PURPOSE = "0, 20"
     CONFIG_SUFFIX = CONFIG_SUFFIX
 
     def __init__(self):
@@ -1595,6 +1809,7 @@ class MainWindow(MainWindowBase):
         "fill_factor_correction": ("file_tab", ["fill_factor_box"]),
         "variable_overrides": ("file_tab", ["variable_overrides_table"]),
         "refined_cellsize": ("mesh_tab", ["refinement_edit"]),
+        "refined_cellsize_override": ("mesh_tab", ["refined_override_btn"]),
         "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
         "margin": ("mesh_tab", ["margins_edit"]),
         "iterative": ("mesh_tab", ["solver_box"]),

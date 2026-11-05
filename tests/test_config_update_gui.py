@@ -105,6 +105,22 @@ def test_open_config_continues_with_script(win, layout, monkeypatch):
     assert "source_layernum=203" in lines[2]
 
 
+def test_open_config_written_with_script(win, layout, monkeypatch):
+    """A config that Create Model wrote with the script (written_with), then updated by the layout tool's export:
+    continue the script without asking, ports from the config."""
+    folder, write_config = layout
+    set_age(folder / "chip_em.py", 100)
+    config = write_config("chip_em.simcfg", [via(1, 201), via(2, 202, "-Z")], age=10)
+    data = json.loads(open(config, encoding="utf-8").read())
+    data["written_with"] = "chip_em.py"
+    open(config, "w", encoding="utf-8").write(json.dumps(data))
+    set_age(config, 10)
+    monkeypatch.setattr(win, "_ask_continue_with_script", lambda c, s: pytest.fail("asked"))
+    win.load_configuration_from_file(config)
+    assert win.script_model is not None and os.path.basename(win.script_model.path) == "chip_em.py"
+    assert len(port_lines(code_of(win))) == 2
+
+
 def test_open_config_without_script_asks_nothing(win, layout, monkeypatch):
     folder, write_config = layout
     os.remove(folder / "chip_em.py")                # no model script for this layout yet
