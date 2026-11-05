@@ -1,4 +1,4 @@
-# What's New - thermal export from KLayout (not released yet)
+# What's New - November 5, 2026 (setupEM 0.17.0)
 
 setupThermal works with the thermal export of the KLayout plug-in klayout_em_export (one heat source per transistor and resistor, with the schematic instance names from LVS in `<layout>_thermalmap.json`):
 - **Load powers...** below the Thermal Sources + Boundaries list sets the powers from a file of your circuit simulation, by instance name. Needs gds2palace with `util_thermal_map`.

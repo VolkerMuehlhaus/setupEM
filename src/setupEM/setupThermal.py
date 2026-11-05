@@ -1117,7 +1117,7 @@ class CreateModelTab(CreateModelTabBase):
 def elmer_environment():
     """The environment for ElmerSolver: the system's, with hwloc's OpenGL plug-in off unless HWLOC_COMPONENTS is set.
     OpenMPI loads hwloc at startup, and its GL plug-in probes every X display; on a Linux desktop where one display
-    does not accept connections (hpz2, Ubuntu 26.04: gnome-shell's :1), ElmerSolver waits there forever after
+    does not accept connections (seen on Ubuntu 26.04: gnome-shell's :1), ElmerSolver waits there forever after
     "Authorization required, but no authorization protocol specified". The plug-in only finds GPUs for the hardware
     topology, which Elmer does not use."""
     environment = QProcessEnvironment.systemEnvironment()
@@ -1682,7 +1682,7 @@ class MainWindow(MainWindowBase):
     APP_NAME = APP_NAME
     MODEL_KIND = MODEL_KIND_THERMAL
     # IHP npn cells draw the silicon around each emitter on Activ.mask (1/20), not Activ: without it the heat
-    # sources sit in oxide (IHP's own thermal stack counts Activ.mask as silicon)
+    # sources sit in oxide
     DEFAULT_PURPOSE = "0, 20"
     CONFIG_SUFFIX = CONFIG_SUFFIX
 
