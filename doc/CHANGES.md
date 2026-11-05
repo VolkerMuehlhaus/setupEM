@@ -1,3 +1,7 @@
+# What's New - not released yet
+
+Bundled IHP stackups (from gds2palace 0.9.5): heat source target layers `HEAT_TRANSISTOR` and `HEAT_RESISTOR`, for thermal models. Nothing is drawn on them, so EM models are unchanged.
+
 # What's New - November 5, 2026 (setupEM 0.17.0)
 
 setupThermal works with the thermal export of the KLayout plug-in klayout_em_export (one heat source per transistor and resistor, with the schematic instance names from LVS in `<layout>_thermalmap.json`):
