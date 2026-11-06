@@ -3344,6 +3344,139 @@ class ChipletSwitcher(QWidget):
         self.combo.setCurrentIndex(self._chiplet_ids.index(chiplet_id) + 1)
 
 
+# the 4 sides of gds2palace's settings['margin'] list. No z sides: the stackup
+# sets the z range of the dielectrics.
+MARGIN_SIDES = ("xmin", "xmax", "ymin", "ymax")
+
+
+def as_side_values(value, count=6):
+    """Normalize a saved per-side value (boundary, air_around, margin) to a list
+    of count strings, or None if it's a single value. A native .simcfg stores a
+    list, a .py import a tuple, or the raw text if it couldn't be resolved."""
+    if isinstance(value, str):
+        value = [v.strip().strip("'\"") for v in value.strip("[]() ").split(",")]
+    if isinstance(value, (list, tuple)) and len(value) == count:
+        return [str(v).strip() for v in value]
+    return None
+
+
+def format_number_text(value):
+    """Plain text for a float: 200.0 -> "200", 12.5 -> "12.5"."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() else str(value)
+
+
+def most_common_value(values, preferred_order=()):
+    """Most frequent entry of values. On a tie, the first one in
+    preferred_order, else the first one in values."""
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best = max(counts.values())
+    tied = [v for v in counts if counts[v] == best]
+    for v in preferred_order:
+        if v in tied:
+            return v
+    return tied[0]
+
+
+def margin_from_saved(value):
+    """Split a saved settings['margin'] into the text of the margin field and the
+    sides that differ from it ({side: float}). The most common value of a list
+    becomes the field's text. Text that isn't 4 numbers (e.g. a variable in a
+    script) stays as it is in the field."""
+    values = as_side_values(value, len(MARGIN_SIDES))
+    if values is None:
+        return str(value), {}
+    try:
+        values = [float(v) for v in values]
+    except ValueError:
+        return str(value), {}
+    default = most_common_value(values)
+    return format_number_text(default), {side: v for side, v in zip(MARGIN_SIDES, values) if v != default}
+
+
+def margin_to_saved(default, overrides):
+    """settings['margin'] from the margin field's value and {side: value}: a single
+    value unless some side differs, then a list [xmin, xmax, ymin, ymax]."""
+    values = [overrides.get(side, default) for side in MARGIN_SIDES]
+    return default if len(set(values)) == 1 else values
+
+
+class MarginSidesDialog(QDialog):
+    """Popup editor for the dielectric oversize per side, opened from setupThermal's
+    "Advanced..." button (setupEM has it as a column of its box sides dialog).
+    Blank uses the default from the tab. overrides: {side: value}."""
+
+    def __init__(self, parent, default_text, current_overrides):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowTitle("Dielectric Oversize per Side")
+        self.setModal(True)
+
+        try:
+            self._default = float(default_text)
+        except ValueError:
+            self._default = None
+        self._result = {}
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Override the dielectric oversize for single sides\n"
+                                "(blank = default from the tab)."))
+        grid = QGridLayout()
+        self._edits = {}
+        for row, side in enumerate(MARGIN_SIDES):
+            grid.addWidget(QLabel(side), row, 0)
+            edit = QLineEdit()
+            edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+            edit.setPlaceholderText(default_text)
+            if side in current_overrides:
+                edit.setText(format_number_text(current_overrides[side]))
+            grid.addWidget(edit, row, 1)
+            grid.addWidget(QLabel(" µm"), row, 2)
+            self._edits[side] = edit
+        layout.addLayout(grid)
+
+        button_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset all")
+        reset_btn.clicked.connect(self._reset_all)
+        button_layout.addWidget(reset_btn)
+        button_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self._on_ok)
+        button_layout.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def _reset_all(self):
+        for edit in self._edits.values():
+            edit.clear()
+
+    def _on_ok(self):
+        overrides = {}
+        for side, edit in self._edits.items():
+            text = edit.text().strip()
+            if text:
+                try:
+                    value = float(text)
+                    if value < 0:
+                        raise ValueError
+                except ValueError:
+                    QMessageBox.warning(self, "Error", f"Not a valid dielectric oversize for side '{side}'")
+                    return
+                if value != self._default:
+                    overrides[side] = value
+        self._result = overrides
+        self.accept()
+
+    def get_overrides(self):
+        return self._result
+
+
 class RefinedCellsizeOverrideDialog(QDialog):
     """Popup editor for settings['refined_cellsize_override'], opened from
     MeshTab's "Advanced..." button. Lets the user set a different mesh

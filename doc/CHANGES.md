@@ -1,5 +1,7 @@
 # What's New - not released yet
 
+The dielectric oversize can be set per side (xmin, xmax, ymin, ymax): in setupEM with **Advanced...** next to **Boundary conditions**, in setupThermal with **Advanced...** next to the oversize. It is written to the model script as a list `settings['margin'] = [xmin, xmax, ymin, ymax]`, and read from there and from settings files. Needs gds2palace 0.9.5. A negative oversize is no longer accepted.
+
 Bundled IHP stackups (from gds2palace 0.9.5): heat source target layers `HEAT_TRANSISTOR` and `HEAT_RESISTOR`, for thermal models. Nothing is drawn on them, so EM models are unchanged.
 
 # What's New - November 5, 2026 (setupEM 0.17.0)

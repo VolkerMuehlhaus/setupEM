@@ -55,6 +55,7 @@ if __package__ in (None, ""):
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MARGIN_SIDES, as_side_values, format_number_text, most_common_value, margin_from_saved, margin_to_saved,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -72,6 +73,7 @@ else:
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MARGIN_SIDES, as_side_values, format_number_text, most_common_value, margin_from_saved, margin_to_saved,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -885,47 +887,19 @@ BOUNDARY_DISPLAY_TO_SETTING = {"Absorbing": "ABC", "PEC": "PEC", "PMC": "PMC"}
 BOUNDARY_SETTING_TO_DISPLAY = {v: k for k, v in BOUNDARY_DISPLAY_TO_SETTING.items()}
 
 
-def as_six_values(value):
-    """Normalize a saved boundary/air_around value to a list of 6 strings, or
-    None if it's a single value. A native .simcfg stores a list, a .py import
-    a tuple, or the raw text if it couldn't be resolved."""
-    if isinstance(value, str):
-        value = [v.strip().strip("'\"") for v in value.strip("[]() ").split(",")]
-    if isinstance(value, (list, tuple)) and len(value) == 6:
-        return [str(v).strip() for v in value]
-    return None
-
-
-def format_number_text(value):
-    """Plain text for a float: 200.0 -> "200", 12.5 -> "12.5"."""
-    value = float(value)
-    return str(int(value)) if value.is_integer() else str(value)
-
-
-def most_common_value(values, preferred_order=()):
-    """Most frequent entry of values. On a tie, the first one in
-    preferred_order, else the first one in values."""
-    counts = {}
-    for v in values:
-        counts[v] = counts.get(v, 0) + 1
-    best = max(counts.values())
-    tied = [v for v in counts if counts[v] == best]
-    for v in preferred_order:
-        if v in tied:
-            return v
-    return tied[0]
-
-
 class BoxSidesOverrideDialog(QDialog):
-    """Popup editor for per-side boundary conditions and air layer thickness,
-    opened from MeshTab's "Advanced..." button in the Boundary settings group.
-    Each side either uses the default from the tab (blank / "default") or
-    overrides it. Both are edited together, since they usually go together,
-    e.g. PEC with 0 air at zmin is a backside ground plane at the box boundary.
-    overrides: {side: {'bc': 'PEC', 'air': 0.0}}, either key optional.
+    """Popup editor for per-side boundary conditions, dielectric oversize and air
+    layer thickness, opened from MeshTab's "Advanced..." button in the Boundary
+    settings group. Each side either uses the default from the tab (blank /
+    "default") or overrides it. All are edited together, since they usually go
+    together, e.g. PEC with 0 air at zmin is a backside ground plane at the box
+    boundary. The dielectric oversize has no z sides: the stackup sets the z range.
+    overrides: {side: {'bc': 'PEC', 'margin': 10.0, 'air': 0.0}}, all keys optional.
+    margin_editable: False if a script edited in place sets the margin itself.
     """
 
-    def __init__(self, parent, default_bc_display, default_air_text, current_overrides):
+    def __init__(self, parent, default_bc_display, default_air_text, current_overrides,
+                 default_margin_text="", margin_editable=True):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle("Simulation Box Sides")
@@ -936,17 +910,23 @@ class BoxSidesOverrideDialog(QDialog):
             self._default_air = float(default_air_text)
         except ValueError:
             self._default_air = None
+        try:
+            self._default_margin = float(default_margin_text)
+        except ValueError:
+            self._default_margin = None
+        self._margin_editable = margin_editable
+        self._current_overrides = current_overrides
         self._result = {}
 
         layout = QVBoxLayout()
 
-        info = QLabel("Override the boundary condition or air layer thickness for single sides\n"
-                      "of the simulation box (blank = default from the tab).")
+        info = QLabel("Override the boundary condition, dielectric oversize or air layer thickness\n"
+                      "for single sides of the simulation box (blank = default from the tab).")
         layout.addWidget(info)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Side", "Boundary", "Air layer (µm)"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Side", "Boundary", "Dielectric oversize (µm)", "Air layer (µm)"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         # only the cell widgets take focus - no focus highlight on the Side column
@@ -955,9 +935,11 @@ class BoxSidesOverrideDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
         self._bc_boxes = {}
+        self._margin_edits = {}
         self._air_edits = {}
         self.table.setRowCount(len(BOX_SIDES))
         for row, (side, label) in enumerate(BOX_SIDES):
@@ -976,13 +958,29 @@ class BoxSidesOverrideDialog(QDialog):
             self.table.setCellWidget(row, 1, combo)
             self._bc_boxes[side] = combo
 
+            if side in MARGIN_SIDES:
+                margin_edit = QLineEdit()
+                margin_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+                margin_edit.setPlaceholderText(default_margin_text)
+                margin = current_overrides.get(side, {}).get("margin")
+                if margin is not None:
+                    margin_edit.setText(format_number_text(margin))
+                margin_edit.setEnabled(margin_editable)
+                self.table.setCellWidget(row, 2, margin_edit)
+                self._margin_edits[side] = margin_edit
+            else:
+                no_margin_item = QTableWidgetItem("")
+                no_margin_item.setFlags(Qt.ItemFlag.NoItemFlags)
+                no_margin_item.setToolTip("The stackup sets the z range of the dielectrics")
+                self.table.setItem(row, 2, no_margin_item)
+
             air_edit = QLineEdit()
             air_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
             air_edit.setPlaceholderText(default_air_text)
             air = current_overrides.get(side, {}).get("air")
             if air is not None:
                 air_edit.setText(format_number_text(air))
-            self.table.setCellWidget(row, 2, air_edit)
+            self.table.setCellWidget(row, 3, air_edit)
             self._air_edits[side] = air_edit
         self.table.resizeRowsToContents()
         # fixed 6 rows: size the table to fit them exactly, no empty area or scrollbar
@@ -990,7 +988,7 @@ class BoxSidesOverrideDialog(QDialog):
         self.table.setFixedHeight(self.table.horizontalHeader().sizeHint().height()
                                   + sum(self.table.rowHeight(r) for r in range(self.table.rowCount()))
                                   + 2 * self.table.frameWidth())
-        self.table.setMinimumWidth(440)
+        self.table.setMinimumWidth(600)
 
         button_layout = QHBoxLayout()
         reset_btn = QPushButton("Reset all")
@@ -1011,6 +1009,8 @@ class BoxSidesOverrideDialog(QDialog):
         for side, _ in BOX_SIDES:
             self._bc_boxes[side].setCurrentIndex(0)
             self._air_edits[side].clear()
+            if self._margin_editable and side in self._margin_edits:
+                self._margin_edits[side].clear()
 
     def _on_ok(self):
         overrides = {}
@@ -1020,6 +1020,23 @@ class BoxSidesOverrideDialog(QDialog):
             # an explicit choice equal to the default is the same as "default"
             if bc is not None and bc != self._default_bc:
                 override["bc"] = bc
+
+            if not self._margin_editable:
+                # set by the script: keep what the script has
+                if "margin" in self._current_overrides.get(side, {}):
+                    override["margin"] = self._current_overrides[side]["margin"]
+            elif side in self._margin_edits:
+                margin_text = self._margin_edits[side].text().strip()
+                if margin_text:
+                    try:
+                        margin = float(margin_text)
+                        if margin < 0:
+                            raise ValueError
+                    except ValueError:
+                        QMessageBox.warning(self, "Error", f"Not a valid dielectric oversize for side '{label}'")
+                        return
+                    if margin != self._default_margin:
+                        override["margin"] = margin
 
             air_text = self._air_edits[side].text().strip()
             if air_text:
@@ -1470,6 +1487,8 @@ class MeshTab(QWidget):
             parts = []
             if "bc" in override:
                 parts.append(BOUNDARY_SETTING_TO_DISPLAY[override["bc"]])
+            if "margin" in override:
+                parts.append(f"oversize {format_number_text(override['margin'])} µm")
             if "air" in override:
                 parts.append(f"air {format_number_text(override['air'])} µm")
             if parts:
@@ -1478,11 +1497,13 @@ class MeshTab(QWidget):
             self.boundary_override_btn.setToolTip("Per-side overrides:\n" + "\n".join(lines))
         else:
             self.boundary_override_btn.setToolTip(
-                "Set the boundary condition and air layer thickness per side of the simulation box")
+                "Set the boundary condition, dielectric oversize and air layer thickness per side of the simulation box")
 
     def open_box_sides_override_dialog(self):
         dialog = BoxSidesOverrideDialog(self, self.boundary_box.currentText(),
-                                        self.airaround_edit.text().strip(), self._box_side_overrides)
+                                        self.airaround_edit.text().strip(), self._box_side_overrides,
+                                        default_margin_text=self.margins_edit.text().strip(),
+                                        margin_editable=self.margins_edit.isEnabled())
         if dialog.exec() == QDialog.Accepted:
             self._box_side_overrides = dialog.get_overrides()
             self._update_boundary_override_button_label()
@@ -1613,11 +1634,16 @@ class MeshTab(QWidget):
 
         try:
             value = float(self.margins_edit.text())
+            if value < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value for dielectric oversize margin")
             self.margins_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "margin", "200")))
             return False
-        saved_values ["margin"] = float(value)
+        # a single value unless some side is overridden, then one value per side
+        saved_values ["margin"] = margin_to_saved(value, {side: override["margin"]
+                                                          for side, override in self._box_side_overrides.items()
+                                                          if "margin" in override})
 
         try:
             value = float(self.airaround_edit.text())
@@ -1666,7 +1692,6 @@ class MeshTab(QWidget):
         self.amr_maxdof_edit.setText(str(saved_values.get("amr_max_dof", get_preference(app_name, "amr_max_dof", "2000000"))))
         self.amr_conformal_box.setCurrentIndex(1 if saved_values.get(
             "adaptive_mesh_conformal", get_preference_bool(app_name, "adaptive_mesh_conformal", False)) else 0)
-        self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
         # older .simcfg files and model scripts have filled_metals (True = 'solve_inside') instead
@@ -1691,7 +1716,7 @@ class MeshTab(QWidget):
         # the other sides become overrides in the "Advanced..." dialog.
         self._box_side_overrides = {}
         boundary = saved_values.get("boundary", "")
-        bc_values = as_six_values(boundary)
+        bc_values = as_side_values(boundary)
         if bc_values is None:
             bc_values = [str(boundary).strip("[]() '\"")] * 6
         # gds2palace treats PML the same as ABC; missing/unknown -> default Absorbing
@@ -1702,8 +1727,19 @@ class MeshTab(QWidget):
             if bc != default_bc:
                 self._box_side_overrides.setdefault(side, {})["bc"] = bc
 
+        # margin: a single value or 4 values (xmin, xmax, ymin, ymax), same scheme
+        margin_text, margin_overrides = margin_from_saved(saved_values.get("margin", get_preference(app_name, "margin", "200")))
+        self.margins_edit.setText(margin_text)
+        for side, value in margin_overrides.items():
+            self._box_side_overrides.setdefault(side, {})["margin"] = value
+
         air = saved_values.get("air_around", "")
-        air_values = as_six_values(air)
+        if str(air).strip() == "" and margin_overrides and str(get_preference(app_name, "air_around", "")) == "":
+            # no air_around with a margin per side: gds2palace's default, the margin
+            # of each side and the largest one for the z sides
+            margin_values = [margin_overrides.get(side, float(margin_text)) for side in MARGIN_SIDES]
+            air = margin_values + [max(margin_values)] * 2
+        air_values = as_side_values(air)
         if air_values is not None:
             try:
                 air_values = [float(v) for v in air_values]
@@ -1724,7 +1760,7 @@ class MeshTab(QWidget):
             if str(air_pref) != "":
                 self.airaround_edit.setText(str(air_pref))
             else:
-                self.airaround_edit.setText(str(saved_values.get("margin", get_preference(self.MainWindow.APP_NAME, "margin", "200"))))
+                self.airaround_edit.setText(self.margins_edit.text())
         else:
             # we have air_around defined as a single value
             self.airaround_edit.setText(str(air).strip("[]() "))
@@ -3327,7 +3363,8 @@ class PreferencesDialog(QDialog):
             float(self.refined_cellsize_edit.text())
             float(self.cells_per_wavelength_edit.text())
             float(self.meshsize_max_edit.text())
-            float(self.margin_edit.text())
+            if float(self.margin_edit.text()) < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value in the Mesh tab")
             return
