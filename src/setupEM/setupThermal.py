@@ -1767,6 +1767,9 @@ class MainWindow(MainWindowBase):
         # Load all saved data into tabs
         self.load_all_tabs()
 
+        # size and position of the last session
+        self._restore_window_layout()
+
     # ---------- Menu actions ----------
 
     def show_version(self):

@@ -136,7 +136,7 @@ def test_check_fills_the_port_wall_rows_and_the_deembedding_column(monkeypatch, 
     table = window.ports_tab.portwall_table
     assert table.rowCount() == 1 and table.item(0, 0).text() == "xmin" and table.item(0, 1).text() == "1, 2"
     assert table.item(0, 3).text() == "50" and table.item(0, 4).text() == "200, 400"
-    assert table.item(0, 7).text().startswith("OK")
+    assert table.item(0, 8).text().startswith("OK")
     ports = window.ports_tab.portslist
     assert ports.item(0, 8).text() == "port wall xmin, calibrated" and ports.item(1, 6).text() == "X"
     window.ports_tab.portslist.selectRow(1)
@@ -217,7 +217,7 @@ def test_an_error_on_one_wall_still_checks_the_other(monkeypatch, app, messages,
     window.mesh_tab.set_port_wall("xmax")
     assert not window.ports_tab.check_port_walls(ask=True)
     table = window.ports_tab.portwall_table
-    status = {table.item(r, 0).text(): table.item(r, 7).text() for r in range(table.rowCount())}
+    status = {table.item(r, 0).text(): table.item(r, 8).text() for r in range(table.rowCount())}
     assert "LBE is not a metal layer" in status["xmin"] and status["xmax"].startswith("OK")
     close_window(window)
 
@@ -266,4 +266,89 @@ def test_a_via_port_on_a_port_wall_is_used_as_a_gap_port(monkeypatch, app, messa
     assert ports.item(0, 6).text() == "Z", "the row stays the via port as defined"
     ports.selectRow(0)
     assert "used as a gap port on TopMetal2" in window.ports_tab.direction_note.text()
+    close_window(window)
+
+
+def test_preview_draws_the_shifted_reference_plane(monkeypatch, app, messages, tmp_path):
+    from setupEM.layout_preview import LayoutPreviewWindow
+    from PySide6.QtWidgets import QGraphicsLineItem
+    window, module = open_window(monkeypatch, gssg_gds(tmp_path / "line.gds"))
+    window.mesh_tab.set_port_wall("xmin")
+    monkeypatch.setattr(window, "open_box_sides_dialog", lambda: None)
+    window.ports_tab._port_wall_shift["xmin"] = 40.0
+    preview = LayoutPreviewWindow(window)
+    preview.refresh()
+    labels = [i.text() for i in preview._box_items if hasattr(i, "text")]
+    assert "xmin ref. plane +40 µm" in labels
+    lines = [i.line() for i in preview._box_items if isinstance(i, QGraphicsLineItem) and "reference plane" in i.toolTip()]
+    assert len(lines) == 1 and abs(lines[0].x1() - 40.0) < 1e-9 and lines[0].x1() == lines[0].x2()
+    preview.close()
+    close_window(window)
+
+
+def test_the_tab_checks_port_walls_without_a_result_by_itself(monkeypatch, app, messages, tmp_path):
+    """after loading a settings file the rows are filled when the tab is shown, without questions or message boxes"""
+    window, module = open_window(monkeypatch, gssg_gds(tmp_path / "line.gds", stub_on_ymax=True), ports=(1, 2, 3))
+    window.mesh_tab.set_port_wall("xmin")
+    asked = answer(monkeypatch, "Set port wall")
+    window.ports_tab.check_port_walls(quiet=True)
+    assert window.ports_tab.portwall_table.item(0, 1).text() == "1, 2" and not asked and not messages
+    assert window.ports_tab.portslist.item(0, 8).text() == "port wall xmin, calibrated"
+    close_window(window)
+
+
+def test_window_size_and_divider_are_kept_between_sessions(monkeypatch, app):
+    """in a separate settings store, never the user's"""
+    import uuid
+    from PySide6.QtCore import QSettings
+    import setupEM.setup_common as common
+    org = f"setupEM-test-{uuid.uuid4().hex}"
+    monkeypatch.setattr(common, "RECENT_FILES_ORG", org)
+    monkeypatch.setattr(common.MainWindowBase, "_keeps_window_layout", lambda self: True)
+    try:
+        window, module = open_window(monkeypatch)
+        window.show()
+        window.resize(640, 520)           # within the offscreen screen: Qt fits a restored window into the screen
+        window.ports_tab.lists_splitter.setSizes([300, 300])
+        app.processEvents()
+        sizes = window.ports_tab.lists_splitter.sizes()
+        saved = (window.width(), window.height())      # after the window's own minimum size
+        window._save_window_layout()
+        close_window(window)
+        window, module = open_window(monkeypatch)
+        # the height comes back (the first-start default would be 90 % of the 800 px offscreen screen); the width
+        # is narrowed to that small screen, as Qt does on a real one
+        assert window.height() == saved[1] and window.height() != 720
+        assert window.ports_tab.lists_splitter.sizes() == sizes
+        close_window(window)
+    finally:
+        QSettings(org, "setupEM").clear()
+
+
+def test_extension_auto_is_checked_saved_and_shown(monkeypatch, app, messages, tmp_path):
+    from setupEM.layout_preview import LayoutPreviewWindow
+    lib = gdspy.GdsLibrary()
+    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib.add(cell)
+    for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
+        cell.add(gdspy.Rectangle((0, y0), (20, y1), layer=134))
+        cell.add(gdspy.Rectangle((0, y0), (1, y1), layer=201 + k))
+    cell.add(gdspy.Rectangle((20, -40), (120, 40), layer=134))
+    cell.add(gdspy.Rectangle((0, -60), (120, 60), layer=250))
+    lib.write_gds(str(tmp_path / "dev.gds"))
+    window, module = open_window(monkeypatch, str(tmp_path / "dev.gds"))
+    window.mesh_tab.set_port_wall("xmin")
+    window.ports_tab._port_wall_extension["xmin"] = "auto"
+    assert window.ports_tab.check_port_walls(ask=True), messages
+    E = window.ports_tab._port_wall_result["xmin"]["extension"]
+    assert E > 0 and window.ports_tab._port_wall_result["xmin"]["short"].startswith(f"OK, port wall moved {E:g} µm out")
+    assert window.ports_tab.save_values() and module.saved_values["port_wall_extension"] == {"xmin": "auto"}
+    window.modeleditor_tab.create_model_text()
+    assert "settings['port_wall_extension'] = {'xmin': 'auto'}" in window.modeleditor_tab.model_edit.toPlainText()
+    monkeypatch.setattr(window, "open_box_sides_dialog", lambda: None)
+    preview = LayoutPreviewWindow(window)
+    preview.refresh()
+    labels = [i.text() for i in preview._box_items if hasattr(i, "text")]
+    assert f"xmin: port wall, moved {E:g} µm out" in labels
+    preview.close()
     close_window(window)

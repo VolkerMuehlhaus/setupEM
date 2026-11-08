@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, ast, webbrowser, argparse, shutil, re, glob, subprocess
+import sys, json, os, ast, webbrowser, argparse, shutil, re, glob, subprocess, textwrap
 import numpy as np
 import importlib.metadata
 import importlib.util
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit,QComboBox,QTableWidget,QHeaderView,
     QPushButton, QFileDialog, QTabWidget, QMessageBox, QGroupBox,
     QCheckBox, QAbstractItemView,QStyleFactory,QTableWidgetItem, QPlainTextEdit, QDialog,
-    QDialogButtonBox,
+    QDialogButtonBox, QSplitter, QStyle,
     )
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen, QActionGroup
 from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths, QTimer
@@ -581,7 +581,16 @@ class PortsTab(QWidget):
         self.main_layout.addWidget(self.top_group)
         self.main_layout.addSpacing(20)
 
-        self.main_layout.addWidget(self.bottom_group)
+        # Port overview and Port walls share the rest of the height; drag the handle between them
+        self.lists_splitter = QSplitter(Qt.Vertical)
+        self.lists_splitter.setObjectName("ports_lists")      # its position is kept between sessions
+        self.lists_splitter.setChildrenCollapsible(False)
+        # a visible grip: Qt's default handle is a few invisible pixels
+        self.lists_splitter.setHandleWidth(9)
+        self.lists_splitter.setStyleSheet("QSplitter::handle:vertical { margin: 3px 8px; background: #c8c8c8; "
+                                          "border-radius: 1px; } QSplitter::handle:vertical:hover { background: #909090; }")
+        self.lists_splitter.addWidget(self.bottom_group)
+        self.main_layout.addWidget(self.lists_splitter, 1)
 
         # port walls: box sides set to Port wall on the Mesh and Boundaries tab. The ports on them are
         # calibrated; this group shows what the last check found, and holds the reference plane shift
@@ -590,36 +599,45 @@ class PortsTab(QWidget):
         self._port_wall_shift = {}      # side -> reference plane shift (um)
         self._port_wall_result = {}     # side -> cells and status of the last check
         self._keep_sides = set()        # sides the user chose to keep (not a port wall), this session
-        self.portwall_group = QGroupBox("Port walls (set per box side on the Mesh and Boundaries tab)")
+        self._port_wall_extension = {}  # side -> 'auto' or a length (um): the port wall moved outward
+        self.portwall_group = QGroupBox("Port walls")
         portwall_layout = QVBoxLayout()
-        self.portwall_hint = QLabel("No port wall set. A port wall calibrates the ports on a layout edge: set it per "
-                                    "side in Mesh and Boundaries > Advanced...")
-        self.portwall_hint.setWordWrap(True)
-        portwall_layout.addWidget(self.portwall_hint)
         self.portwall_table = QTableWidget()
-        self.portwall_table.setColumnCount(8)
+        self.portwall_table.setColumnCount(9)
         self.portwall_table.setHorizontalHeaderLabels(["Side", "Ports", "Ground at cut", "D (µm)", "Standards L, 2L (µm)",
-                                                       "Valid to (GHz)", "Reference plane shift (µm)", "Status"])
+                                                       "Valid to (GHz)", "Reference plane shift (µm)", "Extension (µm)",
+                                                       "Status"])
         self.portwall_table.verticalHeader().setVisible(False)
         self.portwall_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.portwall_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         portwall_header = self.portwall_table.horizontalHeader()
-        for col in range(7):
+        for col in range(8):
             portwall_header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         portwall_header.setStretchLastSection(True)
-        self.portwall_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.portwall_table.setWordWrap(False)
+        self.portwall_table.setToolTip("Hover over a status for the full text, double-click to show it")
+        self.portwall_table.cellDoubleClicked.connect(self._show_port_wall_status)
         portwall_layout.addWidget(self.portwall_table)
         portwall_buttons = QHBoxLayout()
         self.check_portwall_button = QPushButton("Check port walls")
+        self.check_portwall_button.setToolTip("Reads the layout, no meshing. A port on a layout edge that is not a port "
+                                              "wall gets the question whether to make it one. A port wall without ground "
+                                              "metal at the cut stops model creation.")
         self.check_portwall_button.clicked.connect(lambda: self.check_port_walls(ask=True))
         portwall_buttons.addWidget(self.check_portwall_button)
-        portwall_buttons.addWidget(QLabel(" reads the layout, no meshing. A port wall without ground metal at the cut "
-                                          "stops model creation."))
+        # only without a port wall: where to set one
+        self.portwall_hint = QLabel(" No port wall: set one per side in Mesh and Boundaries > Advanced...")
+        self.portwall_hint.setToolTip("A port wall is a PEC wall at the layout edge. The ports drawn on it are "
+                                      "calibrated instead of getting the estimated port inductance.")
+        portwall_buttons.addWidget(self.portwall_hint)
         portwall_buttons.addStretch()
         portwall_layout.addLayout(portwall_buttons)
         self.portwall_group.setLayout(portwall_layout)
-        self.main_layout.addSpacing(20)
-        self.main_layout.addWidget(self.portwall_group)
+        self.lists_splitter.addWidget(self.portwall_group)
+        self.lists_splitter.setStretchFactor(0, 3)
+        self.lists_splitter.setStretchFactor(1, 1)
+        self.lists_splitter.setSizes([600, 160])
+        self.lists_splitter.handle(1).setToolTip("Drag to share the height between the port list and the port walls")
         self.portwall_group.setVisible(util_calibration is not None)
 
         self.setLayout(self.main_layout)
@@ -806,6 +824,10 @@ class PortsTab(QWidget):
         super().showEvent(event)
         self.refresh_missing_layer_annotations()
         self.refresh_port_wall_rows()
+        # a port wall without a result (e.g. after loading a settings file): check it once the tab is drawn
+        sides = self.MainWindow.mesh_tab.port_wall_sides() if util_calibration is not None else []
+        if sides and not self.MainWindow.ElmerMode and any(side not in self._port_wall_result for side in sides):
+            QTimer.singleShot(0, lambda: self.check_port_walls(quiet=True))
 
     # ---------------------------------------------------------------- port walls
 
@@ -833,6 +855,28 @@ class PortsTab(QWidget):
             self._port_wall_shift[side] = value
         else:
             self._port_wall_shift.pop(side, None)
+        preview = getattr(self.MainWindow, "layout_preview_window", None)
+        if preview is not None:
+            preview._draw_simulation_box()
+
+    def _set_port_wall_extension(self, side, edit):
+        text = edit.text().strip().lower()
+        if text in ("", "0", "none"):
+            self._port_wall_extension.pop(side, None)
+        elif text == "auto":
+            self._port_wall_extension[side] = "auto"
+        else:
+            try:
+                value = float(text)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Error", f"Extension for port wall {side}: a length in µm (0 or more) or auto")
+                edit.setText(str(self._port_wall_extension.get(side, "")))
+                return
+            self._port_wall_extension[side] = value
+        self._port_wall_result.pop(side, None)          # the check's numbers no longer hold
+        self.refresh_port_wall_rows()
 
     def refresh_port_wall_rows(self):
         """one row per port wall, with the result of the last check"""
@@ -845,6 +889,8 @@ class PortsTab(QWidget):
                 self._port_wall_result.pop(side)
         self.portwall_hint.setVisible(not sides)
         self.portwall_table.setVisible(bool(sides))
+        # without a port wall the panel is just its button row; the port list gets the rest of the height
+        self.portwall_group.setMaximumHeight(16777215 if sides else self.portwall_group.minimumSizeHint().height())
         table = self.portwall_table
         table.setRowCount(len(sides))
         for row, side in enumerate(sides):
@@ -872,18 +918,51 @@ class PortsTab(QWidget):
                 holder_layout.addWidget(edit)
                 holder_layout.addStretch()
                 table.setCellWidget(row, 6, holder)
-            status = QTableWidgetItem(result["status"] if result else 'not checked yet: "Check port walls"')
+            # the extension: blank (none), a length, or auto; after a check, auto shows the length it chose
+            text = str(self._port_wall_extension.get(side, ""))
+            holder = table.cellWidget(row, 7)
+            if holder is not None and holder.property("side") == side:
+                edit = holder.findChild(QLineEdit)
+            else:
+                edit = QLineEdit()
+                edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+                edit.setFixedWidth(70)
+                edit.setPlaceholderText("none")
+                edit.editingFinished.connect(lambda s=side, e=edit: self._set_port_wall_extension(s, e))
+                holder = QWidget()
+                holder.setProperty("side", side)
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(4, 1, 4, 1)
+                holder_layout.addWidget(edit)
+                holder_layout.addStretch()
+                table.setCellWidget(row, 7, holder)
+            edit.setText(text if text != "0" else "")
+            chosen = result.get("extension") if result else None
+            edit.setToolTip((f"auto chose {chosen:g} µm in the last check.\n\n" if text == "auto" and chosen is not None else "")
+                            + EXTENSION_TOOLTIP)
+            full = result["status"] if result else 'not checked yet: "Check port walls"'
+            status = QTableWidgetItem(result.get("short", full) if result else full)
             status.setFlags(Qt.ItemFlag.ItemIsEnabled)
             if result and result.get("error"):
                 status.setForeground(QColor("#b00020"))
-            status.setToolTip(status.text())
-            table.setItem(row, 7, status)
+                status.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+            elif result and result.get("warning"):
+                status.setForeground(QColor("#8a5a00"))
+                status.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxWarning))
+            # a tooltip is one line per line of text: wrap long texts, one bullet per warning
+            status.setToolTip(result.get("tooltip") or textwrap.fill(full, 70) if result else full)
+            status.setData(Qt.UserRole, full)
+            table.setItem(row, 8, status)
         table.resizeRowsToContents()
-        table.setFixedHeight(table.horizontalHeader().sizeHint().height()
-                             + sum(table.rowHeight(r) for r in range(table.rowCount())) + 2 * table.frameWidth())
 
-    def _read_layout_for_port_walls(self):
-        """the layout as gds2palace reads it, or None after a message"""
+    def _show_port_wall_status(self, row, col):
+        item = self.portwall_table.item(row, 8)
+        side = self.portwall_table.item(row, 0)
+        if item is not None and side is not None:
+            QMessageBox.information(self, f"Port wall {side.text()}", item.data(Qt.UserRole) or item.text())
+
+    def _read_layout_for_port_walls(self, quiet=False):
+        """the layout as gds2palace reads it, or None after a message (in the Status column when quiet)"""
         import io, contextlib
         mw = self.MainWindow
         layernumbers = mw.metals_list.getlayernumbers() + list(simulation_ports.portlayers)
@@ -897,17 +976,29 @@ class PortsTab(QWidget):
                                            gds_boundary_layers=mw.dielectrics_list.get_boundary_layers())
         except (Exception, SystemExit) as e:
             details = captured.getvalue().strip() or str(e)
-            QMessageBox.critical(self, "Port walls", f"Could not read the GDSII layout:\n\n{details}")
+            if quiet:
+                for side in self.MainWindow.mesh_tab.port_wall_sides():
+                    self._port_wall_result[side] = {"cells": ["", "", "", "", ""], "short": "could not read the layout",
+                                                    "status": f"Could not read the GDSII layout: {details}", "error": True}
+                self.refresh_port_wall_rows()
+            else:
+                QMessageBox.critical(self, "Port walls", f"Could not read the GDSII layout:\n\n{details}")
             return None
 
-    def check_port_walls(self, ask=True, only_with_port_walls=False):
+    def check_port_walls(self, ask=True, only_with_port_walls=False, quiet=False):
         """Check the ports on the layout edge against the port walls. Reads the layout, no meshing. Offers to make a
         side a port wall when a port lies on it, fills the Port walls rows and the De-embedding column. Returns False
         when the model must not be created (an error at a port wall). With only_with_port_walls (model creation),
-        nothing is read unless a port wall is set."""
+        nothing is read unless a port wall is set. quiet (the tab shows itself): no message boxes, no questions,
+        the files as already saved; problems show in the Status column."""
         mw = self.MainWindow
         if util_calibration is None or mw.ElmerMode:
             return True
+        if quiet:
+            ask = False
+            only_with_port_walls = True
+            if not os.path.isfile(str(saved_values.get("GdsFile", ""))):
+                return True
         if only_with_port_walls and not mw.mesh_tab.port_wall_sides():
             self._wall_of_port = {}
             self._update_deembedding_column({}, [], None)
@@ -916,12 +1007,12 @@ class PortsTab(QWidget):
             if not only_with_port_walls:
                 QMessageBox.warning(self, "Port walls", "Load a GDSII file and XML stackup first")
             return not only_with_port_walls
-        if not (mw.file_tab.save_values() and mw.frequencies_tab.save_values() and mw.mesh_tab.save_values()
+        if not ((quiet or mw.file_tab.save_values()) and mw.frequencies_tab.save_values() and mw.mesh_tab.save_values()
                 and self.save_values()):
             return False
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            allpolygons = self._read_layout_for_port_walls()
+            allpolygons = self._read_layout_for_port_walls(quiet)
         finally:
             QApplication.restoreOverrideCursor()
         if allpolygons is None:
@@ -963,7 +1054,7 @@ class PortsTab(QWidget):
                     allpolygons, mw.metals_list, mw.materials_list, mw.dielectrics_list, simulation_ports,
                     saved_values["boundary"], fmax, float(saved_values.get("unit", 1e-6)),
                     reference_plane_shift=dict(self._port_wall_shift), deembedding_length=saved_values.get("deembedding_length"),
-                    collect_errors=True)
+                    collect_errors=True, port_wall_extension=dict(self._port_wall_extension))
             except util_calibration.PortWallError as e:
                 error = str(e)
         errors = dict((result or {}).get("errors", {}))
@@ -993,11 +1084,28 @@ class PortsTab(QWidget):
                 else:
                     text = f"ERROR: {error}" if error and (side in error or not any(w in error for w in walls)) else ""
                 self._port_wall_result[side] = {"cells": ["", "", "", "", ""], "status": text or "not checked",
+                                                "short": (text if len(text) <= 70 else text[:70] + "...") if text else "not checked",
                                                 "error": bool(text)}
                 continue
             valid = f"{g['valid_to_GHz']:.3g}" + (" (all)" if g["valid_to_GHz"] >= 0.9999 * g["fmax_GHz"] else "")
             status = "OK" + ((": " + "; ".join(g["warnings"])) if g["warnings"] else "")
-            self._port_wall_result[side] = {
+            n = len(g["warnings"])
+            u, size, E = g.get("uniform_from_wall"), g.get("device_size"), g.get("extension", 0.0)
+            distance = (f"device {u + E:.0f} µm from the port wall" + (f", limit {size / 2:.0f} µm (half its size)" if size else "")
+                        if u is not None else "no device within the checked range")
+            if E:
+                distance = f"port wall moved {E:g} µm out, " + distance
+            if n:
+                first = g["warnings"][0]
+                short = (first if len(first) <= 80 else first[:80] + "...") + (f" (+{n - 1} more)" if n > 1 else "")
+            else:
+                short = "OK, " + distance
+            lines = ["OK" + (f", {n} warning{'s' if n > 1 else ''}:" if n else "")]
+            lines += [textwrap.fill(w, 70, initial_indent="• ", subsequent_indent="   ") for w in g["warnings"]]
+            lines.append(distance[0].upper() + distance[1:])
+            lines += [textwrap.fill(note, 70) for note in g.get("notes", [])]
+            self._port_wall_result[side] = {"short": short, "warning": bool(n), "tooltip": "\n\n".join(lines),
+                "uniform": u, "extension": g.get("extension", 0.0),
                 "cells": [", ".join(str(p) for p in g["ports"]), ", ".join(g["ground_layers"]), f"{g['D']:.4g}",
                           f"{g['L']:g}, {2 * g['L']:g}", valid], "status": status, "error": False}
             for p in g["ports"]:
@@ -1006,6 +1114,9 @@ class PortsTab(QWidget):
                 if detail.get("converted"):
                     self._converted_port[detail["portnumber"]] = detail["target_layer"]
         self.refresh_port_wall_rows()
+        preview = getattr(self.MainWindow, "layout_preview_window", None)
+        if preview is not None:
+            preview._draw_simulation_box()
 
     def _update_deembedding_column(self, edge, walls, error):
         """per port in words: calibrated at a port wall, or the estimated port inductance"""
@@ -1031,6 +1142,7 @@ class PortsTab(QWidget):
             else:
                 text = "estimated port inductance" if edge or walls else ""
             item = QTableWidgetItem(text)
+            item.setToolTip(text)
             if color:
                 item.setForeground(QColor(color))
             self.portslist.setItem(row, 8, item)
@@ -1092,6 +1204,11 @@ class PortsTab(QWidget):
             saved_values["reference_plane_shift"] = shift
         else:
             saved_values.pop("reference_plane_shift", None)
+        extension = {side: value for side, value in self._port_wall_extension.items() if side in walls and value}
+        if extension:
+            saved_values["port_wall_extension"] = extension
+        else:
+            saved_values.pop("port_wall_extension", None)
         return True
 
     def load_values(self):
@@ -1100,6 +1217,16 @@ class PortsTab(QWidget):
             self._port_wall_shift = {side: float(value) for side, value in dict(shift).items()}
         except (TypeError, ValueError):
             self._port_wall_shift = {}
+        extension = saved_values.get("port_wall_extension") or {}
+        self._port_wall_extension = {}
+        for side, value in dict(extension).items():
+            if str(value).lower() == "auto":
+                self._port_wall_extension[side] = "auto"
+            else:
+                try:
+                    self._port_wall_extension[side] = float(value)
+                except (TypeError, ValueError):
+                    pass
         self._port_wall_result = {}
         self._wall_of_port = {}
         self._keep_sides = set()
@@ -1188,6 +1315,11 @@ except ImportError:
 PORTWALL = "PORTWALL"
 PORTWALL_DISPLAY = "Port wall"
 PORTWALL_TOOLTIP = "A port wall is PEC at the layout edge: no dielectric oversize, no air"
+EXTENSION_TOOLTIP = ("Moves the port wall outward: the feed is extended by the cross-section at the wall,\n"
+                     "and the reference plane is shifted back to the layout edge.\n"
+                     "A length in µm, or auto (until the device is D and half its size from the wall).\n"
+                     "Exact where the return current flows in a plane under the lines;\n"
+                     "not with ground strips that end open before the device.")
 if util_calibration is not None:
     BOUNDARY_SETTING_TO_DISPLAY[PORTWALL] = PORTWALL_DISPLAY
 
@@ -1874,8 +2006,19 @@ class MeshTab(QWidget):
             bc = override.get("bc", default_bc)
             out[side] = {"bc": BOUNDARY_SETTING_TO_DISPLAY.get(bc, bc), "portwall": bc == PORTWALL,
                          "margin": override.get("margin", default_margin) if side in MARGIN_SIDES else None,
-                         "air": override.get("air", default_air)}
+                         "air": override.get("air", default_air),
+                         "shift": self.MainWindow.ports_tab._port_wall_shift.get(side, 0.0) if bc == PORTWALL else 0.0,
+                         "uniform": (self.MainWindow.ports_tab._port_wall_result.get(side) or {}).get("uniform")
+                                    if bc == PORTWALL else None,
+                         "extension": self._extension_for_preview(side) if bc == PORTWALL else 0.0}
         return out
+
+    def _extension_for_preview(self, side):
+        ports = self.MainWindow.ports_tab
+        value = ports._port_wall_extension.get(side, 0.0)
+        if value == "auto":
+            return (ports._port_wall_result.get(side) or {}).get("extension") or 0.0
+        return float(value or 0.0)
 
     def port_wall_sides(self):
         """the box sides set to Port wall"""
@@ -3288,7 +3431,7 @@ class ModelEditorTab(QWidget):
                       'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
-            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension']),
             ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
         ]
@@ -3893,6 +4036,9 @@ class MainWindow(MainWindowBase):
 
         # Load all saved data into tabs
         self.load_all_tabs()
+
+        # size, position and the Ports tab's divider of the last session
+        self._restore_window_layout()
 
     # ---------- Menu Bar (Simulator menu is EM-specific) ----------
     def create_additional_menus(self, menu_bar):

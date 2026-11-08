@@ -72,6 +72,7 @@ DEFAULT_LAYER_OPACITY_PERCENT = 70
 BOX_FRAME_COLOR = "#f2c14e"
 PORT_WALL_COLOR = "#ffffff"
 BOX_FRAME_OFFSET = 0.12
+UNIFORM_END_COLOR = "#8be28b"     # where the cross-section at a port wall stops being uniform
 
 # above this many polygons on the selected layers/purpose, refresh() warns
 # before actually reading the GDS - gds_reader.read_gds() flattens the whole
@@ -796,9 +797,13 @@ class LayoutPreviewWindow(QDialog):
         offset = {}
         for side in ("xmin", "xmax", "ymin", "ymax"):
             info = sides[side]
-            offset[side] = 0.0 if info["portwall"] or ((info["margin"] or 0) + (info["air"] or 0)) == 0 else d
+            if info["portwall"]:
+                offset[side] = info.get("extension") or 0.0        # a moved port wall: to scale, it is real geometry
+            else:
+                offset[side] = 0.0 if ((info["margin"] or 0) + (info["air"] or 0)) == 0 else d
         fx0, fx1 = x0 - offset["xmin"], x1 + offset["xmax"]
         fy0, fy1 = y0 - offset["ymin"], y1 + offset["ymax"]
+        self._box_rect = QRectF(QPointF(fx0, -fy1), QPointF(fx1, -fy0))
 
         def add(item, z=-1):
             item.setZValue(z)
@@ -817,8 +822,24 @@ class LayoutPreviewWindow(QDialog):
         add(frame)
         wall_pen = QPen(QColor(PORT_WALL_COLOR), 5)
         wall_pen.setCosmetic(True)
-        ends = {"xmin": ((x0, fy0), (x0, fy1)), "xmax": ((x1, fy0), (x1, fy1)),
-                "ymin": ((fx0, y0), (fx1, y0)), "ymax": ((fx0, y1), (fx1, y1))}
+        ends = {"xmin": ((fx0, fy0), (fx0, fy1)), "xmax": ((fx1, fy0), (fx1, fy1)),
+                "ymin": ((fx0, fy0), (fx1, fy0)), "ymax": ((fx0, fy1), (fx1, fy1))}
+        # the feed extension between a moved port wall and the layout edge: shaded, it is not in the drawing
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            E = sides[side].get("extension") or 0.0 if sides[side]["portwall"] else 0.0
+            if not E:
+                continue
+            region = {"xmin": (fx0, y0, x0, y1), "xmax": (x1, y0, fx1, y1),
+                      "ymin": (x0, fy0, x1, y0), "ymax": (x0, y1, x1, fy1)}[side]
+            shade = QGraphicsPathItem()
+            area = QPainterPath()
+            area.addRect(QRectF(QPointF(region[0], -region[3]), QPointF(region[2], -region[1])))
+            shade.setPath(area)
+            shade.setBrush(QBrush(QColor(255, 255, 255, 45), Qt.BDiagPattern))
+            shade.setPen(Qt.NoPen)
+            shade.setToolTip(f"{side}: feed extended by {E:g} µm with the cross-section at the wall (not in the drawing); "
+                             "the reference plane is shifted back to the layout edge")
+            add(shade, z=1e6 - 3)
         for side, ((ax, ay), (bx, by)) in ends.items():
             if sides[side]["portwall"]:
                 line = QGraphicsLineItem(QLineF(QPointF(ax, -ay), QPointF(bx, -by)))
@@ -826,10 +847,71 @@ class LayoutPreviewWindow(QDialog):
                 line.setToolTip(f"{side}: port wall (PEC at the layout edge)")
                 add(line, z=self._highlight_zvalue + 0.5 if hasattr(self, "_highlight_zvalue") else 0)
 
+        # reference plane shifted into the layout along the feed: a dashed line at its real position, in the port colour
+        plane_pen = QPen(QColor(PORT_OUTLINE_COLOR), 2)
+        plane_pen.setCosmetic(True)
+        plane_pen.setStyle(Qt.DashLine)
+        plane_font = QFont()
+        plane_font.setPointSize(9)
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            shift = sides[side].get("shift", 0.0) if sides[side]["portwall"] else 0.0
+            if not shift:
+                continue
+            if side in ("xmin", "xmax"):
+                x = x0 + shift if side == "xmin" else x1 - shift
+                ends, anchor = ((x, y0), (x, y1)), (x, -y1)
+            else:
+                y = y0 + shift if side == "ymin" else y1 - shift
+                ends, anchor = ((x0, y), (x1, y)), (x1, -y)
+            line = QGraphicsLineItem(QLineF(QPointF(ends[0][0], -ends[0][1]), QPointF(ends[1][0], -ends[1][1])))
+            line.setPen(plane_pen)
+            line.setToolTip(f"{side}: reference plane {shift:g} µm into the layout (Ports tab, Port walls)")
+            add(line, z=1e6 - 1)
+            label = QGraphicsSimpleTextItem(f"{side} ref. plane {shift:+g} µm")
+            label.setFont(plane_font)
+            label.setBrush(QBrush(QColor(PORT_OUTLINE_COLOR)))
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            label.setTransform(QTransform.fromTranslate(4, 2) if side in ("xmin", "xmax")
+                               else QTransform.fromTranslate(-r.width() - 4, -r.height() - 2))
+            label.setPos(*anchor)
+            add(label, z=1e6)
+
+        # where the cross-section at a port wall stops being uniform (from the last port wall check): the device starts
+        # there, and a reference plane shift must stay before it
+        end_pen = QPen(QColor(UNIFORM_END_COLOR), 1.5)
+        end_pen.setCosmetic(True)
+        end_pen.setStyle(Qt.DotLine)
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            end = sides[side].get("uniform") if sides[side]["portwall"] else None
+            if end is None:
+                continue
+            if side in ("xmin", "xmax"):
+                x = x0 + end if side == "xmin" else x1 - end
+                ends, anchor = ((x, y0), (x, y1)), (x, -y0)
+            else:
+                y = y0 + end if side == "ymin" else y1 - end
+                ends, anchor = ((x0, y), (x1, y)), (x0, -y)
+            line = QGraphicsLineItem(QLineF(QPointF(ends[0][0], -ends[0][1]), QPointF(ends[1][0], -ends[1][1])))
+            line.setPen(end_pen)
+            line.setToolTip(f"{side}: the cross-section at the port wall stays the same up to here ({end:.0f} µm); "
+                            "the device starts here, a reference plane shift must stay before it")
+            add(line, z=1e6 - 2)
+            label = QGraphicsSimpleTextItem(f"{side} uniform feed {end:.0f} µm")
+            label.setFont(plane_font)
+            label.setBrush(QBrush(QColor(UNIFORM_END_COLOR)))
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            label.setTransform(QTransform.fromTranslate(4, -r.height() - 2) if side in ("xmin", "xmax")
+                               else QTransform.fromTranslate(4, 2))
+            label.setPos(*anchor)
+            add(label, z=1e6)
+
         def text_of(side):
             info = sides[side]
             if info["portwall"]:
-                return f"{side}: port wall"
+                E = info.get("extension") or 0.0
+                return f"{side}: port wall" + (f", moved {E:g} µm out" if E else "")
             parts = [info["bc"]]
             if info["margin"] is not None:
                 parts.append(f"oversize {info['margin']:g} µm")
@@ -1230,9 +1312,15 @@ class LayoutPreviewWindow(QDialog):
             # info_label (base text + selection, if any) via _update_info_label()
             self.set_highlighted_layer(self._highlighted_layer_name)
 
+            self._box_rect = None
             self._draw_simulation_box()
 
+            # fit the layout and its box: labels have a fixed size in pixels, and on a small layout they would
+            # dominate the bounding rectangle and leave the layout small in a corner
             rect = scene.itemsBoundingRect()
+            if self._box_rect is not None:
+                m = 0.18 * max(self._box_rect.width(), self._box_rect.height())
+                rect = self._box_rect.adjusted(-m, -m, m, m)
             if not rect.isEmpty():
                 scene.setSceneRect(rect)
                 self.canvas.fitInView(rect, Qt.KeepAspectRatio)

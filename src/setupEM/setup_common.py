@@ -5920,9 +5920,48 @@ class MainWindowBase(QMainWindow):
 
     def closeEvent(self, event):
         if self.confirm_unsaved_script():
+            self._save_window_layout()
             super().closeEvent(event)
         else:
             event.ignore()
+
+    # ---------- window size, position and splitters, kept from one session to the next ----------
+
+    def _keeps_window_layout(self):
+        # offscreen (the automated tests): nothing is read or written, the user's settings stay as they are
+        return QApplication.platformName() != "offscreen"
+
+    def _restore_window_layout(self):
+        """the window's size and position and the splitters (by object name) of the last session; on a first start a
+        size that fits the screen instead of a small fixed one"""
+        settings = QSettings(RECENT_FILES_ORG, self.APP_NAME)
+        geometry = settings.value("window_geometry") if self._keeps_window_layout() else None
+        if geometry is None or not self.restoreGeometry(geometry):
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                width = min(1100, int(0.9 * available.width()))
+                height = min(1100, int(0.9 * available.height()))
+                self.setGeometry(available.x() + (available.width() - width) // 2,
+                                 available.y() + (available.height() - height) // 2, width, height)
+        if not self._keeps_window_layout():
+            return
+        from PySide6.QtWidgets import QSplitter
+        for splitter in self.findChildren(QSplitter):
+            if splitter.objectName():
+                state = settings.value(f"splitter/{splitter.objectName()}")
+                if state is not None:
+                    splitter.restoreState(state)
+
+    def _save_window_layout(self):
+        if not self._keeps_window_layout():
+            return
+        from PySide6.QtWidgets import QSplitter
+        settings = QSettings(RECENT_FILES_ORG, self.APP_NAME)
+        settings.setValue("window_geometry", self.saveGeometry())
+        for splitter in self.findChildren(QSplitter):
+            if splitter.objectName():
+                settings.setValue(f"splitter/{splitter.objectName()}", splitter.saveState())
 
     def _recent_files(self, key):
         files = QSettings(RECENT_FILES_ORG, self.APP_NAME).value(key, [])
