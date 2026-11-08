@@ -66,6 +66,13 @@ MARKER_OUTLINE_WIDTH = 3
 # initial layer-opacity slider position
 DEFAULT_LAYER_OPACITY_PERCENT = 70
 
+# the simulation box around the layout (setupEM only): one frame, not to scale, at a fixed fraction of
+# the layout size on each side with dielectric oversize or air; a port wall is a heavy line on the
+# layout edge. The labels carry the real numbers, a click on one opens the Simulation Box Sides dialog.
+BOX_FRAME_COLOR = "#f2c14e"
+PORT_WALL_COLOR = "#ffffff"
+BOX_FRAME_OFFSET = 0.12
+
 # above this many polygons on the selected layers/purpose, refresh() warns
 # before actually reading the GDS - gds_reader.read_gds() flattens the whole
 # cell hierarchy (expanding every array/reference into real geometry) and
@@ -235,6 +242,24 @@ MEASURE_COLOR = "#ffff00"
 # a left-button press/release closer together than this (viewport pixels) is a
 # click, not the start of a pan drag - see LayoutCanvas.mouseReleaseEvent()
 CLICK_MAX_MOVE_PX = 4
+
+
+class _ClickableBoxLabel(QGraphicsSimpleTextItem):
+    """the label of a box side: a click opens the Simulation Box Sides dialog"""
+
+    def __init__(self, text, on_click):
+        super().__init__(text)
+        self._on_click = on_click
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+
+    def mousePressEvent(self, event):
+        event.accept()      # keeps the view from starting a pan drag
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+        if self._on_click is not None:
+            self._on_click()
 
 
 class LayoutCanvas(QGraphicsView):
@@ -754,6 +779,109 @@ class LayoutPreviewWindow(QDialog):
 
         self.legend_layout.addWidget(row)
 
+    def _draw_simulation_box(self):
+        """the simulation box around the layout, not to scale (see BOX_FRAME_OFFSET); nothing without box settings
+        from the main window (setupThermal)"""
+        scene = self.canvas.scene()
+        for item in getattr(self, "_box_items", []):
+            scene.removeItem(item)
+        self._box_items = []
+        get_sides = getattr(self.MainWindow, "box_sides_for_preview", None)
+        bbox = getattr(self, "_layout_bbox", None)
+        sides = get_sides() if get_sides is not None else None
+        if not sides or bbox is None:
+            return
+        x0, x1, y0, y1 = bbox
+        d = BOX_FRAME_OFFSET * max(x1 - x0, y1 - y0, 1e-9)
+        offset = {}
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            info = sides[side]
+            offset[side] = 0.0 if info["portwall"] or ((info["margin"] or 0) + (info["air"] or 0)) == 0 else d
+        fx0, fx1 = x0 - offset["xmin"], x1 + offset["xmax"]
+        fy0, fy1 = y0 - offset["ymin"], y1 + offset["ymax"]
+
+        def add(item, z=-1):
+            item.setZValue(z)
+            scene.addItem(item)
+            self._box_items.append(item)
+            return item
+
+        pen = QPen(QColor(BOX_FRAME_COLOR), 1.5)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        frame = QGraphicsPathItem()
+        path = QPainterPath()
+        path.addRect(QRectF(QPointF(fx0, -fy1), QPointF(fx1, -fy0)))
+        frame.setPath(path)
+        frame.setPen(pen)
+        add(frame)
+        wall_pen = QPen(QColor(PORT_WALL_COLOR), 5)
+        wall_pen.setCosmetic(True)
+        ends = {"xmin": ((x0, fy0), (x0, fy1)), "xmax": ((x1, fy0), (x1, fy1)),
+                "ymin": ((fx0, y0), (fx1, y0)), "ymax": ((fx0, y1), (fx1, y1))}
+        for side, ((ax, ay), (bx, by)) in ends.items():
+            if sides[side]["portwall"]:
+                line = QGraphicsLineItem(QLineF(QPointF(ax, -ay), QPointF(bx, -by)))
+                line.setPen(wall_pen)
+                line.setToolTip(f"{side}: port wall (PEC at the layout edge)")
+                add(line, z=self._highlight_zvalue + 0.5 if hasattr(self, "_highlight_zvalue") else 0)
+
+        def text_of(side):
+            info = sides[side]
+            if info["portwall"]:
+                return f"{side}: port wall"
+            parts = [info["bc"]]
+            if info["margin"] is not None:
+                parts.append(f"oversize {info['margin']:g} µm")
+            parts.append(f"air {info['air']:g} µm")
+            return f"{side}: " + ", ".join(parts)
+
+        opener = getattr(self.MainWindow, "open_box_sides_dialog", None)
+
+        def on_click():
+            if opener is not None:
+                opener()
+                self._draw_simulation_box()
+
+        font = QFont()
+        font.setPointSize(9)
+        # (side, anchor in scene coordinates, rotation): labels sit just outside the frame. The x side labels start at
+        # the top end of the side, away from its middle, where ports usually are
+        anchors = [("xmin", (fx0, -fy1), -90), ("xmax", (fx1, -fy1), 90),
+                   ("ymin", ((x0 + x1) / 2, -fy0), 0), ("ymax", ((x0 + x1) / 2, -fy1), 0)]
+        for side, (px, py), rotation in anchors:
+            label = _ClickableBoxLabel(text_of(side), on_click)
+            label.setFont(font)
+            label.setBrush(QBrush(QColor(PORT_WALL_COLOR if sides[side]["portwall"] else BOX_FRAME_COLOR)))
+            label.setToolTip(("Port wall: PEC at the layout edge, no dielectric oversize, no air. " if sides[side]["portwall"] else "")
+                             + "Click to change the box sides (Mesh and Boundaries > Advanced...)")
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            # centred on the side, 6 px outside the frame
+            gap = 6
+            if side == "ymax":
+                transform = QTransform.fromTranslate(-r.width() / 2, -r.height() - gap)
+            elif side == "ymin":
+                transform = QTransform.fromTranslate(-r.width() / 2, gap)
+            elif side == "xmin":
+                # reads bottom to top, ends 10 px below the top corner
+                transform = QTransform().rotate(rotation).translate(-r.width() - 10, -r.height() - gap)
+            else:
+                # reads top to bottom, starts 10 px below the top corner
+                transform = QTransform().rotate(rotation).translate(10, -r.height() - gap)
+            label.setTransform(transform)
+            label.setPos(px, py)
+            add(label, z=1e6)
+        z_text = "   ".join(f"{side}: {sides[side]['bc']}, air {sides[side]['air']:g} µm" for side in ("zmin", "zmax"))
+        z_label = _ClickableBoxLabel(z_text, on_click)
+        z_label.setFont(font)
+        z_label.setBrush(QBrush(QColor("#8fd3ff")))
+        z_label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        r = z_label.boundingRect()
+        z_label.setTransform(QTransform.fromTranslate(-r.width(), 6 + r.height() + 6))
+        z_label.setPos(fx1, -fy0)
+        add(z_label, z=1e6)
+
     def _polygon_points(self, poly):
         return QPolygonF([QPointF(float(x), float(-y)) for x, y in zip(poly.pts_x, poly.pts_y)])
 
@@ -865,6 +993,8 @@ class LayoutPreviewWindow(QDialog):
             scene = self.canvas.scene()
             self.canvas.forget_measurement_items()
             scene.clear()
+            self._box_items = []
+            self._layout_bbox = allpolygons.get_bounding_box()
             self._clear_legend()
 
             # regular stackup layers, bottom (lowest zmin) to top - so later (higher)
@@ -1099,6 +1229,8 @@ class LayoutPreviewWindow(QDialog):
             # outlines were just rebuilt from scratch above; this also refreshes
             # info_label (base text + selection, if any) via _update_info_label()
             self.set_highlighted_layer(self._highlighted_layer_name)
+
+            self._draw_simulation_box()
 
             rect = scene.itemsBoundingRect()
             if not rect.isEmpty():

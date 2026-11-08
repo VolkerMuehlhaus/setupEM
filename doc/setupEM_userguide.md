@@ -52,6 +52,7 @@ Document version: 2026-10-31
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
+- **Calibrated ports at port walls**: a box side can be a **Port wall**, and the ports on it are calibrated with standards instead of the estimated port inductance — see "[Port walls](#port-walls-calibrated-ports-at-the-layout-edge)".
 - **A built-in 3D field viewer**, an in-app alternative to external ParaView, with a clip plane, vector-arrow overlay, and per-solver color presets — see chapter "[3D Field Viewer](#3d-field-viewer)".
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
@@ -193,6 +194,18 @@ Palace doesn't use the port **voltage** parameter physically - setupEM repurpose
 
 <img src="./png/ports2.png" alt="ports" width="700">
 
+### Port walls (calibrated ports at the layout edge)
+
+A port at the edge of the layout can be calibrated instead of getting the estimated port inductance. Make that side a **Port wall** in **Mesh and Boundaries > Advanced...**: a PEC wall right at the layout edge, where the lines leave the layout. Draw the lines to the edge, the port polygon on the edge over the end of each line (its depth is the gap that gds2palace cuts out of the line), and let ground metal reach the edge next to the lines. See "Calibrated de-embedding at port walls" in the gds2palace user guide for why and how.
+
+When a side is a port wall:
+
+- **Port overview** shows in the column **De-embedding** what happens at each port: "port wall xmin, calibrated", "estimated port inductance" for other ports, or in amber a port that lies on an edge which is not a port wall.
+- The **Direction** of a port on a port wall is set by the side (into the layout) and can't be changed.
+- The group **Port walls** lists each port wall after **Check port walls**: its ports, the ground metal found at the cut, D, the lengths of the two calibration standards, the frequency up to which the calibration is valid, and warnings or the error. **Reference plane shift (µm)** moves the reference plane into the layout along the feed; it is the only setting here.
+
+**Check port walls** reads the layout, without meshing. When a port lies on an edge that is not a port wall, it asks whether to make that side a port wall (once per side and session). **Create Model** runs the same check when a port wall is set, and stops when a port wall can't be calibrated, e.g. without ground metal at the cut.
+
 ## Mesh and Boundaries tab
 
 Controls the mesh used for simulation, trading off accuracy against simulation time.
@@ -216,6 +229,8 @@ The same group holds Palace's linear solver setting, which controls how Palace s
 The **Boundary settings** group sets the boundary condition on the outside of the simulation box: **Absorbing**, **PEC** or **PMC**. The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here. Both can be 0, but **the air layer can't be 0 on all six sides**: no air volume is left then, and the model stops with an error.
 
 **Advanced...** next to **Boundary conditions** sets the boundary condition, the dielectric oversize and the air layer thickness for single sides of the simulation box: xmin, xmax, ymin, ymax, zmin (bottom) and zmax (top). The oversize has no z sides, because the stackup sets the z range of the dielectrics. A blank entry uses the value from the tab. The button shows how many sides have their own setting, and its tooltip lists them. A typical use is a backside ground plane: **PEC** at zmin with 0 µm air puts the boundary right at the bottom of the substrate, instead of an air layer below it. With 0 µm oversize and 0 µm air on a side, metal at the edge of the drawing ends directly at the boundary. An **Absorbing** boundary right at a conductor or sheet resistor changes its result, and the log shows a warning, so keep some air there unless you have checked this; see "Conductors at the simulation boundary" in the gds2palace user guide.
+
+**Port wall** (xmin, xmax, ymin and ymax, Palace only) is a PEC wall at the layout edge for calibrated ports, see "[Port walls](#port-walls-calibrated-ports-at-the-layout-edge)" in the Ports tab chapter. Choosing it sets the oversize and the air of that side to 0 and locks them. The layout preview draws the simulation box around the layout: one frame per side, not to scale, with the side's boundary, oversize and air as a label, and a port wall as a white line on the layout edge. A click on a label opens this dialog.
 
 <img src="./png/mesh2.png" alt="box sides" width="460">
 
