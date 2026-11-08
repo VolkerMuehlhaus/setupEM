@@ -186,3 +186,60 @@ def test_layout_preview_draws_the_box(monkeypatch, app, messages, tmp_path):
     assert opened == [1]
     preview.close()
     close_window(window)
+
+
+def test_a_via_port_row_keeps_topmetal2_as_target(monkeypatch, app, tmp_path):
+    """showing a via port row must not reset the target box to the first layer (LBE): switching that port to in-plane
+    would then silently pick a dielectric layer"""
+    window, module = open_window(monkeypatch, gssg_gds(tmp_path / "line.gds"))
+    window.ports_tab.update_port_from_import([
+        {"portnumber": 1, "port_Z0": 50, "voltage": 1, "source_layernum": 201, "from_layername": "Metal3",
+         "to_layername": "TopMetal2", "direction": "Z"}])
+    window.ports_tab.portslist.selectRow(0)
+    assert window.ports_tab.target_box.currentText() == "TopMetal2"
+    close_window(window)
+
+
+def test_an_error_on_one_wall_still_checks_the_other(monkeypatch, app, messages, tmp_path):
+    lib = gdspy.GdsLibrary()
+    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib.add(cell)
+    for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
+        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdspy.Rectangle((0, y0), (1, y1), layer=201 + k))
+        cell.add(gdspy.Rectangle((299, y0), (300, y1), layer=203 + k))
+    for y0, y1 in ((-65, -25), (25, 65)):
+        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
+    lib.write_gds(str(tmp_path / "line.gds"))
+    window, module = open_window(monkeypatch, str(tmp_path / "line.gds"), ports=(1, 2, 3, 4))
+    window.ports_tab.portslist.item(0, 3).setText("LBE")
+    window.mesh_tab.set_port_wall("xmin")
+    window.mesh_tab.set_port_wall("xmax")
+    assert not window.ports_tab.check_port_walls(ask=True)
+    table = window.ports_tab.portwall_table
+    status = {table.item(r, 0).text(): table.item(r, 7).text() for r in range(table.rowCount())}
+    assert "LBE is not a metal layer" in status["xmin"] and status["xmax"].startswith("OK")
+    close_window(window)
+
+
+@pytest.mark.parametrize("stackup, top", [
+    (STACKUP, "TopMetal2"),
+    (utilities.get_stackup_path("SG13CMOS5L_200um.xml"), "TopMetal1"),
+    (os.path.join(os.path.dirname(utilities.get_stackup_path("SG13G2_FEM_200um.xml")), "..", "..", "legacy", "pcb_ro4003.xml"), "Top"),
+])
+def test_target_and_via_presets_use_the_topmost_metal(monkeypatch, app, stackup, top):
+    """not IHP-specific: the topmost conductor of whatever stackup is loaded, for the target and the via port's upper end"""
+    from gds2palace import stackup_reader
+    if not os.path.isfile(stackup):
+        pytest.skip("stackup not in this installation")
+    window, module = open_window(monkeypatch)
+    _, _, metals = stackup_reader.read_substrate(stackup)
+    ports = window.ports_tab
+    ports.update_layers(metals)
+    assert ports.target_box.currentText() == top and ports.to_box.currentText() == top
+    assert all(ports.target_box.itemText(i) not in ("LBE", "TopVia2") for i in range(ports.target_box.count()))
+    ports.update_port_from_import([{"portnumber": 1, "port_Z0": 50, "voltage": 1, "source_layernum": 201,
+                                    "from_layername": metals.metals[0].name, "to_layername": top, "direction": "Z"}])
+    ports.portslist.selectRow(0)
+    assert ports.target_box.currentText() == top
+    close_window(window)

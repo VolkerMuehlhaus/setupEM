@@ -711,7 +711,9 @@ class PortsTab(QWidget):
             safe_get_for_lineedit(1,self.voltage_edit,"1")
             safe_get_for_lineedit(2,self.sourcelayer_edit,"")
 
-            safe_get_for_combobox(3,self.target_box,0)
+            # a via port row has no target: show the topmost metal (not the first layer in the list), so that
+            # switching such a port to in-plane doesn't pick an unrelated layer
+            safe_get_for_combobox(3,self.target_box,max(self.target_box.findText(getattr(self, "_top_metal", None) or ""), 0))
             safe_get_for_combobox(4,self.from_box,0)
             safe_get_for_combobox(5,self.to_box,0)
             safe_get_for_combobox(6,self.direction_box,2)
@@ -954,10 +956,14 @@ class PortsTab(QWidget):
                 result = util_calibration.analyze_port_walls(
                     allpolygons, mw.metals_list, mw.materials_list, mw.dielectrics_list, simulation_ports,
                     saved_values["boundary"], fmax, float(saved_values.get("unit", 1e-6)),
-                    reference_plane_shift=dict(self._port_wall_shift), deembedding_length=saved_values.get("deembedding_length"))
+                    reference_plane_shift=dict(self._port_wall_shift), deembedding_length=saved_values.get("deembedding_length"),
+                    collect_errors=True)
             except util_calibration.PortWallError as e:
                 error = str(e)
-        self._show_port_wall_result(result, error, walls)
+        errors = dict((result or {}).get("errors", {}))
+        if result is not None and errors:
+            error = "\n".join(f"{side}: {text}" for side, text in errors.items())
+        self._show_port_wall_result(result, error, walls, errors)
         self._update_deembedding_column(edge, walls, error)
         selected = self.portslist.selectedIndexes()
         if selected:
@@ -967,14 +973,18 @@ class PortsTab(QWidget):
             return False
         return True
 
-    def _show_port_wall_result(self, result, error, walls):
+    def _show_port_wall_result(self, result, error, walls, errors=None):
         self._wall_of_port = {}
         self._port_wall_result = {}
         groups = {g["side"]: g for g in (result or {}).get("groups", [])}
+        errors = errors or {}
         for side in walls:
             g = groups.get(side)
             if g is None:
-                text = f"ERROR: {error}" if error and (side in error or not any(w in error for w in walls)) else ""
+                if side in errors:
+                    text = f"ERROR: {errors[side]}"
+                else:
+                    text = f"ERROR: {error}" if error and (side in error or not any(w in error for w in walls)) else ""
                 self._port_wall_result[side] = {"cells": ["", "", "", "", ""], "status": text or "not checked",
                                                 "error": bool(text)}
                 continue
@@ -1087,14 +1097,20 @@ class PortsTab(QWidget):
         if metals_list is None:
             return
         for metal in metals_list.metals:
-            self.target_box.addItems([metal.name])
+            # an in-plane port sits on a metal: no via layers and no drawn dielectrics (e.g. LBE) as its target
+            if not (metal.is_via or metal.is_dielectric):
+                self.target_box.addItems([metal.name])
             self.from_box.addItems([metal.name])
             self.to_box.addItems([metal.name])
-        # try to preset useful values for SG13G2 technology
-        index = self.target_box.findText('TopMetal2')  # returns -1 if not found
-        if index != -1:
-            self.target_box.setCurrentIndex(index)
-            self.to_box.setCurrentIndex(index)
+        # preset the topmost metal of the stackup (TopMetal2 in SG13G2, TopMetal1 in SG13CMOS5L, the top copper of
+        # a PCB) as target and as the via port's upper end. Each box by its own index: the target box leaves out
+        # via and dielectric layers, so its indices differ from the via port boxes'
+        conductors = [metal for metal in metals_list.metals if metal.is_metal]
+        self._top_metal = max(conductors, key=lambda metal: metal.zmax).name if conductors else None
+        if self._top_metal is not None:
+            self.target_box.setCurrentIndex(max(self.target_box.findText(self._top_metal), 0))
+            self.to_box.setCurrentIndex(max(self.to_box.findText(self._top_metal), 0))
+        # the via port's lower end: Metal1 for the IHP technologies (the lowest conductor there is Activ)
         index = self.from_box.findText('Metal1')  # returns -1 if not found
         if index != -1:
             self.from_box.setCurrentIndex(index)
