@@ -586,6 +586,7 @@ class PortsTab(QWidget):
         # port walls: box sides set to Port wall on the Mesh and Boundaries tab. The ports on them are
         # calibrated; this group shows what the last check found, and holds the reference plane shift
         self._wall_of_port = {}         # port number -> side, from the last check
+        self._converted_port = {}       # port number -> the line's metal, for a via port used as a gap port
         self._port_wall_shift = {}      # side -> reference plane shift (um)
         self._port_wall_result = {}     # side -> cells and status of the last check
         self._keep_sides = set()        # sides the user chose to keep (not a port wall), this session
@@ -812,8 +813,13 @@ class PortsTab(QWidget):
         """a port on a port wall points into the layout: its direction is set by the side, not by the user"""
         side = self._wall_of_port.get(row + 1)
         self.direction_box.setEnabled(side is None)
-        self.direction_note.setText(f" on port wall {side}: points into the layout" if side
-                                    else " (negative for reversed polarity)")
+        if side and row + 1 in self._converted_port:
+            self.direction_note.setText(f" on port wall {side}: used as a gap port on {self._converted_port[row + 1]}, "
+                                        f"pointing into the layout")
+        elif side:
+            self.direction_note.setText(f" on port wall {side}: points into the layout")
+        else:
+            self.direction_note.setText(" (negative for reversed polarity)")
 
     def _set_port_wall_shift(self, side, edit):
         text = edit.text().strip() or "0"
@@ -975,6 +981,7 @@ class PortsTab(QWidget):
 
     def _show_port_wall_result(self, result, error, walls, errors=None):
         self._wall_of_port = {}
+        self._converted_port = {}
         self._port_wall_result = {}
         groups = {g["side"]: g for g in (result or {}).get("groups", [])}
         errors = errors or {}
@@ -995,6 +1002,9 @@ class PortsTab(QWidget):
                           f"{g['L']:g}, {2 * g['L']:g}", valid], "status": status, "error": False}
             for p in g["ports"]:
                 self._wall_of_port[p] = side
+            for detail in g["port_details"]:
+                if detail.get("converted"):
+                    self._converted_port[detail["portnumber"]] = detail["target_layer"]
         self.refresh_port_wall_rows()
 
     def _update_deembedding_column(self, edge, walls, error):
@@ -1006,7 +1016,11 @@ class PortsTab(QWidget):
                 continue
             port = row + 1
             color = None
-            if port in self._wall_of_port:
+            if port in self._wall_of_port and port in self._converted_port:
+                # the row stays the via port as defined; gds2palace makes it a gap port when writing the model
+                side = self._wall_of_port[port]
+                text = f"port wall {side}, calibrated (via port used as a gap port on {self._converted_port[port]})"
+            elif port in self._wall_of_port:
                 side = self._wall_of_port[port]
                 text = f"port wall {side}, calibrated"
                 self.portslist.setItem(row, 6, QTableWidgetItem(util_calibration.INWARD[side].upper()))

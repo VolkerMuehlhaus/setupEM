@@ -243,3 +243,27 @@ def test_target_and_via_presets_use_the_topmost_metal(monkeypatch, app, stackup,
     ports.portslist.selectRow(0)
     assert ports.target_box.currentText() == top
     close_window(window)
+
+
+def test_a_via_port_on_a_port_wall_is_used_as_a_gap_port(monkeypatch, app, messages, tmp_path):
+    """the 60 GHz PA case: TopMetal2 lines over a Metal3 plane, via ports Metal3 -> TopMetal2 along the edge"""
+    lib = gdspy.GdsLibrary()
+    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib.add(cell)
+    for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
+        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdspy.Rectangle((0, y0), (0, y1), layer=201 + k))
+    cell.add(gdspy.Rectangle((0, -65), (300, 65), layer=30))
+    lib.write_gds(str(tmp_path / "line.gds"))
+    window, module = open_window(monkeypatch, str(tmp_path / "line.gds"))
+    window.ports_tab.update_port_from_import([
+        {"portnumber": n, "port_Z0": 50, "voltage": 1, "source_layernum": 200 + n, "from_layername": "Metal3",
+         "to_layername": "TopMetal2", "direction": "Z"} for n in (1, 2)])
+    window.mesh_tab.set_port_wall("xmin")
+    assert window.ports_tab.check_port_walls(ask=True), messages
+    ports = window.ports_tab.portslist
+    assert ports.item(0, 8).text() == "port wall xmin, calibrated (via port used as a gap port on TopMetal2)"
+    assert ports.item(0, 6).text() == "Z", "the row stays the via port as defined"
+    ports.selectRow(0)
+    assert "used as a gap port on TopMetal2" in window.ports_tab.direction_note.text()
+    close_window(window)
