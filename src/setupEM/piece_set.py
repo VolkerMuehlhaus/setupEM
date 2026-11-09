@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 
-from .join_pieces import read_set, result_path
+from .join_pieces import joined_path, read_set, result_path
 
 FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 # settings that don't change a piece's result (where it is, what it is called, how setupEM shows it)
@@ -296,6 +296,15 @@ class PieceSet:
             if data.get("saved_values") != values:
                 data["saved_values"] = values
                 _write(r["simcfg"], data)
+
+    # ---------- the joined result ----------
+
+    def joined_results(self, kinds=("_dc_deembedded", "_deembedded")):
+        """The joined result files that exist, in the order of kinds (join_pieces writes it where the whole
+        export's own model would put it; only calibrated results are joined, so there is no raw one)."""
+        ports = len(self.section.get("external", []))
+        paths = [joined_path(self.path, self.data, ports, kind) for kind in kinds]
+        return [p.replace("\\", "/") for p in paths if os.path.isfile(p)]
 
     # ---------- the one frequency grid ----------
 

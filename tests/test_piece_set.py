@@ -281,6 +281,14 @@ def test_start_with_every_piece_unchanged_only_joins(monkeypatch, app, messages,
     assert top.text(0).startswith("Joined result of whole") and top.child(0).text(0).startswith("🔗 whole_deembedded")
     assert viewer._checked_paths == {joined.replace("\\", "/")}
     viewer.close()
+    # Model Fit: snp2le on the joined result, not on a piece's
+    import importlib.util
+    started = []
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object())
+    monkeypatch.setattr(tab.process, "start", lambda program, args: started.append(args))
+    tab.open_model_fit()
+    preferred = PieceSet(path).joined_results()[0]
+    assert started and started[0][-1] == preferred and os.path.basename(preferred).startswith("whole_"), started
     window._script_dirty = False
     window.close()
 

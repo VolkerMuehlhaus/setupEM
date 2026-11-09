@@ -2933,6 +2933,18 @@ class CreateModelTab(CreateModelTabBase):
         else:
             from .result_viewer import find_touchstone_files, is_amr_iteration_snapshot
 
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        if piece_set is not None:
+            # a split region: the joined result of all pieces (calibrated, the only kind joined; with the DC point
+            # when the sweep did not start at 0 Hz)
+            joined = piece_set.joined_results()
+            if not joined:
+                QMessageBox.warning(self, "Model Fit", f"No joined result of {piece_set.name} yet. Start Simulation "
+                                    "runs the pieces and joins them.")
+                return
+            self._start_snp2le(joined[0], SNP2LE_URL)
+            return
+
         if self.MainWindow.PalaceMode:
             run_path = self.run_folder("palace_model")
         else:
@@ -2957,7 +2969,9 @@ class CreateModelTab(CreateModelTabBase):
             for path in final_candidates:
                 self.log_area.appendPlainText("  " + path)
         raw_file = max(final_candidates, key=os.path.getmtime)
+        self._start_snp2le(raw_file, SNP2LE_URL)
 
+    def _start_snp2le(self, raw_file, SNP2LE_URL):
         # naming a .sNp file on the command line opens snp2le's GUI on it directly
         # (see https://github.com/iic-jku/snp2le/blob/main/doc/architecture.md);
         # still start it in that file's directory, so any relative paths it uses

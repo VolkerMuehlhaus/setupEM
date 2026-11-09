@@ -622,16 +622,10 @@ class ResultViewerWindow(QDialog):
         if piece_set is None:
             return []
         try:
-            if __package__ in (None, ""):
-                from join_pieces import joined_path
-            else:
-                from .join_pieces import joined_path
-            ports = len(piece_set.section.get("external", []))
             kinds = ["_deembedded"] + (["_dc_deembedded"] if self.include_dc_cb.isChecked() else [])
-            paths = [joined_path(piece_set.path, piece_set.data, ports, kind) for kind in kinds]
+            return piece_set.joined_results(kinds)
         except Exception:       # noqa: BLE001 - no joined result to offer is no reason to fail the viewer
             return []
-        return [path.replace('\\', '/') for path in paths if os.path.isfile(path)]
 
     def _legend_label_for_path(self, path):
         """Shortened label for plot legends, which have much less room than the
