@@ -3348,6 +3348,14 @@ class ChipletSwitcher(QWidget):
 # sets the z range of the dielectrics.
 MARGIN_SIDES = ("xmin", "xmax", "ymin", "ymax")
 
+# messages of Qt's platform layer in a child process's output (snp2le's window on Wayland, gmsh's), not the tool's:
+# harmless, and many of them, so they stay out of the log
+QT_PLATFORM_NOISE = ("QtWaylandClient::QWaylandTextInputv3", "This plugin does not support propagateSizeHints()")
+
+
+def is_qt_platform_noise(line):
+    return any(text in line for text in QT_PLATFORM_NOISE)
+
 
 def as_side_values(value, count=6):
     """Normalize a saved per-side value (boundary, air_around, margin) to a list
@@ -4067,7 +4075,7 @@ class CreateModelTabBase(QWidget):
     def on_stdout(self):
         data = self.process.readAllStandardOutput().data().decode()
         for line in data.splitlines():
-            if line.strip():  # Skip empty lines
+            if line.strip() and not is_qt_platform_noise(line):  # Skip empty lines and Qt's platform messages
                 self.log_area.appendPlainText(line)
                 self._on_stdout_line(line)
 
@@ -4208,7 +4216,7 @@ class CreateModelTabBase(QWidget):
     def on_stderr(self):
         data = self.process.readAllStandardError().data().decode()
         for line in data.splitlines():
-            if line.strip():  # Skip empty lines
+            if line.strip() and not is_qt_platform_noise(line):  # Skip empty lines and Qt's platform messages
                 self.log_area.appendPlainText(f"[Error] {line}")
 
     def on_finished(self, exit_code, exit_status):
