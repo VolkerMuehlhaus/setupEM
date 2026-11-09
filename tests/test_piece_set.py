@@ -116,6 +116,7 @@ def test_rows_frequency_and_run_key(tmp_path):
     assert key and s.run_key(rows[2]) is None                                        # full: never reused
     values = json.load(open(rows[0]["simcfg"]))["saved_values"]
     assert s.run_key(rows[0], dict(values, sim_path="elsewhere")) == key             # where it is: no change
+    assert s.run_key(rows[0], dict(values, cellname="amp_v2")) == key                # a renamed cell: no change
     assert s.run_key(rows[0], dict(values, refined_cellsize=2.0)) != key             # its mesh: a change
     changed = s.set_frequency({"fstop": 60.0})
     assert len(changed) == 4 and all(json.load(open(p))["saved_values"]["fstop"] == 60.0 for p in changed)

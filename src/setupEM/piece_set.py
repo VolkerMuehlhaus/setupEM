@@ -21,7 +21,10 @@ from .join_pieces import read_set, result_path
 
 FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 # settings that don't change a piece's result (where it is, what it is called, how setupEM shows it)
-NOT_IN_KEY = {"sim_path", "model_basename", "GdsFile", "SubstrateFile", "preview_only", "no_preview", "unit"}
+# the fingerprint covers what the piece contains: its file names, folder and the layout's cell name (a new revision
+# is often a renamed cell) are no change
+NOT_IN_KEY = {"sim_path", "model_basename", "GdsFile", "SubstrateFile", "cellname", "preview_only", "no_preview",
+              "unit"}
 KEY_FILE = "piece.key"
 
 
