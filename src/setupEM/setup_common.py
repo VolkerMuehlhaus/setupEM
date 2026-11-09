@@ -3787,6 +3787,29 @@ class CreateModelTabBase(QWidget):
         self.runs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.runs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         runs_layout.addWidget(self.runs_table)
+        # a split region (klayout_em_export Export All): selecting a piece loads its settings; the pieces run one
+        # after another and their results are joined at the cuts (piece_set.py, join_pieces.py)
+        self.runs_table.itemSelectionChanged.connect(self._piece_row_selected)
+        self._rows_updating = False
+        self._piece_runner = None
+        self._piece_status = {}
+        self._ticks = {}            # {row sim_path: ticked}: the full check model of a split region starts unticked
+        self.run_unchanged_check = QCheckBox("Run unchanged pieces too")
+        self.run_unchanged_check.setToolTip(
+            "A piece whose layout, settings and gds2palace version are unchanged since its last run is reused, "
+            "not simulated again. Tick this after a Palace update or on another machine.")
+        self.join_btn = QPushButton("Join Pieces")
+        self.join_btn.setToolTip("Join the pieces' results at the cuts into the result of the whole region "
+                                 "(done after Start Simulation; this button is for pieces run elsewhere)")
+        self.join_btn.clicked.connect(self.join_pieces)
+        self.piece_controls = QWidget()
+        piece_row = QHBoxLayout(self.piece_controls)
+        piece_row.setContentsMargins(0, 0, 0, 0)
+        piece_row.addWidget(self.run_unchanged_check)
+        piece_row.addStretch(1)
+        piece_row.addWidget(self.join_btn)
+        runs_layout.addWidget(self.piece_controls)
+        self.piece_controls.setVisible(False)
         self.runs_group.setLayout(runs_layout)
         # as tall as the list, the log gets the rest
         self.runs_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -3846,33 +3869,53 @@ class CreateModelTabBase(QWidget):
     def refresh_runs_table(self):
         """Show the models the script edited in place created, when there is
         more than one; keeps the ticks of models that are listed again."""
-        runs = self.MainWindow.script_runs if self.MainWindow.script_model is not None else []
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        runs = self.MainWindow.script_runs if (self.MainWindow.script_model is not None or piece_set is not None) else []
         show = len(runs) > 1
         self.runs_group.setVisible(show)
         self.runs_table.setVisible(show)
-        self.runs_group.setTitle(f"Models ({len(runs)})")
+        self.piece_controls.setVisible(piece_set is not None and show)
+        if piece_set is not None:
+            self.runs_group.setTitle(f"Pieces of {piece_set.name} ({sum(1 for r in runs if not r.get('full'))})")
+            self.runs_group.setToolTip("The pieces of a split region: each is its own model, with its own mesh "
+                                       "settings (select a row to edit it); the frequencies are shared. Start "
+                                       "Simulation runs the ticked ones and joins the results.")
+        else:
+            self.runs_group.setTitle(f"Models ({len(runs)})")
         unticked = set()
         for row in range(self.runs_table.rowCount()):
             item = self.runs_table.item(row, 0)
-            if item is not None and item.checkState() != Qt.Checked:
-                unticked.add(item.data(Qt.UserRole))
+            if item is not None:
+                # remembered across a rebuild of the list with no rows (a piece being loaded empties it briefly)
+                self._ticks[item.data(Qt.UserRole)] = item.checkState() == Qt.Checked
+                if item.checkState() != Qt.Checked:
+                    unticked.add(item.data(Qt.UserRole))
         selected = self.runs_table.currentRow()
+        self._rows_updating = True
         self.runs_table.setRowCount(len(runs))
         for row, run in enumerate(runs):
             # the parameters that differ name the model; its name and folder are the tooltip
             item = QTableWidgetItem(run["label"].replace("=", " = "))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked if run["sim_path"] in unticked else Qt.Checked)
+            # a split region's full check model is not run unless ticked
+            ticked = self._ticks.get(run["sim_path"], not run.get("full"))
+            item.setCheckState(Qt.Checked if ticked and run["sim_path"] not in unticked else Qt.Unchecked)
             item.setData(Qt.UserRole, run["sim_path"])
             item.setToolTip(run["model_basename"] + "\n" + run["sim_path"])
             self.runs_table.setItem(row, 0, item)
-            self._set_run_status(run, self._run_status(run))
+            self._set_run_status(run, self._piece_status.get(run["sim_path"]) or self._run_status(run))
         # only as tall as its rows (up to 5, then it scrolls)
         visible_rows = min(max(len(runs), 1), 5)
         row_height = self.runs_table.verticalHeader().defaultSectionSize()
         self.runs_table.setFixedHeight(visible_rows * row_height + 2 * self.runs_table.frameWidth())
         if runs:
-            self.runs_table.selectRow(selected if 0 <= selected < len(runs) else 0)
+            if piece_set is not None:
+                loaded = self.MainWindow.current_piece
+                index = next((i for i, r in enumerate(runs) if loaded and r["sim_path"] == loaded["sim_path"]), None)
+                self.runs_table.selectRow(index if index is not None else (selected if 0 <= selected < len(runs) else 0))
+            else:
+                self.runs_table.selectRow(selected if 0 <= selected < len(runs) else 0)
+        self._rows_updating = False
 
     @staticmethod
     def _run_status(run):
@@ -3882,7 +3925,8 @@ class CreateModelTabBase(QWidget):
                 return "results"
         return "meshed" if os.path.isdir(sim_path) else "not created"
 
-    _STATUS_COLORS = {"running": "#1565C0", "results": "#2E7D32", "meshed": "#616161"}
+    _STATUS_COLORS = {"running": "#1565C0", "results": "#2E7D32", "meshed": "#616161",
+                      "unchanged, reused": "#2E7D32", "joined": "#2E7D32"}
 
     def _set_run_status(self, run, status):
         for row in range(self.runs_table.rowCount()):
@@ -3933,7 +3977,11 @@ class CreateModelTabBase(QWidget):
 
     def start_simulation(self):
         """Start Simulation: one model, or each ticked model of a script that
-        created several, one after another."""
+        created several, one after another; for a split region, each ticked piece
+        (Create Mesh, then the simulation) and then the join."""
+        if getattr(self.MainWindow, "piece_set", None) is not None:
+            self._start_pieces(simulate=True)
+            return
         self._run_queue = []
         self._active_run = None
         self._queue_clear_choice = None
@@ -4164,7 +4212,11 @@ class CreateModelTabBase(QWidget):
             # the script just recorded the models it created
             self.MainWindow.load_script_runs()
             self.refresh_runs_table()
-        if purpose == "run_simulation" and self._active_run is not None:
+        if self._piece_runner is not None:
+            # a split region: the next step of this piece, or the next piece (after the app's own on_finished)
+            if purpose in ("create_mesh", "run_simulation"):
+                QTimer.singleShot(0, lambda code=exit_code, what=purpose: self._piece_step_done(what, code))
+        elif purpose == "run_simulation" and self._active_run is not None:
             # after the app's own on_finished (results summary for this model)
             QTimer.singleShot(0, lambda code=exit_code: self._continue_run_queue(code))
 
@@ -4293,6 +4345,13 @@ class CreateModelTabBase(QWidget):
             self.log_area.appendPlainText("⚠️ Cannot load GDSII layout stackup file!\n" + saved_values.get("GdsFile") + "\n")
 
     def create_mesh(self):
+        # a split region: every ticked piece, one after another
+        if getattr(self.MainWindow, "piece_set", None) is not None and self._piece_runner is None:
+            self._start_pieces(simulate=False)
+            return
+        self._create_mesh_now()
+
+    def _create_mesh_now(self):
         # create model and run gmsh, but skip the final mesh and output file creation
         saved_values = self.MainWindow.saved_values
 
@@ -4312,7 +4371,143 @@ class CreateModelTabBase(QWidget):
         else:
             self.log_area.appendPlainText("⚠️ Cannot load GDSII layout stackup file!\n" + saved_values.get("GdsFile") + "\n")
 
+    # ---------- a split region: the pieces one after another, then the join ----------
+
+    def _piece_row_selected(self):
+        """Selecting a piece loads its settings into the tabs (not while the pieces run or the list is rebuilt)."""
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        if piece_set is None or self._rows_updating or self._piece_runner is not None:
+            return
+        row = self.runs_table.currentRow()
+        runs = self.MainWindow.script_runs
+        if not 0 <= row < len(runs):
+            return
+        run = runs[row]
+        current = self.MainWindow.current_piece
+        if current is not None and current["sim_path"] == run["sim_path"]:
+            return
+        self.MainWindow.leave_piece(current)
+        self.MainWindow.load_piece(run)
+
+    def _start_pieces(self, simulate):
+        """Create Mesh (simulate False) or Start Simulation for the ticked pieces: unchanged pieces are reused,
+        the others are meshed and simulated one after another; after a simulation the results are joined."""
+        main = self.MainWindow
+        piece_set = main.piece_set
+        if self.process.state() != QProcess.NotRunning:
+            self.log_area.appendPlainText("⚠️ A process is still running.\n")
+            return
+        rows = self.ticked_runs()
+        if not rows:
+            self.log_area.appendPlainText("⚠️ No piece ticked in the list above.\n")
+            return
+        current = main.current_piece
+        main.leave_piece(current)       # its settings into its .simcfg, the frequencies into all pieces
+        self.log_area.clear()
+        todo, reused = [], []
+        force = self.run_unchanged_check.isChecked()
+        for row in rows:
+            if simulate and not force and not row.get("full") and piece_set.reusable(row):
+                reused.append(row)
+            else:
+                todo.append(row)
+        for row in reused:
+            self._piece_status[row["sim_path"]] = "unchanged, reused"
+            self._set_run_status(row, "unchanged, reused")
+        if reused:
+            self.log_area.appendPlainText(f"Unchanged since their last run, reused: {', '.join(r['piece'] for r in reused)}\n")
+        if simulate and todo:
+            ask = getattr(self, "_ask_queue_previous_results", None)
+            self._queue_clear_choice = None
+            if ask is not None and not ask(todo):
+                self.log_area.appendPlainText("Start Simulation cancelled, the existing results are kept.\n")
+                return
+        self._piece_runner = {"todo": list(todo), "total": len(todo), "simulate": simulate, "row": None,
+                              "selected": current}
+        self._next_piece()
+
+    def _next_piece(self):
+        runner = self._piece_runner
+        if not runner["todo"]:
+            self._finish_pieces(stopped=None)
+            return
+        row = runner["todo"].pop(0)
+        runner["row"] = row
+        number = runner["total"] - len(runner["todo"])
+        self.log_area.appendPlainText(f"===== {row['piece']} ({number} of {runner['total']}): "
+                                      f"{'Create Mesh, then the simulation' if runner['simulate'] else 'Create Mesh'} =====\n")
+        self._piece_status.pop(row["sim_path"], None)
+        main = self.MainWindow
+        self._keep_log = True
+        main.load_piece(row, ask_unsaved=False)
+        main.apply_piece_frequency()
+        self._set_run_status(row, "running")
+        self._active_run = row          # run_folder(): this piece's model folder
+        runner["step"] = "mesh"
+        self._create_mesh_now()
+        if self.process.state() == QProcess.NotRunning:
+            self._set_run_status(row, "not started")
+            self._finish_pieces(stopped=f"{row['piece']}: Create Mesh could not be started")
+
+    def _piece_step_done(self, purpose, exit_code):
+        runner = self._piece_runner
+        if runner is None or runner["row"] is None:
+            return
+        row = runner["row"]
+        if exit_code != 0:
+            self._set_run_status(row, f"failed ({exit_code})")
+            self._finish_pieces(stopped=f"{row['piece']} failed")
+            return
+        if purpose == "create_mesh" and runner["simulate"]:
+            runner["step"] = "simulate"
+            self._run_cancelled = False
+            self.run_model()
+            if self.process.state() == QProcess.NotRunning:
+                self._set_run_status(row, self._run_status(row) if self._run_cancelled else "not started")
+                self._finish_pieces(stopped="cancelled" if self._run_cancelled else f"{row['piece']} could not be started")
+            return
+        if purpose == "run_simulation":
+            self.MainWindow.piece_set.store_key(row)
+        self._set_run_status(row, self._run_status(row))
+        self._next_piece()
+
+    def _finish_pieces(self, stopped):
+        runner = self._piece_runner
+        self._piece_runner = None
+        self._active_run = None
+        self._keep_log = False
+        if stopped and runner and runner["todo"]:
+            self.log_area.appendPlainText(f"\n⚠️ Stopped: {stopped}; not run: {', '.join(r['piece'] for r in runner['todo'])}.\n")
+        elif stopped:
+            self.log_area.appendPlainText(f"\n⚠️ Stopped: {stopped}.\n")
+        if runner and runner["simulate"] and not stopped:
+            self.join_pieces()
+        self.refresh_runs_table()
+
+    def join_pieces(self):
+        """Join the pieces' results at the cuts (join_pieces.py) and say where the joined result is."""
+        from .join_pieces import JoinError, join_all
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        if piece_set is None:
+            return
+        try:
+            for message in join_all(piece_set.path):
+                self.log_area.appendPlainText(message)
+            self.log_area.appendPlainText(
+                "The joined result has the outer ports of the whole region. Not in it: coupling between the pieces "
+                "other than through the lines that cross the cuts.\n")
+        except JoinError as e:
+            self.log_area.appendPlainText(f"⚠️ Not joined: {e}\n")
+        except Exception as e:      # noqa: BLE001 - a broken result file must not take the window down
+            self.log_area.appendPlainText(f"⚠️ Not joined: {type(e).__name__}: {e}\n")
+
     def terminate_run(self):
+        if self._piece_runner is not None:
+            left = self._piece_runner["todo"]
+            if left:
+                self.log_area.appendPlainText(f"\nTerminated: {', '.join(r['piece'] for r in left)} not run.\n")
+            self._piece_runner["todo"] = []
+            self._piece_runner["simulate"] = False      # no join of an interrupted set
         if self._run_queue:
             self.log_area.appendPlainText(f"\nTerminated: {len(self._run_queue)} more model(s) are not run.\n")
             self._run_queue = []
@@ -4519,6 +4714,8 @@ class MainWindowBase(QMainWindow):
         self.script_model = None
         self.preserve_baseline = None
         self.script_runs = []
+        self.piece_set = None       # a split region (piece_set.PieceSet), opened from its <export>.simcfg
+        self.current_piece = None   # its row whose settings are in the tabs
 
     # ---------- Drag & drop native config (*.simcfg/*.tsimcfg) or *.py model file
     # onto the window. Restricted to the "Input Files" tab so it doesn't fire while
@@ -4866,10 +5063,12 @@ class MainWindowBase(QMainWindow):
             f"{MODEL_KIND_DESCRIPTIONS[owner_kind]}. This is {self.APP_NAME}.\n\n"
             f"Open the file with {owner_app} instead.")
 
-    def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True):
+    def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True, quiet=False):
         # in_place: *.py only, from edit_py_model() - edit this script in
         # place (preserve mode) instead of importing its values for a new script.
         # ask_unsaved: offer to save a script edited in place first (False for Revert / Reload)
+        # quiet: a piece of a split region (piece_set.py): no "Loaded" box, no question which model to continue
+        # with (its own script if Create Model wrote the file with it, else the file), the set stays open
         saved_values = self.saved_values
         if file_path:
             if ask_unsaved and not self.confirm_unsaved_script():
@@ -4898,6 +5097,18 @@ class MainWindowBase(QMainWindow):
                         data.get("application", "") in MODEL_KIND_APPS.values():
                     self._warn_wrong_app_file(file_path, data["application"])
                     return
+                if data.get("application", "") == self.APP_NAME and not quiet:
+                    from .piece_set import is_set_file
+                    if is_set_file(data):
+                        self._open_piece_set(file_path, data)
+                        return
+                    if self.piece_set is not None:
+                        self.piece_set = None       # another file: the split region is closed
+                        self.current_piece = None
+                        self.script_runs = []
+                        self.create_model_tab.refresh_runs_table()
+                if quiet and self.script_model is not None:
+                    leave_current_script()          # another piece: its own script, if it has one
                 if data.get("application", "") == self.APP_NAME and self.config_update_supported():
                     if self.script_model is not None:
                         # a script is edited in place: update it from this config, or open the config instead
@@ -4912,12 +5123,14 @@ class MainWindowBase(QMainWindow):
                         script = self._model_script_for_config(file_path, data)
                         if script and self._written_with(file_path, data, script):
                             choice = "script"       # Create Model wrote the config with this script: no question
+                        elif quiet:
+                            choice = "config"
                         else:
                             choice = self._ask_continue_with_script(file_path, script) if script else "config"
                         if choice == "cancel":
                             return
                         if choice == "script":
-                            self.load_configuration_from_file(script, in_place=True, ask_unsaved=False)
+                            self.load_configuration_from_file(script, in_place=True, ask_unsaved=False, quiet=quiet)
                             if self.script_model is not None:
                                 self.hide_info_bar()
                                 self._update_script_from_config(file_path, data)
@@ -4939,9 +5152,14 @@ class MainWindowBase(QMainWindow):
                     loaded_message = f"Config loaded from {shorten_path_for_display(file_path)}"
                     if path_messages:
                         loaded_message += "\n\n" + "\n".join(path_messages)
-                    QMessageBox.information(self, "Loaded", loaded_message)
-                    self.create_model_tab.log_area.clear()
-                    self.create_model_tab._reset_live_status()
+                    if not quiet:
+                        QMessageBox.information(self, "Loaded", loaded_message)
+                        self.create_model_tab.log_area.clear()
+                        self.create_model_tab._reset_live_status()
+                    if not quiet and data.get("piece_of"):
+                        self.create_model_tab.log_area.appendPlainText(
+                            f"This is piece {data.get('piece')} of a split region. Open {data['piece_of']} to run "
+                            "all pieces and join their results.\n")
                 else:
                     QMessageBox.information(self, "Failed", "Unknown data format")
             elif extension.upper() == ".PY":
@@ -4961,6 +5179,11 @@ class MainWindowBase(QMainWindow):
                     if answer != QMessageBox.Yes:
                         return
                 leave_current_script()
+                if not quiet and self.piece_set is not None:
+                    self.piece_set = None       # another model: the split region is closed
+                    self.current_piece = None
+                    self.script_runs = []
+                    self.create_model_tab.refresh_runs_table()
                 import_mapping = {
                     "gds_filename": "GdsFile",
                     "XML_filename": "SubstrateFile",
@@ -4996,7 +5219,12 @@ class MainWindowBase(QMainWindow):
                     "complex_coarse_solve": "complex_coarse_solve",
                     "solver_maxits": "solver_maxits",
                     "solver_tol": "solver_tol",
-                    "ELMER_MPI_THREADS": "ELMER_MPI_THREADS"
+                    "ELMER_MPI_THREADS": "ELMER_MPI_THREADS",
+                    # port walls (the Ports tab's Port walls group): read back, or a script edited in place
+                    # forgets them although it keeps them
+                    "port_wall_extension": "port_wall_extension",
+                    "reference_plane_shift": "reference_plane_shift",
+                    "deembedding_length": "deembedding_length",
                 }
 
                 # remove old settings, so that we don't keep old values that don't exist in loaded file
@@ -5391,6 +5619,78 @@ class MainWindowBase(QMainWindow):
                 os.path.normcase(os.path.dirname(os.path.abspath(file_path))) ==
                 os.path.normcase(os.path.dirname(os.path.abspath(script))))
 
+    def _open_piece_set(self, file_path, data):
+        """Open a split region: its pieces in the Models list, the first one's settings in the tabs."""
+        from .piece_set import PieceSet
+        self.hide_info_bar()
+        self._stop_preserve_mode()
+        self.piece_set = PieceSet(file_path, data)
+        self._add_recent_file(RECENT_SETTINGS_KEY, file_path)
+        rows = self.piece_set.rows()
+        self.script_runs = rows
+        tab = self.create_model_tab
+        tab._ticks = {}
+        tab._piece_status = {}
+        self.load_piece(rows[0], ask_unsaved=False)
+        self.script_runs = self.piece_set.rows()
+        tab.log_area.clear()
+        tab._reset_live_status()
+        tab.refresh_runs_table()
+        pieces = [r["piece"] for r in rows if not r.get("full")]
+        tab.log_area.appendPlainText(
+            f"Split region {self.piece_set.name}: {len(pieces)} pieces ({', '.join(pieces)}), each its own model. "
+            "Select a piece to see or change its settings (mesh, solver); the frequency settings are the same for "
+            "all pieces. Start Simulation runs the ticked pieces and joins their results into "
+            f"{self.piece_set.name}'s result.\n")
+        QMessageBox.information(self, "Loaded", f"Split region loaded from {shorten_path_for_display(file_path)}: "
+                                f"{len(pieces)} pieces")
+
+    def load_piece(self, row, ask_unsaved=True):
+        """A piece's settings into the tabs: its .simcfg, or the model script Create Model wrote for it."""
+        self.current_piece = row        # before: the list, rebuilt while the piece loads, selects this row
+        self.load_configuration_from_file(row["simcfg"], ask_unsaved=ask_unsaved, quiet=True)
+        if self.piece_set is not None:
+            self.script_runs = self.piece_set.rows()        # leaving a script edited in place empties the list
+            self.create_model_tab.refresh_runs_table()
+
+    def leave_piece(self, row):
+        """Before another piece is loaded or the pieces run: the current piece's settings from the tabs into its
+        .simcfg (kept with the file's other keys), and its frequency settings into all pieces when changed."""
+        if self.piece_set is None or row is None:
+            return
+        self.save_all_tabs()
+        # a piece with a model script is edited in place: its settings are in the script (a .simcfg written with
+        # the script gives only ports and layout settings), so the changes go into the script first
+        if self.script_model is not None and self.script_has_unsaved_changes():
+            self.save_script_in_place(check_disk=False)
+        if self.piece_set.frequency_differs(self.saved_values):
+            changed = self.piece_set.set_frequency(self.saved_values)
+            if changed:
+                self.create_model_tab.log_area.appendPlainText(
+                    "The frequency settings now apply to all pieces (one frequency grid for the join).\n")
+        try:
+            with open(row["simcfg"], encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        values = dict(self.saved_values)
+        for key in ("sim_path", "model_basename"):
+            if key in data.get("saved_values", {}):
+                values[key] = data["saved_values"][key]
+        data["saved_values"] = values
+        data.update(self.native_config_extra_struct())
+        with open(row["simcfg"], "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+    def apply_piece_frequency(self):
+        """The split region's frequency settings into the loaded piece (tabs included)."""
+        if self.piece_set is None:
+            return
+        freq = self.piece_set.frequency()
+        if freq and any(self.saved_values.get(k) != v for k, v in freq.items()):
+            self.saved_values.update(freq)
+            self.load_all_tabs()
+
     def write_model_config(self, script_path):
         """Write <model>.simcfg / .tsimcfg next to the model script Create Model wrote, with the settings of Save
         Config, so that a layout tool's next export keeps them and the KLayout plug-in finds the stackup, datatypes
@@ -5409,6 +5709,10 @@ class MainWindowBase(QMainWindow):
         struct = {"application": self.APP_NAME, "data_format": "1.0", "saved_values": self.saved_values,
                   "written_with": os.path.basename(script_path)}
         struct.update(self.native_config_extra_struct())
+        if os.path.exists(path):
+            # a layout tool's own keys stay (a split region's piece name, fingerprint and pieces section)
+            for key, value in existing.items():
+                struct.setdefault(key, value)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(struct, f, indent=4)
@@ -5421,18 +5725,22 @@ class MainWindowBase(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Load Config")
         box.setIcon(QMessageBox.Question)
-        stamp = time.localtime(os.path.getmtime(script))
-        when = time.strftime("%H:%M" if stamp[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M", stamp)
-        box.setText(f"{os.path.basename(script)} (changed {when}) is the model script for this layout. It has "
-                    "the settings you last used for it (frequencies, mesh, ...), also those not saved in "
-                    f"{os.path.basename(file_path)}.\n\n"
-                    "Continue with the script: edit it in place, its settings and your own code stay, ports "
-                    "and layout settings come from the config.\n\n"
-                    "Start from the config: the config's settings for a new model.")
+        def when(path):
+            stamp = time.localtime(os.path.getmtime(path))
+            return time.strftime("%H:%M" if stamp[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M", stamp)
+        # the newer file has your latest settings: it is the default
+        config_newer = os.path.getmtime(file_path) > os.path.getmtime(script)
+        box.setText(f"{os.path.basename(script)} (changed {when(script)}) is the model script for this layout, "
+                    f"{os.path.basename(file_path)} was saved {when(file_path)}.\n\n"
+                    "Continue with the script: its settings (frequencies, mesh, boundaries, ...) and your own code "
+                    "stay; ports and layout settings come from the config. Right when you set up the model in "
+                    "setupEM after the config was written.\n\n"
+                    "Start from the config: all settings from the config. Right when the config has settings the "
+                    "script lacks, e.g. because it is newer" + (" (as here)." if config_newer else "."))
         script_button = box.addButton("Continue with the script", QMessageBox.AcceptRole)
         config_button = box.addButton("Start from the config", QMessageBox.ActionRole)
         cancel = box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(script_button)
+        box.setDefaultButton(config_button if config_newer else script_button)
         box.setEscapeButton(cancel)
         box.exec()
         clicked = box.clickedButton()
@@ -5523,7 +5831,11 @@ class MainWindowBase(QMainWindow):
 
     def load_script_runs(self):
         """Read the recorded models; each gets a label from the parameters that
-        differ between them (e.g. "Temp_Celsius=125.0" for a temperature sweep)."""
+        differ between them (e.g. "Temp_Celsius=125.0" for a temperature sweep).
+        A split region lists its pieces instead."""
+        if self.piece_set is not None:
+            self.script_runs = self.piece_set.rows()
+            return
         self.script_runs = []
         path = self.script_models_file()
         if not path or not os.path.isfile(path):

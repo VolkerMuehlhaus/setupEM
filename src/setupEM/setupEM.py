@@ -219,6 +219,30 @@ def palace_solver_preferences(app_name):
 
 # ---------- OTHER TABS ----------
 
+
+_WARNING_ICON = None
+
+
+def _warning_icon():
+    """An amber warning triangle with '!', the same on every platform."""
+    global _WARNING_ICON
+    if _WARNING_ICON is None:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QIcon, QPixmap, QPolygonF, QBrush
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#9a6700"), 1.5))
+        painter.setBrush(QBrush(QColor("#f2b01e")))
+        painter.drawPolygon(QPolygonF([QPointF(16, 3), QPointF(30, 28), QPointF(2, 28)]))
+        painter.setPen(QPen(QColor("#3d2a00"), 3.2))
+        painter.drawLine(QPointF(16, 11), QPointF(16, 19))
+        painter.drawPoint(QPointF(16, 24))
+        painter.end()
+        _WARNING_ICON = QIcon(pixmap)
+    return _WARNING_ICON
+
 class FrequenciesTab(QWidget):
     def __init__(self, MainWindow):
         super().__init__()
@@ -948,7 +972,9 @@ class PortsTab(QWidget):
                 status.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
             elif result and result.get("warning"):
                 status.setForeground(QColor("#8a5a00"))
-                status.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxWarning))
+                # an amber triangle of our own: some desktop themes (Ubuntu's Yaru) draw the standard warning icon as
+                # a red circle, which reads as an error next to the error rows
+                status.setIcon(_warning_icon())
             # a tooltip is one line per line of text: wrap long texts, one bullet per warning
             status.setToolTip(result.get("tooltip") or textwrap.fill(full, 70) if result else full)
             status.setData(Qt.UserRole, full)
@@ -1091,21 +1117,20 @@ class PortsTab(QWidget):
             status = "OK" + ((": " + "; ".join(g["warnings"])) if g["warnings"] else "")
             n = len(g["warnings"])
             u, size, E = g.get("uniform_from_wall"), g.get("device_size"), g.get("extension", 0.0)
-            distance = (f"device {u + E:.0f} µm from the port wall" + (f", limit {size / 2:.0f} µm (half its size)" if size else "")
-                        if u is not None else "no device within the checked range")
+            distance = (f"device {u + E:.0f} µm from the port wall" if u is not None else "no device within the checked range")
             if E:
                 distance = f"port wall moved {E:g} µm out, " + distance
             if n:
                 first = g["warnings"][0]
-                short = (first if len(first) <= 80 else first[:80] + "...") + (f" (+{n - 1} more)" if n > 1 else "")
+                short = (f"{n} warning{'s' if n > 1 else ''}: " + (first if len(first) <= 70 else first[:70] + "..."))
             else:
-                short = "OK, " + distance
+                short = "OK" + (f", port wall moved {E:g} µm out" if E else "")
             lines = ["OK" + (f", {n} warning{'s' if n > 1 else ''}:" if n else "")]
             lines += [textwrap.fill(w, 70, initial_indent="• ", subsequent_indent="   ") for w in g["warnings"]]
             lines.append(distance[0].upper() + distance[1:])
             lines += [textwrap.fill(note, 70) for note in g.get("notes", [])]
             self._port_wall_result[side] = {"short": short, "warning": bool(n), "tooltip": "\n\n".join(lines),
-                "uniform": u, "extension": g.get("extension", 0.0),
+                "uniform": u, "extension": g.get("extension", 0.0), "profile": g.get("profile") or [],
                 "cells": [", ".join(str(p) for p in g["ports"]), ", ".join(g["ground_layers"]), f"{g['D']:.4g}",
                           f"{g['L']:g}, {2 * g['L']:g}", valid], "status": status, "error": False}
             for p in g["ports"]:
@@ -1537,6 +1562,20 @@ class BoxSidesOverrideDialog(QDialog):
     def get_overrides(self):
         return self._result
 
+
+
+def _default_without_port_walls(text, overrides, sides, port_walls):
+    """(default text, overrides) of a per-side value, the default chosen among the sides that are not port walls"""
+    try:
+        default = float(text)
+    except ValueError:
+        return text, overrides
+    values = {side: overrides.get(side, default) for side in sides}
+    others = [v for side, v in values.items() if side not in port_walls]
+    if not others:
+        return text, overrides
+    new_default = most_common_value(others)
+    return format_number_text(new_default), {side: v for side, v in values.items() if v != new_default}
 
 class MeshTab(QWidget):
     def __init__(self, MainWindow):
@@ -1976,6 +2015,13 @@ class MeshTab(QWidget):
         else:
             self.boundary_override_btn.setToolTip(
                 "Set the boundary condition, dielectric oversize and air layer thickness per side of the simulation box")
+        # a default field applies to the sides without their own value: with none left, it would change nothing
+        for widget, key, sides in ((self.boundary_box, "bc", [side for side, _ in BOX_SIDES]),
+                                   (self.margins_edit, "margin", list(MARGIN_SIDES)),
+                                   (self.airaround_edit, "air", [side for side, _ in BOX_SIDES])):
+            free = [side for side in sides if key not in overrides.get(side, {})]
+            widget.setEnabled(bool(free))
+            widget.setToolTip("" if free else "Every side has its own value: set them in Advanced...")
 
     def open_box_sides_override_dialog(self):
         dialog = BoxSidesOverrideDialog(self, self.boundary_box.currentText(),
@@ -2010,7 +2056,9 @@ class MeshTab(QWidget):
                          "shift": self.MainWindow.ports_tab._port_wall_shift.get(side, 0.0) if bc == PORTWALL else 0.0,
                          "uniform": (self.MainWindow.ports_tab._port_wall_result.get(side) or {}).get("uniform")
                                     if bc == PORTWALL else None,
-                         "extension": self._extension_for_preview(side) if bc == PORTWALL else 0.0}
+                         "extension": self._extension_for_preview(side) if bc == PORTWALL else 0.0,
+                         "profile": (self.MainWindow.ports_tab._port_wall_result.get(side) or {}).get("profile") or []
+                                    if bc == PORTWALL else []}
         return out
 
     def _extension_for_preview(self, side):
@@ -2250,8 +2298,14 @@ class MeshTab(QWidget):
             if bc != default_bc:
                 self._box_side_overrides.setdefault(side, {})["bc"] = bc
 
-        # margin: a single value or 4 values (xmin, xmax, ymin, ymax), same scheme
+        # margin: a single value or 4 values (xmin, xmax, ymin, ymax), same scheme. A port wall always has 0 and is
+        # its own override: it does not take part in choosing the default, else two port walls make 0 the default
+        # and the other sides overrides, and the default field would set nothing
+        port_walls = {side for (side, _), bc in zip(BOX_SIDES, bc_values) if bc == PORTWALL}
         margin_text, margin_overrides = margin_from_saved(saved_values.get("margin", get_preference(app_name, "margin", "200")))
+        if port_walls and margin_overrides is not None:
+            margin_text, margin_overrides = _default_without_port_walls(margin_text, margin_overrides, MARGIN_SIDES,
+                                                                        port_walls)
         self.margins_edit.setText(margin_text)
         for side, value in margin_overrides.items():
             self._box_side_overrides.setdefault(side, {})["margin"] = value
@@ -2270,7 +2324,8 @@ class MeshTab(QWidget):
                 air_values = None
                 air = ""
         if air_values is not None:
-            default_air = most_common_value(air_values)
+            others = [v for (side, _), v in zip(BOX_SIDES, air_values) if side not in port_walls]
+            default_air = most_common_value(others or air_values)
             self.airaround_edit.setText(format_number_text(default_air))
             for (side, _), value in zip(BOX_SIDES, air_values):
                 if value != default_air:
@@ -2399,6 +2454,11 @@ class CreateModelTab(CreateModelTabBase):
     # real RSS of the actual palace-x86_64 process(es) (one per MPI rank) - the same
     # process name _kill_palace_process_for_ram_limit() already pkills by.
     _RE_MPI = re.compile(r"Running with (\d+) MPI processes")
+    # run_sim of a model with port walls solves the calibration standards first, then the model, and says so:
+    #   "calibration standard 1 of 2: cal_xmin_L, 3 frequencies", "  reused, solved ...", "device model"
+    _RE_STANDARD = re.compile(r"^calibration standard (\d+) of (\d+): ([^,\s]+)")
+    _RE_STANDARD_REUSED = re.compile(r"^\s*reused, solved")
+    _RE_DEVICE_MODEL = re.compile(r"^device model\s*$")
     _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
@@ -2452,6 +2512,7 @@ class CreateModelTab(CreateModelTabBase):
         # unconverged solve seen in this run - see _report_nonconvergence()
         self._status_solve_freq_ghz = None
         self._nonconverged = []
+        self._status_stage = None       # with port walls: which solve of run_sim runs (a standard or the model)
         self._update_status_line()
 
     def _reset_status_for_run(self):
@@ -2482,7 +2543,26 @@ class CreateModelTab(CreateModelTabBase):
     def _reset_live_status(self):
         self._init_status_state()
 
+    def _new_solve(self, stage):
+        """A new Palace run in run_sim (a calibration standard or the model): its own ports and frequencies"""
+        self._status_stage = stage
+        self._status_port_cur = self._status_port_total = None
+        self._status_freq_display = None
+        self._status_solve_display = ""
+        self._update_status_line()
+
     def _parse_palace_status_line(self, line):
+        m = self._RE_STANDARD.search(line)
+        if m:
+            self._new_solve(f"calibration standard {m.group(1)}/{m.group(2)} ({m.group(3)})")
+            return
+        if self._RE_STANDARD_REUSED.search(line) and self._status_stage:
+            self._status_stage = self._status_stage + ", reused"
+            self._update_status_line()
+            return
+        if self._RE_DEVICE_MODEL.search(line):
+            self._new_solve("model")
+            return
         m = self._RE_NOT_CONVERGED.search(line)
         if m:
             self._report_nonconvergence(int(m.group(1)))
@@ -2750,7 +2830,9 @@ class CreateModelTab(CreateModelTabBase):
         solve = self._status_solve_display
         amr = "n/a" if self._status_amr_max is None else f"{self._status_amr_cur}/{self._status_amr_max}"
 
+        stage = getattr(self, "_status_stage", None)
         self.status_line.setText(
+            (f"Running: {stage}    |    " if stage else "") +
             f"MPI processes: {mpi}    |    Est. memory: {mem}    |    "
             f"Port: {port}    |    Freq: {freq}{solve}    |    AMR iteration: {amr}"
         )

@@ -261,6 +261,20 @@ If Palace's linear solver reaches **Maximum solver iterations** without convergi
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
 
+### A split region (pieces)
+
+The KLayout plug-in klayout_em_export can split a large region into pieces (Split Region). Each piece is simulated as its own model, and setupEM joins the results into one result of the whole region. Open the export's `<name>.simcfg` as usual:
+
+- **Pieces** (the list above the log) shows p1, p2, ... with their position and size, and an unticked **full (check)** row: the whole region as one model, to compare with the joined result.
+- **Select a piece** to see or change its settings. Each piece keeps its own mesh and solver settings. The frequency settings are the same for all pieces, because the join needs one frequency grid: a change in one piece applies to all.
+- **Start Simulation** runs the ticked pieces one after another: Create Mesh, then the simulation. Then it joins their results at the cuts and writes `<name>_deembedded.sNp` where a single model of the whole region would have it (`palace_model/<name>_data/output/<name>/`). Its ports are the outer ports of the region; the header names each port's piece.
+- **Unchanged pieces are reused.** A piece whose layout, settings and gds2palace version are the same as at its last run is not simulated again ("unchanged, reused"). After a Palace update, tick **Run unchanged pieces too**.
+- **Join Pieces** joins again, e.g. after you ran the pieces elsewhere. Command line: `python -m setupEM.join_pieces <name>.simcfg`.
+
+Why the join is exact: where two pieces meet, each has a port wall port on the line crossing the cut, calibrated with its reference plane on the cut. The two ports meet at the same plane, so their results connect directly. What the joined result does not contain: coupling between the pieces other than through those lines (the cut is a metal wall in both pieces).
+
+The pieces live in `<name>_pieces/` next to the export: `p1.simcfg`, `p1.py` (once created), `palace_model/p1_data`, ...
+
 ## Code tab
 
 The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.

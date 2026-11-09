@@ -179,8 +179,11 @@ def test_layout_preview_draws_the_box(monkeypatch, app, messages, tmp_path):
     preview = LayoutPreviewWindow(window)
     preview.refresh()
     labels = [i.text() for i in preview._box_items if isinstance(i, _ClickableBoxLabel)]
-    assert "xmin: port wall" in labels
-    assert any(text.startswith("xmax: Absorbing, oversize") for text in labels)
+    assert "port wall" in labels and not any(t.startswith(("xmin", "xmax", "ymin", "ymax")) for t in labels)
+    assert any(text.startswith("Absorbing, oversize") for text in labels)
+    # a boundary symbol per side, before its label
+    from PySide6.QtWidgets import QGraphicsPixmapItem
+    assert len([i for i in preview._box_items if isinstance(i, QGraphicsPixmapItem)]) == 4
     next(i for i in preview._box_items if isinstance(i, _ClickableBoxLabel)).mouseReleaseEvent(
         type("E", (), {"accept": lambda self: None})())
     assert opened == [1]
@@ -349,7 +352,7 @@ def test_extension_auto_is_checked_saved_and_shown(monkeypatch, app, messages, t
     preview = LayoutPreviewWindow(window)
     preview.refresh()
     labels = [i.text() for i in preview._box_items if hasattr(i, "text")]
-    assert f"xmin: port wall, moved {E:g} µm out" in labels
+    assert f"port wall, moved {E:g} µm out" in labels and f"feed +{E:g} µm" in labels
     preview.close()
     close_window(window)
 
@@ -396,3 +399,42 @@ def test_queue_asks_about_previous_results_once_before_it_starts(monkeypatch, tm
     (old / "port-S.csv").write_text("old")
     answer(monkeypatch, "Cancel simulation")
     assert tab._ask_queue_previous_results(runs) is False and old.exists()
+
+def test_status_line_names_the_solve_that_runs(monkeypatch, app, messages):
+    """run_sim of a port wall model solves the standards first, then the model: the status line says which runs"""
+    window, module = open_window(monkeypatch)
+    tab = window.create_model_tab
+    tab._reset_live_status()
+    assert "Running:" not in tab.status_line.text()            # a model without port walls: as before
+    tab._parse_palace_status_line("calibration standard 1 of 2: cal_xmin_L, 3 frequencies")
+    assert tab.status_line.text().startswith("Running: calibration standard 1/2 (cal_xmin_L)")
+    tab._parse_palace_status_line("Sweeping excitation index 1 (1/2):")
+    assert "Port: 1/2" in tab.status_line.text()
+    tab._parse_palace_status_line("calibration standard 2 of 2: cal_xmin_2L, 3 frequencies")
+    tab._parse_palace_status_line("  reused, solved Mon Nov  9 11:00:00 CET 2026")
+    assert tab.status_line.text().startswith("Running: calibration standard 2/2 (cal_xmin_2L), reused")
+    assert "Port: n/a" in tab.status_line.text()               # the next solve starts without the last one's port
+    tab._parse_palace_status_line("device model")
+    assert tab.status_line.text().startswith("Running: model    |")
+    close_window(window)
+
+def test_port_wall_settings_come_back_from_the_script(monkeypatch, app, messages, tmp_path):
+    """a model script edited in place gives back its port wall extension and reference plane shift (they were written
+    but not read back: the next session started with 0)"""
+    gds = gssg_gds(tmp_path / "line.gds")
+    window, module = open_window(monkeypatch, gds)
+    window.mesh_tab.set_port_wall("xmin")
+    window.ports_tab._port_wall_extension["xmin"] = 50.0
+    window.ports_tab._port_wall_shift["xmin"] = 10.0
+    assert window.mesh_tab.save_values() and window.ports_tab.save_values()
+    module.saved_values["deembedding_length"] = 120.0
+    window.modeleditor_tab.create_model_text()
+    script = tmp_path / "line_model.py"
+    script.write_text(window.modeleditor_tab.model_edit.toPlainText())
+    close_window(window)
+    window, module = open_window(monkeypatch)
+    window.load_configuration_from_file(str(script), in_place=True, ask_unsaved=False)
+    assert window.ports_tab._port_wall_extension == {"xmin": 50.0}
+    assert window.ports_tab._port_wall_shift == {"xmin": 10.0}
+    assert float(module.saved_values.get("deembedding_length")) == 120.0
+    close_window(window)

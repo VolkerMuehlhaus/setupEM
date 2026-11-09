@@ -314,3 +314,33 @@ def test_import_script_with_margin_list(monkeypatch, app, tmp_path):
     assert module.saved_values["margin"] == [10.0, 20.0, 30.0, 40.0]
     assert module.saved_values["air_around"] == [10.0, 20.0, 30.0, 40.0, 40.0, 40.0]
     close_window(window)
+
+
+def test_port_walls_do_not_make_the_defaults(monkeypatch, app, warnings_shown):
+    """two port walls (oversize and air 0) and two sides with 200: the default is 200 and the y sides follow it, so the
+    tab's fields still change something (before, 0 won the tie and every side was an override)"""
+    window, module = open_window(monkeypatch, "setupEM")
+    mesh = window.mesh_tab
+    module.saved_values["boundary"] = ["PORTWALL", "PORTWALL", "ABC", "ABC", "ABC", "ABC"]
+    module.saved_values["margin"] = [0.0, 0.0, 200.0, 200.0]
+    module.saved_values["air_around"] = [0.0, 0.0, 200.0, 200.0, 200.0, 200.0]
+    mesh.load_values()
+    assert mesh.margins_edit.text() == "200" and float(mesh.airaround_edit.text()) == 200.0
+    assert set(mesh._box_side_overrides) == {"xmin", "xmax"}
+    assert mesh.margins_edit.isEnabled() and mesh.airaround_edit.isEnabled()
+    mesh.margins_edit.setText("10")
+    assert mesh.save_values() and module.saved_values["margin"] == [0.0, 0.0, 10.0, 10.0]
+    close_window(window)
+
+
+def test_a_default_field_that_sets_no_side_is_greyed_out(monkeypatch, app, warnings_shown):
+    window, module = open_window(monkeypatch, "setupEM")
+    mesh = window.mesh_tab
+    mesh._box_side_overrides = {side: {"margin": 5.0 + k} for k, side in enumerate(("xmin", "xmax", "ymin", "ymax"))}
+    mesh._update_boundary_override_button_label()
+    assert not mesh.margins_edit.isEnabled() and "Advanced" in mesh.margins_edit.toolTip()
+    assert mesh.airaround_edit.isEnabled() and mesh.boundary_box.isEnabled()
+    mesh._box_side_overrides = {}
+    mesh._update_boundary_override_button_label()
+    assert mesh.margins_edit.isEnabled()
+    close_window(window)
