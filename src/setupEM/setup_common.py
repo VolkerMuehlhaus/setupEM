@@ -5659,6 +5659,8 @@ class MainWindowBase(QMainWindow):
         tab._reset_live_status()
         tab.refresh_runs_table()
         pieces = [r["piece"] for r in rows if not r.get("full")]
+        for message in self.piece_set.path_messages:
+            tab.log_area.appendPlainText("Written on another machine: " + message)
         tab.log_area.appendPlainText(
             f"Split region {self.piece_set.name}: {len(pieces)} pieces ({', '.join(pieces)}), each its own model. "
             "The settings (frequencies, mesh, solver, boundaries) are those of the whole region, the same for all "

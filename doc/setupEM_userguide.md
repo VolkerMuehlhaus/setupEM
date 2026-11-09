@@ -272,7 +272,7 @@ The KLayout plug-in klayout_em_export can split a large region into pieces (Spli
 - **Unchanged pieces are reused.** A piece whose layout, settings and gds2palace version are the same as at its last run is not simulated again ("unchanged, reused"). After a Palace update, tick **Run unchanged pieces too**.
 - **Join Pieces** joins again, e.g. after you ran the pieces elsewhere. Command line: `python -m setupEM.join_pieces <name>.simcfg`.
 
-Why the join is exact: where two pieces meet, each has a port wall port on the line crossing the cut, calibrated with its reference plane on the cut. The two ports meet at the same plane, so their results connect directly. What the joined result does not contain: coupling between the pieces other than through those lines (the cut is a metal wall in both pieces).
+Why the join is exact: where two pieces meet, each has a port wall port on the line crossing the cut, calibrated with its reference plane on the cut. The two ports meet at the same plane, so their results connect directly. What the joined result does not contain: coupling between the pieces other than through those lines (the cut is a metal wall in both pieces). The wall runs through the whole stack, the substrate included: the join was checked with ground metal along the cut lines; where a line's return current flows in the substrate instead (no ground metal near it), check the joined result against the full model.
 
 The pieces live in `<name>_pieces/` next to the export: `p1.simcfg`, `p1.py` (once created), `palace_model/p1_data`, ...
 

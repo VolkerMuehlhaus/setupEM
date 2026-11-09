@@ -131,8 +131,10 @@ def test_box_sides_of_the_pieces_follow_the_region(tmp_path):
     assert s.cut_sides(p1) == {"xmax": "p2"} and s.cut_sides(p2) == {"xmin": "p1"} and s.cut_sides(full) == {}
     assert s.wall_sides(p1) == {"xmin", "xmax"}, "recorded from the export's port walls"
     assert set(s.locked_sides(p1)) == {"xmax"} and "cut to p2" in s.locked_sides(p1)["xmax"]
-    assert s.box_sides(p1) == {"boundary": ["PORTWALL", "PORTWALL", "ABC", "ABC", "ABC", "ABC"],
-                               "margin": [200.0, 0.0, 200.0, 200.0], "air_around": [200.0, 0.0, 200.0, 200.0, 200.0, 200.0]}
+    sides = s.box_sides(p1)
+    assert {k: sides[k] for k in ("boundary", "margin", "air_around")} == {
+        "boundary": ["PORTWALL", "PORTWALL", "ABC", "ABC", "ABC", "ABC"],
+        "margin": [200.0, 0.0, 200.0, 200.0], "air_around": [200.0, 0.0, 200.0, 200.0, 200.0, 200.0]}
     # the region's ymin becomes PEC, set while p1 is loaded: p2 gets it too, its cut stays a port wall
     values = dict(s.effective_values(p1), boundary=["PORTWALL", "PORTWALL", "PEC", "ABC", "ABC", "ABC"])
     assert "box sides" in s.store(p1, values)
@@ -371,3 +373,48 @@ def test_start_simulation_runs_unattended_and_keeps_a_current_mesh(monkeypatch, 
     assert "no_gui=True" not in tab.model_launch_args("p1.py"), "Create Mesh by hand shows the mesh as before"
     window._script_dirty = False
     window.close()
+
+
+def test_port_wall_extension_only_on_the_region_edge(tmp_path):
+    """A per-side port wall setting is the region's: on the side of a piece that is the region's edge, never on a
+    cut (there the reference plane must stay on the cut for the join)."""
+    path = make_set(tmp_path)
+    data = json.load(open(path))
+    data["saved_values"]["port_wall_extension"] = {"xmin": 20.0, "xmax": 15.0}
+    json.dump(data, open(path, "w"))
+    s = PieceSet(path)
+    p1, p2, full = s.rows()
+    assert s.effective_values(p1)["port_wall_extension"] == {"xmin": 20.0}, "p1's xmax is the cut"
+    assert s.effective_values(p2)["port_wall_extension"] == {"xmax": 15.0}, "p2's xmin is the cut"
+    assert s.effective_values(full)["port_wall_extension"] == {"xmin": 20.0, "xmax": 15.0}
+    # set on p2's cut: ignored; set on p1's outer side: the region's
+    s.store(p2, dict(s.effective_values(p2), port_wall_extension={"xmin": 5.0, "xmax": 15.0}))
+    assert s.effective_values(p2)["port_wall_extension"] == {"xmax": 15.0}
+    s.store(p1, dict(s.effective_values(p1), port_wall_extension={"xmin": 10.0}))
+    assert json.load(open(path))["saved_values"]["port_wall_extension"] == {"xmin": 10.0, "xmax": 15.0}
+    assert "port_wall_extension" not in s.effective_values(p1) or \
+        s.effective_values(p1)["port_wall_extension"] == {"xmin": 10.0}
+
+
+def test_an_export_written_on_another_machine(tmp_path):
+    """Paths of another machine (a Windows drive, another gds2palace install): the model folders are the pieces
+    folder here, the layouts are found next to the files, the stackup in gds2palace's own folder."""
+    path = make_set(tmp_path)
+    elsewhere = "P:/IHP/Palace_EM/design"
+    for f in [path] + [str(p) for p in (tmp_path / "whole_pieces").glob("*.simcfg")]:
+        data = json.load(open(f))
+        values = data["saved_values"]
+        values["GdsFile"] = elsewhere + "/" + os.path.basename(values["GdsFile"])
+        values["SubstrateFile"] = "D:/other/install/SG13G2_FEM_200um.xml"
+        if values.get("sim_path"):
+            values["sim_path"] = elsewhere + "/whole_pieces"
+        json.dump(data, open(f, "w"))
+    s = PieceSet(path)
+    assert any("SubstrateFile" in m for m in s.path_messages)
+    p1, p2, full = s.rows()
+    assert os.path.normcase(p1["model_dir"]) == os.path.normcase(str(tmp_path / "whole_pieces"))
+    v1, vf = s.effective_values(p1), s.effective_values(full)
+    assert os.path.isfile(v1["GdsFile"]) and os.path.basename(v1["GdsFile"]) == "p1.gds"
+    assert os.path.isfile(vf["GdsFile"]) and os.path.basename(vf["GdsFile"]) == "whole.gds", "one folder up"
+    assert os.path.isfile(v1["SubstrateFile"]) and os.path.basename(v1["SubstrateFile"]) == "SG13G2_FEM_200um.xml"
+    assert PieceSet(path).path_messages == [], "written back once"

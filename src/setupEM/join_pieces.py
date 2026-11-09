@@ -39,7 +39,10 @@ def read_set(set_path):
 def _model_place(simcfg_path, data, default_name):
     """(sim_path, model basename) of a model's .simcfg: as setupEM keeps them, else next to the file."""
     values = data.get("saved_values", {}) if isinstance(data, dict) else {}
-    sim_path = values.get("sim_path") or os.path.dirname(os.path.abspath(simcfg_path))
+    sim_path = values.get("sim_path")
+    if not sim_path or not os.path.isdir(sim_path):
+        # not set, or written on another machine (P:/... on Windows, /mnt/pub/... on Linux): the file's own folder
+        sim_path = os.path.dirname(os.path.abspath(simcfg_path))
     name = values.get("model_basename") or default_name
     return sim_path, name
 

@@ -964,6 +964,16 @@ class PortsTab(QWidget):
             chosen = result.get("extension") if result else None
             edit.setToolTip((f"auto chose {chosen:g} µm in the last check.\n\n" if text == "auto" and chosen is not None else "")
                             + EXTENSION_TOOLTIP)
+            # a cut of a split region: no shift, no extension (the reference plane stays on the cut for the join)
+            why = (getattr(self.MainWindow.mesh_tab, "_split_locked_sides", None) or {}).get(side, "")
+            on_cut = why.startswith("cut")
+            shift_edit = table.cellWidget(row, 6).findChild(QLineEdit)
+            for field in (shift_edit, edit):
+                field.setEnabled(not on_cut)
+                if on_cut:
+                    field.setText("")
+                    field.setToolTip(f"{why}: no shift or extension here, the reference plane stays on the cut "
+                                     "for the join")
             full = result["status"] if result else 'not checked yet: "Check port walls"'
             status = QTableWidgetItem(result.get("short", full) if result else full)
             status.setFlags(Qt.ItemFlag.ItemIsEnabled)

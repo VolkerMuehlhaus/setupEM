@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 
-from .join_pieces import joined_path, read_set, result_path
+from .join_pieces import _model_place, joined_path, read_set, result_path
 
 FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 # settings that don't change a piece's result (where it is, what it is called, how setupEM shows it)
@@ -41,7 +41,10 @@ MESH_KEYS = ("refined_cellsize", "refined_cellsize_override", "meshsize_max", "c
              "adaptive_mesh_iterations", "amr_tol", "amr_max_dof", "adaptive_mesh_conformal")
 # what is a piece's own in any case: its layout, cell and folder; its box sides follow from the region's
 PIECE_KEYS = {"GdsFile", "cellname", "sim_path", "model_basename", "boundary", "margin", "air_around",
-              "preview_only", "no_preview"}
+              "preview_only", "no_preview", "port_wall_extension", "reference_plane_shift"}
+# per-side port wall settings ({side: value}): the region's, on the sides of a piece that are the region's edge; a cut
+# has none (its reference plane must stay on the cut for the join)
+SIDE_SETTINGS = ("port_wall_extension", "reference_plane_shift")
 OWN_KEY = "own_settings"
 WALLS_KEY = "wall_sides"        # the piece's sides with port wall ports (at a cut or on the region's edge)
 SIDES = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
@@ -106,14 +109,13 @@ class PieceSet:
         self.dir = os.path.dirname(self.path)
         self.name = os.path.splitext(os.path.basename(self.path))[0]
         self._record_wall_sides()
+        self.path_messages = self._resolve_paths()
 
     # ---------- rows ----------
 
     def _row(self, name, simcfg, box=None, fingerprint=None, ports=0, full=False):
         data = _load(simcfg)
-        values = data.get("saved_values", {})
-        sim_path = values.get("sim_path") or os.path.dirname(simcfg)
-        model = values.get("model_basename") or name
+        sim_path, model = _model_place(simcfg, data, name)
         if box:
             label = f"{name}   x {box[0]:g}..{box[2]:g}, y {box[1]:g}..{box[3]:g} µm"
         else:
@@ -150,6 +152,64 @@ class PieceSet:
     def _entry(self, row):
         return next((p for p in self.section["pieces"] if p["name"] == row.get("piece")), None)
 
+    def _resolve_paths(self):
+        """An export written on another machine (P:/... on Windows, /mnt/pub/... on Linux, another gds2palace
+        install): its layout, stackup and model folders, found here and written back once. Returns what was
+        replaced (texts)."""
+        messages = []
+
+        def find(path, folders, stackup=False):
+            if not path or os.path.exists(path):
+                return None
+            name = os.path.basename(str(path).replace("\\", "/"))
+            for folder in folders:
+                candidate = os.path.join(folder, name)
+                if os.path.isfile(candidate):
+                    return candidate.replace("\\", "/")
+            if stackup:
+                try:
+                    from gds2palace import utilities
+                    candidate = utilities.get_stackup_path(name)
+                    if candidate and os.path.isfile(candidate):
+                        return str(candidate).replace("\\", "/")
+                except Exception:       # noqa: BLE001 - no bundled stackup of that name
+                    pass
+            return None
+
+        set_values = self.data.setdefault("saved_values", {})
+        changed_set = False
+        for key, stackup in (("GdsFile", False), ("SubstrateFile", True)):
+            new = find(set_values.get(key), [self.dir], stackup)
+            if new:
+                messages.append(f"{key}: {set_values[key]} not found, using {new}")
+                set_values[key] = new
+                changed_set = True
+        if changed_set:
+            data = _load(self.path)
+            data["saved_values"] = set_values
+            _write(self.path, data)
+        for row in self.rows():
+            data = _load(row["simcfg"])
+            values = data.get("saved_values")
+            if not values:
+                continue
+            folder = os.path.dirname(row["simcfg"])
+            changed = False
+            if values.get("sim_path") and not os.path.isdir(values["sim_path"]):
+                values["sim_path"] = folder.replace("\\", "/")
+                changed = True
+            new = find(values.get("GdsFile"), [folder, self.dir])
+            if new:
+                values["GdsFile"] = new
+                changed = True
+            if set_values.get("SubstrateFile") and values.get("SubstrateFile") != set_values["SubstrateFile"] \
+                    and not os.path.isfile(values.get("SubstrateFile") or ""):
+                values["SubstrateFile"] = set_values["SubstrateFile"]
+                changed = True
+            if changed:
+                _write(row["simcfg"], data)
+        return messages
+
     def _record_wall_sides(self):
         """An export without wall sides (klayout_em_export before it wrote them): the sides its export made port
         walls, recorded once, before setupEM derives the sides itself."""
@@ -165,7 +225,8 @@ class PieceSet:
         return set(_load(row["simcfg"]).get(WALLS_KEY) or [])
 
     def cut_sides(self, row):
-        """{side: the piece on the other side} for the sides of row's box that are cuts (shared with another box)."""
+        """{side: the piece(s) on the other side} for the sides of row's box that are cuts (shared with other boxes;
+        the boxes fill a rectangle, so a cut side is shared along its whole length, maybe with two pieces)."""
         entry = self._entry(row)
         if entry is None or not entry.get("box") or row.get("full"):
             return {}
@@ -178,13 +239,13 @@ class PieceSet:
             overlap_y = min(y2, b2) - max(y1, b1) > TOL
             overlap_x = min(x2, a2) - max(x1, a1) > TOL
             if overlap_y and abs(a2 - x1) < TOL:
-                out["xmin"] = other["name"]
+                out["xmin"] = ", ".join(filter(None, (out.get("xmin"), other["name"])))
             if overlap_y and abs(a1 - x2) < TOL:
-                out["xmax"] = other["name"]
+                out["xmax"] = ", ".join(filter(None, (out.get("xmax"), other["name"])))
             if overlap_x and abs(b2 - y1) < TOL:
-                out["ymin"] = other["name"]
+                out["ymin"] = ", ".join(filter(None, (out.get("ymin"), other["name"])))
             if overlap_x and abs(b1 - y2) < TOL:
-                out["ymax"] = other["name"]
+                out["ymax"] = ", ".join(filter(None, (out.get("ymax"), other["name"])))
         return out
 
     def shared(self):
@@ -224,7 +285,12 @@ class PieceSet:
             if m is not None:
                 margin.append(m)
             air.append(a)
-        return {"boundary": bc, "margin": _compact(margin), "air_around": _compact(air)}
+        out = {"boundary": bc, "margin": _compact(margin), "air_around": _compact(air)}
+        values = self.data.get("saved_values", {})
+        for key in SIDE_SETTINGS:
+            out[key] = {side: v for side, v in (values.get(key) or {}).items()
+                        if side not in cuts and bc[SIDES.index(side)] == PORTWALL}
+        return out
 
     def own(self, row):
         return dict(_load(row["simcfg"]).get(OWN_KEY) or {})
@@ -246,6 +312,9 @@ class PieceSet:
         values.update(self.shared())
         values.update(self.own(row))
         values.update(self.box_sides(row))
+        for key in SIDE_SETTINGS:
+            if not values.get(key):
+                values.pop(key, None)
         return values
 
     def store(self, row, values):
@@ -275,6 +344,24 @@ class PieceSet:
                 new[side] = region[side]
             else:
                 new[side] = (str(bc[i]).upper(), margin[i] if i < 4 else None, air[i])
+        cuts = self.cut_sides(row)
+        for key in SIDE_SETTINGS:
+            old = dict(saved.get(key) or {})
+            mine = values.get(key) or {}
+            merged = dict(old)
+            for side in MARGIN_SIDES:
+                if side in cuts or side in locked:
+                    continue            # a cut has none; a stretch without this piece's ports isn't its to set
+                if new[side][0] == PORTWALL and mine.get(side):
+                    merged[side] = mine[side]
+                else:
+                    merged.pop(side, None)
+            if merged != old:
+                changed.append(key)
+                if merged:
+                    saved[key] = merged
+                else:
+                    saved.pop(key, None)
         if new != region:
             changed.append("box sides")
             saved["boundary"] = [new[s][0] for s in SIDES]
