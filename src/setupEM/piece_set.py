@@ -1,9 +1,17 @@
 """A split EM region in setupEM: the pieces of klayout_em_export's Export All, as rows of the Models list.
 
 <export>.simcfg has a "pieces" section (klayout_em_export pieces.py): one model per piece in <export>_pieces/
-(p1.simcfg, p2.simcfg, ...) and full.simcfg, the whole region as one model to check the joined result. Each piece
-keeps its own settings (mesh, solver); the frequency settings are one set for all pieces, because the join needs
-one frequency grid. After the pieces are simulated, join_pieces connects their results at the cuts.
+(p1.simcfg, p2.simcfg, ...) and full.simcfg, the whole region as one model to check the joined result. After the
+pieces are simulated, join_pieces connects their results at the cuts.
+
+The settings are those of the whole region, in <export>.simcfg, the same for every piece (frequencies, mesh, solver,
+boundaries). Two exceptions:
+- the box sides of a piece follow from the region's: a side on a cut is a port wall (PEC if no line crosses it), a
+  side on the region's edge has the region's boundary there, and where the region has a port wall but this piece
+  none of its ports, that stretch of the wall is PEC at the layout edge, as in the full model;
+- a piece may have its own mesh settings (MESH_KEYS, "own_settings" in its .simcfg), e.g. a finer mesh in one
+  difficult piece.
+Each piece's .simcfg (and its model script) gets the result of both, so that it is a complete model.
 
 Unchanged pieces are not simulated again: a piece's run key is a SHA-256 of what decides its result (the geometry
 fingerprint of the export, its settings, the gds2palace version and the version of combine_extend_snp.py), stored
@@ -26,6 +34,34 @@ FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 NOT_IN_KEY = {"sim_path", "model_basename", "GdsFile", "SubstrateFile", "cellname", "preview_only", "no_preview",
               "unit"}
 KEY_FILE = "piece.key"
+MESH_KEY_FILE = "mesh.key"      # the run key the piece was last meshed with: Start Simulation skips an unchanged mesh
+
+# the settings a piece may have of its own (the Mesh tab's "Own mesh settings for this piece"); all others are shared
+MESH_KEYS = ("refined_cellsize", "refined_cellsize_override", "meshsize_max", "cells_per_wavelength", "order",
+             "adaptive_mesh_iterations", "amr_tol", "amr_max_dof", "adaptive_mesh_conformal")
+# what is a piece's own in any case: its layout, cell and folder; its box sides follow from the region's
+PIECE_KEYS = {"GdsFile", "cellname", "sim_path", "model_basename", "boundary", "margin", "air_around",
+              "preview_only", "no_preview"}
+OWN_KEY = "own_settings"
+WALLS_KEY = "wall_sides"        # the piece's sides with port wall ports (at a cut or on the region's edge)
+SIDES = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
+MARGIN_SIDES = SIDES[:4]
+PORTWALL = "PORTWALL"
+TOL = 1e-6
+
+
+def _side_values(value, count, default):
+    """A saved per-side value (a list of count values, or one value for all) as a list of count values."""
+    if isinstance(value, (list, tuple)) and len(value) == count:
+        return list(value)
+    if value is None or value == "" or isinstance(value, (list, tuple)):
+        return [default] * count
+    return [value] * count
+
+
+def _compact(values):
+    """One value when all sides have it, else the list (as setupEM saves them)."""
+    return values[0] if len(set(map(str, values))) == 1 else values
 
 
 def _load(path):
@@ -34,6 +70,11 @@ def _load(path):
             return json.load(f)
     except (OSError, ValueError):
         return {}
+
+
+def _write(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
 
 
 def is_set_file(data):
@@ -64,6 +105,7 @@ class PieceSet:
         self.data, self.section = read_set(path) if data is None else (data, data["pieces"])
         self.dir = os.path.dirname(self.path)
         self.name = os.path.splitext(os.path.basename(self.path))[0]
+        self._record_wall_sides()
 
     # ---------- rows ----------
 
@@ -76,6 +118,8 @@ class PieceSet:
             label = f"{name}   x {box[0]:g}..{box[2]:g}, y {box[1]:g}..{box[3]:g} µm"
         else:
             label = "full (check): the whole region as one model"
+        if data.get(OWN_KEY):
+            label += "  · own mesh"
         return {"sim_path": os.path.join(sim_path, "palace_model", f"{model}_data").replace("\\", "/"),
                 "model_basename": model, "label": label, "params": {}, "piece": name, "simcfg": simcfg,
                 "model_dir": sim_path, "fingerprint": fingerprint or data.get("fingerprint"), "ports": ports,
@@ -100,6 +144,158 @@ class PieceSet:
         key = os.path.normcase(os.path.splitext(os.path.abspath(path))[0])
         return next((r for r in self.rows()
                      if os.path.normcase(os.path.splitext(os.path.abspath(r["simcfg"]))[0]) == key), None)
+
+    # ---------- shared settings, the box sides of a piece, its own mesh ----------
+
+    def _entry(self, row):
+        return next((p for p in self.section["pieces"] if p["name"] == row.get("piece")), None)
+
+    def _record_wall_sides(self):
+        """An export without wall sides (klayout_em_export before it wrote them): the sides its export made port
+        walls, recorded once, before setupEM derives the sides itself."""
+        for row in self.rows():
+            data = _load(row["simcfg"])
+            if not data or WALLS_KEY in data:
+                continue
+            bc = _side_values(data.get("saved_values", {}).get("boundary"), 6, "ABC")
+            data[WALLS_KEY] = [side for side, v in zip(SIDES, bc) if str(v).upper() == PORTWALL]
+            _write(row["simcfg"], data)
+
+    def wall_sides(self, row):
+        return set(_load(row["simcfg"]).get(WALLS_KEY) or [])
+
+    def cut_sides(self, row):
+        """{side: the piece on the other side} for the sides of row's box that are cuts (shared with another box)."""
+        entry = self._entry(row)
+        if entry is None or not entry.get("box") or row.get("full"):
+            return {}
+        x1, y1, x2, y2 = entry["box"]
+        out = {}
+        for other in self.section["pieces"]:
+            if other is entry or not other.get("box"):
+                continue
+            a1, b1, a2, b2 = other["box"]
+            overlap_y = min(y2, b2) - max(y1, b1) > TOL
+            overlap_x = min(x2, a2) - max(x1, a1) > TOL
+            if overlap_y and abs(a2 - x1) < TOL:
+                out["xmin"] = other["name"]
+            if overlap_y and abs(a1 - x2) < TOL:
+                out["xmax"] = other["name"]
+            if overlap_x and abs(b2 - y1) < TOL:
+                out["ymin"] = other["name"]
+            if overlap_x and abs(b1 - y2) < TOL:
+                out["ymax"] = other["name"]
+        return out
+
+    def shared(self):
+        """The region's settings, the same for every piece (box sides and the piece's own keys left out)."""
+        return {k: v for k, v in self.data.get("saved_values", {}).items() if k not in PIECE_KEYS}
+
+    def region_sides(self):
+        """{side: (boundary, margin or None for z, air)} of the whole region"""
+        values = self.data.get("saved_values", {})
+        bc = _side_values(values.get("boundary"), 6, "ABC")
+        margin = _side_values(values.get("margin"), 4, 200.0)
+        air = _side_values(values.get("air_around"), 6, margin[0])
+        return {side: (str(bc[i]).upper(), margin[i] if i < 4 else None, air[i]) for i, side in enumerate(SIDES)}
+
+    def locked_sides(self, row):
+        """{side: why} for the sides of row that follow from the split and can't be set for the piece"""
+        walls, cuts, region = self.wall_sides(row), self.cut_sides(row), self.region_sides()
+        out = {}
+        for side in SIDES:
+            if side in cuts:
+                out[side] = (f"cut to {cuts[side]}: port wall" if side in walls
+                             else f"cut to {cuts[side]}: PEC (no line crosses it)")
+            elif region[side][0] == PORTWALL and side not in walls:
+                out[side] = f"PEC: the region's port wall at {side}, without a port of {row.get('piece')}"
+        return out
+
+    def box_sides(self, row):
+        """row's boundary, margin and air_around, as saved settings: the region's, with the cuts and the
+        stretches of a port wall without ports of this piece as walls at the layout edge"""
+        walls, cuts, region = self.wall_sides(row), self.cut_sides(row), self.region_sides()
+        bc, margin, air = [], [], []
+        for side in SIDES:
+            b, m, a = region[side]
+            if side in cuts or (b == PORTWALL and side not in walls):
+                b, m, a = (PORTWALL if side in walls else "PEC"), (0.0 if m is not None else None), 0.0
+            bc.append(b)
+            if m is not None:
+                margin.append(m)
+            air.append(a)
+        return {"boundary": bc, "margin": _compact(margin), "air_around": _compact(air)}
+
+    def own(self, row):
+        return dict(_load(row["simcfg"]).get(OWN_KEY) or {})
+
+    def set_own(self, row, values):
+        """row's own mesh settings (MESH_KEYS of values), or None: the shared mesh again"""
+        data = _load(row["simcfg"])
+        if not data:
+            return
+        if values:
+            data[OWN_KEY] = {k: values[k] for k in MESH_KEYS if k in values}
+        else:
+            data.pop(OWN_KEY, None)
+        _write(row["simcfg"], data)
+
+    def effective_values(self, row):
+        """The settings row is built with: its .simcfg, the shared settings, its own mesh, its box sides."""
+        values = dict(_load(row["simcfg"]).get("saved_values", {}))
+        values.update(self.shared())
+        values.update(self.own(row))
+        values.update(self.box_sides(row))
+        return values
+
+    def store(self, row, values):
+        """The settings in the tabs while row is loaded: the shared ones (with an own mesh: the mesh ones into
+        row's own) into the set, the sides of row on the region's edge into the region's sides; then every piece's
+        .simcfg gets its settings again. Returns the names of the shared settings that changed."""
+        own = bool(self.own(row))
+        saved = self.data.setdefault("saved_values", {})
+        changed = []
+        for key, value in values.items():
+            if key in PIECE_KEYS or (own and key in MESH_KEYS):
+                continue
+            if saved.get(key) != value:
+                if key in saved:            # a setting the tabs add (a default) is no change to report
+                    changed.append(key)
+                saved[key] = value
+        if own:
+            self.set_own(row, values)
+        locked = self.locked_sides(row)
+        region = self.region_sides()
+        bc = _side_values(values.get("boundary"), 6, "ABC")
+        margin = _side_values(values.get("margin"), 4, 200.0)
+        air = _side_values(values.get("air_around"), 6, margin[0])
+        new = {}
+        for i, side in enumerate(SIDES):
+            if side in locked:
+                new[side] = region[side]
+            else:
+                new[side] = (str(bc[i]).upper(), margin[i] if i < 4 else None, air[i])
+        if new != region:
+            changed.append("box sides")
+            saved["boundary"] = [new[s][0] for s in SIDES]
+            saved["margin"] = _compact([new[s][1] for s in MARGIN_SIDES])
+            saved["air_around"] = _compact([new[s][2] for s in SIDES])
+        data = _load(self.path)
+        data["saved_values"] = saved
+        _write(self.path, data)
+        self.write_pieces()
+        return changed
+
+    def write_pieces(self):
+        """Every piece's .simcfg (and full.simcfg) with the settings it is built with."""
+        for r in self.rows():
+            data = _load(r["simcfg"])
+            if not data:
+                continue
+            values = self.effective_values(r)
+            if data.get("saved_values") != values:
+                data["saved_values"] = values
+                _write(r["simcfg"], data)
 
     # ---------- the one frequency grid ----------
 
@@ -138,7 +334,7 @@ class PieceSet:
         if not row.get("fingerprint"):
             return None
         if values is None:
-            values = _load(row["simcfg"]).get("saved_values", {})
+            values = self.effective_values(row)
         settings = {k: v for k, v in values.items() if k not in NOT_IN_KEY}
         settings.update(self.frequency())
         ports = _load(row["simcfg"]).get("ports", [])
@@ -152,6 +348,23 @@ class PieceSet:
     @staticmethod
     def key_path(row):
         return os.path.join(row["sim_path"], KEY_FILE)
+
+    def mesh_current(self, row):
+        """Whether row was meshed with the settings it has now (its model files there): Start Simulation can go
+        straight to the simulation. The full check model has no key: it is always meshed."""
+        key = self.run_key(row)
+        try:
+            with open(os.path.join(row["sim_path"], MESH_KEY_FILE), encoding="utf-8") as f:
+                stored = f.read().strip()
+        except OSError:
+            return False
+        return bool(key) and stored == key and os.path.isfile(os.path.join(row["sim_path"], "config.json"))
+
+    def store_mesh_key(self, row):
+        key = self.run_key(row)
+        if key and os.path.isdir(row["sim_path"]):
+            with open(os.path.join(row["sim_path"], MESH_KEY_FILE), "w", encoding="utf-8") as f:
+                f.write(key + "\n")
 
     @staticmethod
     def result(row, kind="_deembedded"):

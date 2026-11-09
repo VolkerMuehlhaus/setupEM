@@ -1361,7 +1361,7 @@ class BoxSidesOverrideDialog(QDialog):
     """
 
     def __init__(self, parent, default_bc_display, default_air_text, current_overrides,
-                 default_margin_text="", margin_editable=True, allow_port_wall=False):
+                 default_margin_text="", margin_editable=True, allow_port_wall=False, locked_sides=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle("Simulation Box Sides")
@@ -1380,6 +1380,8 @@ class BoxSidesOverrideDialog(QDialog):
         self._current_overrides = current_overrides
         self._result = {}
         self._locked_by_port_wall = set()
+        # a piece of a split region: {side: why}, the sides the split sets (setupEM piece_set.locked_sides)
+        self._locked_sides = dict(locked_sides or {})
 
         layout = QVBoxLayout()
 
@@ -1449,6 +1451,14 @@ class BoxSidesOverrideDialog(QDialog):
             self._air_edits[side] = air_edit
             combo.currentIndexChanged.connect(lambda _index, s=side: self._apply_port_wall_state(s))
             self._apply_port_wall_state(side)
+            if side in self._locked_sides:
+                why = self._locked_sides[side]
+                for widget in (combo, self._margin_edits.get(side), air_edit):
+                    if widget is not None:
+                        widget.setEnabled(False)
+                        widget.setToolTip(f"Set by the split: {why}")
+                side_item.setText(f"{label} (split)")
+                side_item.setToolTip(f"Set by the split: {why}")
         self.table.resizeRowsToContents()
         # fixed 6 rows: size the table to fit them exactly, no empty area or scrollbar
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1456,6 +1466,12 @@ class BoxSidesOverrideDialog(QDialog):
                                   + sum(self.table.rowHeight(r) for r in range(self.table.rowCount()))
                                   + 2 * self.table.frameWidth())
         self.table.setMinimumWidth(600)
+
+        if self._locked_sides:
+            split_note = QLabel("Set by the split, the same as in the whole region:\n"
+                                + "\n".join(f"  {side}: {why}" for side, why in self._locked_sides.items()))
+            split_note.setWordWrap(True)
+            layout.addWidget(split_note)
 
         if allow_port_wall:
             note = QLabel("Port wall: a PEC wall at the layout edge where lines are cut. Ports drawn on that edge are "
@@ -1481,6 +1497,8 @@ class BoxSidesOverrideDialog(QDialog):
 
     def _apply_port_wall_state(self, side):
         """a port wall has no dielectric oversize and no air: both cells show 0 and are locked"""
+        if side in getattr(self, "_locked_sides", {}):
+            return      # set by the split
         is_wall = self._bc_boxes[side].currentData() == PORTWALL
         edits = [self._margin_edits.get(side), self._air_edits[side]]
         for edit in edits:
@@ -1501,6 +1519,8 @@ class BoxSidesOverrideDialog(QDialog):
 
     def _reset_all(self):
         for side, _ in BOX_SIDES:
+            if side in self._locked_sides:
+                continue
             self._bc_boxes[side].setCurrentIndex(0)
             self._air_edits[side].clear()
             if self._margin_editable and side in self._margin_edits:
@@ -2028,11 +2048,50 @@ class MeshTab(QWidget):
                                         self.airaround_edit.text().strip(), self._box_side_overrides,
                                         default_margin_text=self.margins_edit.text().strip(),
                                         margin_editable=self.margins_edit.isEnabled(),
-                                        allow_port_wall=util_calibration is not None and not self.MainWindow.ElmerMode)
+                                        allow_port_wall=util_calibration is not None and not self.MainWindow.ElmerMode,
+                                        locked_sides=getattr(self, "_split_locked_sides", None))
         if dialog.exec() == QDialog.Accepted:
             self._box_side_overrides = dialog.get_overrides()
             self._update_boundary_override_button_label()
             self.MainWindow.ports_tab.refresh_port_wall_rows()
+
+    def show_piece(self, piece_set, row):
+        """A piece of a split region is loaded (piece_set None: no split region): the bar at the top says which
+        settings are shared, offers the piece's own mesh, and the box sides the split sets are locked."""
+        if not hasattr(self, "piece_bar"):
+            self.piece_bar = QGroupBox("Split region")
+            bar = QVBoxLayout()
+            self.piece_bar_label = QLabel()
+            self.piece_bar_label.setWordWrap(True)
+            bar.addWidget(self.piece_bar_label)
+            self.piece_own_check = QCheckBox()
+            self.piece_own_check.setToolTip("Mesh settings for this piece only, e.g. a finer mesh in one difficult "
+                                            "piece. Unticked: the mesh settings of the whole region.")
+            self.piece_own_check.toggled.connect(lambda on: self.MainWindow.set_piece_own_mesh(on))
+            bar.addWidget(self.piece_own_check)
+            self.piece_bar.setLayout(bar)
+            self.main_layout.insertWidget(0, self.piece_bar)
+        if piece_set is None or row is None:
+            self.piece_bar.setVisible(False)
+            self._split_locked_sides = None
+            return
+        locked = piece_set.locked_sides(row)
+        self._split_locked_sides = locked
+        name = row.get("piece")
+        own = bool(piece_set.own(row))
+        text = (f"{piece_set.name}: these settings apply to all pieces, the boundaries are those of the whole "
+                "region. ")
+        if locked:
+            text += "Set by the split for " + name + ": " + "; ".join(f"{s} {w}" for s, w in locked.items()) + ". "
+        if own:
+            text += f"The mesh settings below are {name}'s own."
+        self.piece_bar_label.setText(text)
+        self.piece_own_check.blockSignals(True)
+        self.piece_own_check.setText(f"Own mesh settings for {name}")
+        self.piece_own_check.setChecked(own)
+        self.piece_own_check.setVisible(not row.get("full"))
+        self.piece_own_check.blockSignals(False)
+        self.piece_bar.setVisible(True)
 
     def box_sides_for_preview(self):
         """per side: boundary (display name), port wall or not, dielectric oversize (None for z) and air, for the box

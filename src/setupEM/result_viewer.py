@@ -402,6 +402,7 @@ class ResultViewerWindow(QDialog):
         self._target_dir = ''
         self._master_files = []          # sorted absolute paths, last scan
         self._external_paths = []        # paths added via "Add...", session-only, kept across rescans
+        self._joined_paths = []          # a split region's joined result (outside the pieces' folders)
         self._checked_paths = set()      # subset of _master_files currently checked
         self._checked_params = {(1, 1)}  # set of (m, n) S-parameters to plot
         self._network_cache = {}         # path -> (mtime, network-like object | None)
@@ -614,9 +615,29 @@ class ResultViewerWindow(QDialog):
         rel = os.path.relpath(path, self._target_dir) if self._target_dir else path
         return rel.replace('\\', '/')
 
+    def _joined_results(self):
+        """A split region (setupEM piece_set): its joined result, which join_pieces.py writes where the whole
+        export's own model would put it, not in a piece's folder. The _dc_deembedded one with "Include _dc files"."""
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        if piece_set is None:
+            return []
+        try:
+            if __package__ in (None, ""):
+                from join_pieces import joined_path
+            else:
+                from .join_pieces import joined_path
+            ports = len(piece_set.section.get("external", []))
+            kinds = ["_deembedded"] + (["_dc_deembedded"] if self.include_dc_cb.isChecked() else [])
+            paths = [joined_path(piece_set.path, piece_set.data, ports, kind) for kind in kinds]
+        except Exception:       # noqa: BLE001 - no joined result to offer is no reason to fail the viewer
+            return []
+        return [path.replace('\\', '/') for path in paths if os.path.isfile(path)]
+
     def _legend_label_for_path(self, path):
         """Shortened label for plot legends, which have much less room than the
         file list."""
+        if path in self._joined_paths:
+            return "joined" + ("_dc" if "_dc_deembedded" in os.path.basename(path) else "")
         if path in self._live_paths:
             return f"{os.path.basename(os.path.dirname(path))} (live)"
         rel = self._relpath_for_path(path)
@@ -708,6 +729,9 @@ class ResultViewerWindow(QDialog):
         # user explicitly picked them.
         if self._external_paths:
             self._master_files = sorted(set(self._master_files) | set(self._external_paths))
+        self._joined_paths = self._joined_results()
+        if self._joined_paths:
+            self._master_files = sorted(set(self._master_files) | set(self._joined_paths))
 
         if not self._master_files:
             if target_dir_error:
@@ -726,7 +750,9 @@ class ResultViewerWindow(QDialog):
             # nothing is checked (e.g. first open), so the window isn't blank
             self._checked_paths &= set(self._master_files)
             if not self._checked_paths:
-                self._checked_paths = {pick_final_result_file(self._master_files)}
+                # a split region: its joined result first, the pieces' results are the details
+                self._checked_paths = ({self._joined_paths[0]} if self._joined_paths
+                                       else {pick_final_result_file(self._master_files)})
 
             # group by each file's immediate parent directory (relative to
             # target_dir), not a Palace/Elmer-specific convention like
@@ -737,10 +763,18 @@ class ResultViewerWindow(QDialog):
             # target_dir at all) and rendered as their own group below instead.
             groups = {}
             for path in self._master_files:
-                if path in self._external_paths:
+                if path in self._external_paths or path in self._joined_paths:
                     continue
                 parent = os.path.dirname(self._relpath_for_path(path))
                 groups.setdefault(parent, []).append(path)
+
+            if self._joined_paths:
+                joined_group = QTreeWidgetItem([f"Joined result of {self.MainWindow.piece_set.name} (all pieces)"])
+                joined_group.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                self.file_list.addTopLevelItem(joined_group)
+                for path in self._joined_paths:
+                    joined_group.addChild(self._make_file_item(path))
+                self._refresh_group_checkstate(joined_group)
 
             for path in groups.pop("", []):
                 self.file_list.addTopLevelItem(self._make_file_item(path))
@@ -776,6 +810,8 @@ class ResultViewerWindow(QDialog):
             text = f"⚡ {os.path.basename(os.path.dirname(path))} (live preview, not yet combined)"
         elif path in self._external_paths:
             text = f"📄 {os.path.basename(path)} (external)"
+        elif path in self._joined_paths:
+            text = f"🔗 {os.path.basename(path)} (joined)"
         else:
             text = os.path.basename(path)
         item = QTreeWidgetItem([text])

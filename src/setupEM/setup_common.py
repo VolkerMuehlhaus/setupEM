@@ -4168,6 +4168,10 @@ class CreateModelTabBase(QWidget):
         flags (instead of writing them into the script) and runs unsaved changes
         as the script itself."""
         MainWindow = self.MainWindow
+        runner_flags = []
+        if getattr(self, "_piece_runner", None) is not None and self._piece_runner.get("simulate"):
+            # Start Simulation of a split region runs unattended: no gmsh window to close after each piece
+            runner_flags = ["--set", "no_gui=True"]
         if MainWindow.preserve_mode_applies(pymodel_filename):
             runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_with_overrides.py")
             # the script may start the solver itself (start_simulation = True);
@@ -4185,7 +4189,10 @@ class CreateModelTabBase(QWidget):
                 # list the models the script creates, for Start Simulation; a sweep
                 # shows the gmsh window for its first model only
                 args += ["--record", MainWindow.script_models_file(), "--gui-first-only"]
-            return args
+            return args + runner_flags
+        if runner_flags:
+            runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_with_overrides.py")
+            return [runner, pymodel_filename] + runner_flags
         return [pymodel_filename]
 
     def _reset_live_status(self):
@@ -4443,6 +4450,11 @@ class CreateModelTabBase(QWidget):
         main.apply_piece_frequency()
         self._set_run_status(row, "running")
         self._active_run = row          # run_folder(): this piece's model folder
+        if runner["simulate"] and main.piece_set.mesh_current(row):
+            # meshed with these settings before (Create Mesh): straight to the simulation
+            self.log_area.appendPlainText(f"{row['piece']}: the mesh is up to date, not made again.\n")
+            self._piece_step_done("create_mesh", 0)
+            return
         runner["step"] = "mesh"
         self._create_mesh_now()
         if self.process.state() == QProcess.NotRunning:
@@ -4458,6 +4470,8 @@ class CreateModelTabBase(QWidget):
             self._set_run_status(row, f"failed ({exit_code})")
             self._finish_pieces(stopped=f"{row['piece']} failed")
             return
+        if purpose == "create_mesh" and runner.get("step") == "mesh":
+            self.MainWindow.piece_set.store_mesh_key(row)
         if purpose == "create_mesh" and runner["simulate"]:
             runner["step"] = "simulate"
             self._run_cancelled = False
@@ -5639,19 +5653,43 @@ class MainWindowBase(QMainWindow):
         pieces = [r["piece"] for r in rows if not r.get("full")]
         tab.log_area.appendPlainText(
             f"Split region {self.piece_set.name}: {len(pieces)} pieces ({', '.join(pieces)}), each its own model. "
-            "Select a piece to see or change its settings (mesh, solver); the frequency settings are the same for "
-            "all pieces. Start Simulation runs the ticked pieces and joins their results into "
-            f"{self.piece_set.name}'s result.\n")
+            "The settings (frequencies, mesh, solver, boundaries) are those of the whole region, the same for all "
+            "pieces; a cut is a port wall in both pieces. A piece can have its own mesh (Mesh tab). Start Simulation "
+            f"runs the ticked pieces and joins their results into {self.piece_set.name}'s result.\n")
         QMessageBox.information(self, "Loaded", f"Split region loaded from {shorten_path_for_display(file_path)}: "
                                 f"{len(pieces)} pieces")
 
     def load_piece(self, row, ask_unsaved=True):
-        """A piece's settings into the tabs: its .simcfg, or the model script Create Model wrote for it."""
+        """A piece's settings into the tabs: its .simcfg, or the model script Create Model wrote for it, then the
+        settings of the whole region it is built with (piece_set.effective_values)."""
         self.current_piece = row        # before: the list, rebuilt while the piece loads, selects this row
         self.load_configuration_from_file(row["simcfg"], ask_unsaved=ask_unsaved, quiet=True)
         if self.piece_set is not None:
+            self.apply_piece_frequency()
             self.script_runs = self.piece_set.rows()        # leaving a script edited in place empties the list
             self.create_model_tab.refresh_runs_table()
+        self.mesh_tab.show_piece(self.piece_set, row)
+
+    def set_piece_own_mesh(self, on):
+        """The Mesh tab's "Own mesh settings for <piece>": on, the mesh settings in the tabs become the piece's own;
+        off, the piece takes the region's mesh settings again."""
+        row = self.current_piece
+        if self.piece_set is None or row is None:
+            return
+        self.save_all_tabs()
+        tab = self.create_model_tab
+        if on:
+            self.piece_set.set_own(row, self.saved_values)
+            tab.log_area.appendPlainText(f"{row['piece']} has its own mesh settings now; the other settings stay "
+                                         "those of the whole region.\n")
+        else:
+            self.piece_set.set_own(row, None)
+            self.apply_piece_frequency()
+            tab.log_area.appendPlainText(f"{row['piece']} has the mesh settings of the whole region again.\n")
+        self.piece_set.write_pieces()
+        self.script_runs = self.piece_set.rows()
+        tab.refresh_runs_table()
+        self.mesh_tab.show_piece(self.piece_set, row)
 
     def leave_piece(self, row):
         """Before another piece is loaded or the pieces run: the current piece's settings from the tabs into its
@@ -5663,32 +5701,31 @@ class MainWindowBase(QMainWindow):
         # the script gives only ports and layout settings), so the changes go into the script first
         if self.script_model is not None and self.script_has_unsaved_changes():
             self.save_script_in_place(check_disk=False)
-        if self.piece_set.frequency_differs(self.saved_values):
-            changed = self.piece_set.set_frequency(self.saved_values)
-            if changed:
-                self.create_model_tab.log_area.appendPlainText(
-                    "The frequency settings now apply to all pieces (one frequency grid for the join).\n")
+        # the shared settings into the set (the mesh ones into the piece's own, if it has its own mesh), then every
+        # piece's .simcfg is written again with what it is built with
+        changed = self.piece_set.store(row, dict(self.saved_values))
+        if changed:
+            own = " (the mesh stays " + row["piece"] + "'s own)" if self.piece_set.own(row) else ""
+            self.create_model_tab.log_area.appendPlainText(
+                f"Changed for all pieces: {', '.join(changed)}{own}.\n")
         try:
             with open(row["simcfg"], encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return
-        values = dict(self.saved_values)
-        for key in ("sim_path", "model_basename"):
-            if key in data.get("saved_values", {}):
-                values[key] = data["saved_values"][key]
-        data["saved_values"] = values
-        data.update(self.native_config_extra_struct())
+        data.update(self.native_config_extra_struct())      # its ports
         with open(row["simcfg"], "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
     def apply_piece_frequency(self):
-        """The split region's frequency settings into the loaded piece (tabs included)."""
-        if self.piece_set is None:
+        """The settings the loaded piece is built with (the whole region's, its own mesh, its box sides) into the
+        tabs; a script edited in place gets them on Create Model."""
+        row = self.current_piece
+        if self.piece_set is None or row is None:
             return
-        freq = self.piece_set.frequency()
-        if freq and any(self.saved_values.get(k) != v for k, v in freq.items()):
-            self.saved_values.update(freq)
+        values = self.piece_set.effective_values(row)
+        if any(self.saved_values.get(k) != v for k, v in values.items()):
+            self.saved_values.update(values)
             self.load_all_tabs()
 
     def write_model_config(self, script_path):
