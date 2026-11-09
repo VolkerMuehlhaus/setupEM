@@ -297,7 +297,7 @@ Once you have Touchstone SnP results, click **View Results...** on the Create Mo
 
 <img src="./png/resultviewer_button.png" alt="view results button" width="700">
 
-The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter out the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result, so you can start with just the raw file and bring in the others only when needed.
+The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result. The de-embedded files are listed from the start, and the viewer opens with the raw result and its `_deembedded` result shown together. With port walls or a moved reference plane the `_deembedded` result is the one that counts: its ports are calibrated, with the reference plane at the wall (or where you moved it), while the raw result still holds the uncalibrated gap ports. Untick **Include _deembedded files** to see the raw result alone.
 
 <img src="./png/resultviewer1.png" alt="result viewer" width="750">
 
@@ -325,7 +325,7 @@ If snp2le isn't installed, setupEM offers to install it for you via pip:
 
 Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - there's no need to click Model Fit a second time. Choosing **Cancel** instead logs the manual install command and the project link.
 
-Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run (with port walls or a moved reference plane: the calibrated `_dc_deembedded` file, else `_deembedded`; the log says which) and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
 
 <img src="./png/modelfit2.png" alt="snp2le starting" width="700">
 

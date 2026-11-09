@@ -2979,6 +2979,19 @@ class CreateModelTab(CreateModelTabBase):
             for path in final_candidates:
                 self.log_area.appendPlainText("  " + path)
         raw_file = max(final_candidates, key=os.path.getmtime)
+        if __package__ in (None, ""):
+            from result_viewer import has_calibrated_ports
+        else:
+            from .result_viewer import has_calibrated_ports
+        if has_calibrated_ports(self.MainWindow.saved_values):
+            # port walls or a moved reference plane: the calibrated result, with the DC point if there is one
+            stem, ext = os.path.splitext(raw_file)
+            for candidate in (stem + "_dc_deembedded" + ext, stem + "_deembedded" + ext):
+                if os.path.isfile(candidate):
+                    self.log_area.appendPlainText("Port walls / reference plane shift: fitting the calibrated result "
+                                                  f"{os.path.basename(candidate)}, not the raw one.")
+                    raw_file = candidate
+                    break
         self._start_snp2le(raw_file, SNP2LE_URL)
 
     def _start_snp2le(self, raw_file, SNP2LE_URL):

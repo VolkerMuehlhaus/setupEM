@@ -358,6 +358,26 @@ def _network_from_port_s_data(port_s_data):
     return SimpleNamespace(s=s, frequency=SimpleNamespace(f=f_hz), nports=num_ports)
 
 
+def deembedded_of(path):
+    """The de-embedded file next to a raw result (<model>.sNp -> <model>_deembedded.sNp), or None if there is none."""
+    if not path or "_deembedded" in os.path.basename(path):
+        return None
+    stem, ext = os.path.splitext(path)
+    candidate = stem + "_deembedded" + ext
+    return candidate if os.path.isfile(candidate) else None
+
+
+def has_calibrated_ports(saved_values):
+    """Whether the model's ports are calibrated (port walls) or have their reference plane moved: then its
+    _deembedded result is the one to look at, the raw one still has the uncalibrated gap ports."""
+    if not isinstance(saved_values, dict):
+        return False
+    boundary = saved_values.get("boundary")
+    sides = boundary if isinstance(boundary, (list, tuple)) else [boundary]
+    return any(str(s).upper() == "PORTWALL" for s in sides) or bool(saved_values.get("reference_plane_shift")) \
+        or bool(saved_values.get("port_wall_extension"))
+
+
 def pick_final_result_file(paths):
     """Given a list of touchstone file paths, prefer the final result (any
     path with no "iterationN" component) over AMR per-iteration snapshots;
@@ -453,7 +473,9 @@ class ResultViewerWindow(QDialog):
         self.include_dc_cb.toggled.connect(self._rescan_files)
         filter_layout.addWidget(self.include_dc_cb)
         self.include_deembedded_cb = QCheckBox("Include _deembedded files")
-        self.include_deembedded_cb.setChecked(False)  # start showing only the raw result file
+        # the de-embedded result is listed and, on opening, shown next to the raw one: with port walls or a moved
+        # reference plane it is the result that counts
+        self.include_deembedded_cb.setChecked(True)
         self.include_deembedded_cb.toggled.connect(self._rescan_files)
         filter_layout.addWidget(self.include_deembedded_cb)
         filter_layout.addStretch()
@@ -745,8 +767,15 @@ class ResultViewerWindow(QDialog):
             self._checked_paths &= set(self._master_files)
             if not self._checked_paths:
                 # a split region: its joined result first, the pieces' results are the details
-                self._checked_paths = ({self._joined_paths[0]} if self._joined_paths
-                                       else {pick_final_result_file(self._master_files)})
+                if self._joined_paths:
+                    self._checked_paths = {self._joined_paths[0]}
+                else:
+                    raw = pick_final_result_file([p for p in self._master_files if "_deembedded" not in os.path.basename(p)]
+                                                 or self._master_files)
+                    self._checked_paths = {raw}
+                    deembedded = deembedded_of(raw)
+                    if deembedded in self._master_files:
+                        self._checked_paths.add(deembedded)
 
             # group by each file's immediate parent directory (relative to
             # target_dir), not a Palace/Elmer-specific convention like
