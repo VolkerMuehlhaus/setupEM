@@ -352,3 +352,47 @@ def test_extension_auto_is_checked_saved_and_shown(monkeypatch, app, messages, t
     assert f"xmin: port wall, moved {E:g} µm out" in labels
     preview.close()
     close_window(window)
+
+
+def test_recorded_calibration_standards_are_not_listed_as_models(monkeypatch, tmp_path, app):
+    # a models file written by an older setupEM lists the standards of a port wall next to their model (same
+    # _data folder): only the model is a run, run_sim solves its standards
+    import json
+    window, _module = open_window(monkeypatch)
+    models = tmp_path / "wall_models.json"
+    data = str(tmp_path / "wall_data")
+    models.write_text(json.dumps([
+        {"sim_path": data, "model_basename": "wall_cal_xmin_L", "solver": "palace",
+         "settings": {"boundary": ["PEC"] * 6, "_calibration_standard": True, "config_suffix": "_cal_xmin_L"}},
+        {"sim_path": data, "model_basename": "wall_cal_xmin_2L", "solver": "palace",
+         "settings": {"boundary": ["PEC"] * 6, "_calibration_standard": True, "config_suffix": "_cal_xmin_2L"}},
+        {"sim_path": data, "model_basename": "wall", "solver": "palace",
+         "settings": {"boundary": ["PORTWALL", "PORTWALL", "ABC", "ABC", "ABC", "ABC"]}},
+    ]))
+    monkeypatch.setattr(window, "script_models_file", lambda: str(models))
+    window.load_script_runs()
+    assert [run["model_basename"] for run in window.script_runs] == ["wall"]
+
+
+def test_queue_asks_about_previous_results_once_before_it_starts(monkeypatch, tmp_path, app):
+    # two models of one script, one with results from an earlier run: asked once, before the first model starts;
+    # Delete removes those results now, so no question comes between the models
+    window, _module = open_window(monkeypatch)
+    tab = window.create_model_tab if hasattr(window, "create_model_tab") else window.run_tab
+    runs = []
+    for name in ("sweep_T25", "sweep_T85"):
+        data = tmp_path / f"{name}_data"
+        data.mkdir()
+        runs.append({"sim_path": str(data), "model_basename": name, "solver": "palace", "params": {}, "label": name})
+    old = tmp_path / "sweep_T85_data" / "output" / "sweep_T85"
+    old.mkdir(parents=True)
+    (old / "port-S.csv").write_text("old")
+    asked = answer(monkeypatch, "Delete")
+    assert tab._ask_queue_previous_results(runs) is True
+    assert len(asked) == 1 and "1 of the 2 models" in asked[0] and "sweep_T85" in asked[0]
+    assert not old.exists() and tab._queue_clear_choice is True
+    assert tab._ask_queue_previous_results(runs) is True and len(asked) == 1     # nothing left to ask about
+    (old / "port-S.csv").parent.mkdir(parents=True)
+    (old / "port-S.csv").write_text("old")
+    answer(monkeypatch, "Cancel simulation")
+    assert tab._ask_queue_previous_results(runs) is False and old.exists()

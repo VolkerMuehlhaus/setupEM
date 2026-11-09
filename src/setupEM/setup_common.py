@@ -3942,6 +3942,10 @@ class CreateModelTabBase(QWidget):
             if not runs:
                 self.log_area.appendPlainText("⚠️ No model ticked in the list above.\n")
                 return
+            ask = getattr(self, "_ask_queue_previous_results", None)
+            if ask is not None and not ask(runs):
+                self.log_area.appendPlainText("Start Simulation cancelled, the existing results are kept.\n")
+                return
             self._run_queue = list(runs)
             self._queue_total = len(runs)
             self._start_next_run()
@@ -5533,6 +5537,8 @@ class MainWindowBase(QMainWindow):
         for model in models if isinstance(models, list) else []:
             if not isinstance(model, dict) or not isinstance(model.get("sim_path"), str):
                 continue
+            if (model.get("settings") or {}).get("_calibration_standard"):
+                continue    # a port wall's standard (recorded by older versions): run by its model's run_sim
             params = {}
             for key, value in (model.get("variable_overrides") or {}).items():
                 params[key] = value

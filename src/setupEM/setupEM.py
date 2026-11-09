@@ -3091,56 +3091,90 @@ class CreateModelTab(CreateModelTabBase):
         a "mesh" parent and writes the resulting .sNp file there too). run_path itself
         is also checked, defensively, in case some variant writes there directly.
         """
+        targets = self._previous_result_targets(run_path)
+        if not targets:
+            return True
+
+        # in a Start Simulation queue (several models of one script), the question was asked before the queue
+        # started (_ask_queue_previous_results)
+        delete = getattr(self, "_queue_clear_choice", None) if self._active_run is not None else None
+        if delete is None:
+            delete = self._ask_previous_results(f"This run's output directory already contains results from a "
+                                                f"previous simulation:\n\n{run_path}")
+            if delete is None:
+                return False
+        if delete:
+            self._delete_results(targets)
+        return True
+
+    def _previous_result_targets(self, run_path):
+        """Solver output of a previous run in run_path: [output folder] (Palace) or the result files (Elmer)."""
         if self.MainWindow.PalaceMode:
             output_dir = find_output_dir(run_path, self.run_basename())
             if not os.path.isdir(output_dir) or not os.listdir(output_dir):
-                return True
-            targets = [output_dir]
-        else:
-            targets = []
-            for search_dir in (os.path.join(run_path, "mesh"), run_path):
-                if not os.path.isdir(search_dir):
+                return []
+            return [output_dir]
+        targets = []
+        for search_dir in (os.path.join(run_path, "mesh"), run_path):
+            if not os.path.isdir(search_dir):
+                continue
+            for fn in os.listdir(search_dir):
+                full_path = os.path.join(search_dir, fn)
+                if not os.path.isfile(full_path):
                     continue
-                for fn in os.listdir(search_dir):
-                    full_path = os.path.join(search_dir, fn)
-                    if not os.path.isfile(full_path):
-                        continue
-                    if fn in ("scalar_results", "scalar_results.names") or \
-                       fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
-                        targets.append(full_path)
-            if not targets:
-                return True
+                if fn in ("scalar_results", "scalar_results.names") or \
+                   fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
+                    targets.append(full_path)
+        return targets
 
-        # in a Start Simulation queue (several models of one script), ask once
-        delete = getattr(self, "_queue_clear_choice", None) if self._active_run is not None else None
+    def _ask_previous_results(self, text):
+        """Delete / Keep / Cancel simulation: True, False or None (cancelled, or the dialog closed)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Previous simulation results found")
+        box.setText(text + "\n\nDelete the existing results before starting?")
+        delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
+        keep_btn = box.addButton("Keep", QMessageBox.NoRole)
+        box.addButton("Cancel simulation", QMessageBox.RejectRole)
+        box.setDefaultButton(delete_btn)
+        box.exec()
+        if box.clickedButton() not in (delete_btn, keep_btn):
+            return None
+        return box.clickedButton() is delete_btn
+
+    @staticmethod
+    def _delete_results(targets):
+        for target in targets:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+
+    def _ask_queue_previous_results(self, runs):
+        """Before a Start Simulation queue (several models of one script): previous results of any of the ticked
+        models? Asked once, before the first model starts, not between two models; a Delete removes them all
+        now. False when the user cancels."""
+        found = []
+        try:
+            for run in runs:
+                self._active_run = run
+                run_path = self.run_folder("palace_model" if self.MainWindow.PalaceMode else "elmer_model")
+                targets = self._previous_result_targets(run_path)
+                if targets:
+                    found.append((run, targets))
+        finally:
+            self._active_run = None
+        if not found:
+            return True
+        names = "\n".join(run["model_basename"] for run, _ in found)
+        delete = self._ask_previous_results(f"{len(found)} of the {len(runs)} models already have results from a "
+                                            f"previous simulation:\n\n{names}")
         if delete is None:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Question)
-            box.setWindowTitle("Previous simulation results found")
-            more = (" (the same applies to the other models in this run)"
-                    if self._active_run is not None and self._run_queue else "")
-            box.setText(
-                f"This run's output directory already contains results from a previous "
-                f"simulation:\n\n{run_path}\n\nDelete the existing results before starting{more}?"
-            )
-            delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
-            keep_btn = box.addButton("Keep", QMessageBox.NoRole)
-            box.addButton("Cancel simulation", QMessageBox.RejectRole)
-            box.setDefaultButton(delete_btn)
-            box.exec()
-            if box.clickedButton() not in (delete_btn, keep_btn):
-                # Cancel (or the dialog closed): don't start the simulation at all
-                return False
-            delete = box.clickedButton() is delete_btn
-            if self._active_run is not None:
-                self._queue_clear_choice = delete
-
+            return False
+        self._queue_clear_choice = delete
         if delete:
-            for target in targets:
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                else:
-                    os.remove(target)
+            for _run, targets in found:
+                self._delete_results(targets)
         return True
 
     def run_model(self):
