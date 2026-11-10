@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel,
     QScrollArea, QCheckBox, QMessageBox, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QGraphicsPolygonItem, QGraphicsSimpleTextItem,
-    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsLineItem, QSlider,
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsLineItem, QGraphicsPixmapItem, QSlider,
     QSplitter, QApplication,
     )
 from PySide6.QtGui import (
@@ -65,6 +65,14 @@ BOUNDARY_FILL_COLOR = QColor(51, 204, 255, 100)
 MARKER_OUTLINE_WIDTH = 3
 # initial layer-opacity slider position
 DEFAULT_LAYER_OPACITY_PERCENT = 70
+
+# the simulation box around the layout (setupEM only): one frame, not to scale, at a fixed fraction of
+# the layout size on each side with dielectric oversize or air; a port wall is a heavy line on the
+# layout edge. The labels carry the real numbers, a click on one opens the Simulation Box Sides dialog.
+BOX_FRAME_COLOR = "#f2c14e"
+PORT_WALL_COLOR = "#ffffff"
+BOX_FRAME_OFFSET = 0.12
+UNIFORM_END_COLOR = "#8be28b"     # where the cross-section at a port wall stops being uniform
 
 # above this many polygons on the selected layers/purpose, refresh() warns
 # before actually reading the GDS - gds_reader.read_gds() flattens the whole
@@ -237,6 +245,24 @@ MEASURE_COLOR = "#ffff00"
 CLICK_MAX_MOVE_PX = 4
 
 
+class _ClickableBoxLabel(QGraphicsSimpleTextItem):
+    """the label of a box side: a click opens the Simulation Box Sides dialog"""
+
+    def __init__(self, text, on_click):
+        super().__init__(text)
+        self._on_click = on_click
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+
+    def mousePressEvent(self, event):
+        event.accept()      # keeps the view from starting a pan drag
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+        if self._on_click is not None:
+            self._on_click()
+
+
 class LayoutCanvas(QGraphicsView):
     """Pan/zoom GDS canvas - plain PySide6 QGraphicsView, no new dependency.
     Polygon/label points are stored with y already negated (see
@@ -394,6 +420,60 @@ class LayoutCanvas(QGraphicsView):
         scene.addItem(label)
         self._measure_items.append(label)
         self.measureChanged.emit(text)
+
+
+BOUNDARY_SYMBOL_TIPS = {"PEC": "PEC: a perfect conductor (ground)", "ABC": "Absorbing: waves leave the box",
+                        "PMC": "PMC: a magnetic wall (open, no current crosses it)"}
+
+
+def _boundary_kind(display_name):
+    """'PEC', 'PMC' or 'ABC' from a boundary's display name"""
+    name = (display_name or "").upper()
+    if "PEC" in name or "ELECTRIC" in name:
+        return "PEC"
+    if "PMC" in name or "MAGNETIC" in name:
+        return "PMC"
+    return "ABC"
+
+
+def _boundary_symbol(kind, color, size, outward_up=True):
+    """A small symbol for a box side's boundary, size x size pixels, pointing out of the box (up, or down with
+    outward_up=False): PEC a ground symbol, ABC waves running outward, PMC an open end (a stem ending in a circle)."""
+    from PySide6.QtGui import QPixmap
+    scale = 2                                        # drawn at twice the size: sharp on high-DPI screens
+    pixmap = QPixmap(size * scale, size * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    if not outward_up:                               # mirror: out of the box is down
+        painter.translate(0, size)
+        painter.scale(1, -1)
+    pen = QPen(color, max(1.4, size / 9))
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    s = float(size)
+    if kind == "PEC":
+        # the stem comes from the box (bottom), the bars point outward (top), getting shorter
+        painter.drawLine(QPointF(s / 2, s * 0.95), QPointF(s / 2, s * 0.55))
+        for k, (y, half) in enumerate(((0.55, 0.42), (0.36, 0.28), (0.17, 0.14))):
+            painter.drawLine(QPointF(s / 2 - half * s, y * s), QPointF(s / 2 + half * s, y * s))
+    elif kind == "PMC":
+        painter.drawLine(QPointF(s / 2, s * 0.95), QPointF(s / 2, s * 0.55))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(s / 2, s * 0.35), s * 0.2, s * 0.2)
+    else:
+        # three arcs opening outward, the outer ones fainter: waves leaving the box
+        painter.setBrush(Qt.NoBrush)
+        for k, (radius, alpha) in enumerate(((0.22, 255), (0.42, 190), (0.62, 120))):
+            faded = QColor(color)
+            faded.setAlpha(alpha)
+            pen.setColor(faded)
+            painter.setPen(pen)
+            r = radius * s
+            painter.drawArc(QRectF(s / 2 - r, s * 0.95 - r, 2 * r, 2 * r), 40 * 16, 100 * 16)
+    painter.end()
+    return pixmap
 
 
 class LayoutPreviewWindow(QDialog):
@@ -754,6 +834,303 @@ class LayoutPreviewWindow(QDialog):
 
         self.legend_layout.addWidget(row)
 
+    def _metal_qcolor(self, name):
+        """(colour, zmin) of a stackup metal by name, the colour as in the layer legend"""
+        metals_list = getattr(self.MainWindow, "metals_list", None)
+        materials_list = getattr(self.MainWindow, "materials_list", None)
+        metal = None
+        if metals_list is not None and hasattr(metals_list, "getbylayername"):
+            metal = metals_list.getbylayername(name)
+        if metal is None or materials_list is None:
+            return QColor(DEFAULT_LAYER_COLOR), 0.0
+        return _material_qcolor(materials_list.get_by_name(metal.material), metal.material), getattr(metal, "zmin", 0.0)
+
+    def _extension_items(self, side, E, profile, layout_box, frame_box):
+        """the graphics of a port wall moved E outward: the extended feed (the cross-section at the wall, metal by metal,
+        dashed: the model adds it), the band outline, and a large outline arrow out to the wall with its length"""
+        x0, x1, y0, y1 = layout_box
+        fx0, fx1, fy0, fy1 = frame_box
+        bx0, by0, bx1, by1 = {"xmin": (fx0, y0, x0, y1), "xmax": (x1, y0, fx1, y1),
+                              "ymin": (x0, fy0, x1, y0), "ymax": (x0, y1, x1, fy1)}[side]
+        vertical = side in ("xmin", "xmax")         # the wall runs along y
+        items = []
+        tip = (f"{side}: port wall moved {E:g} µm out. The feed is extended by the cross-section at the wall (dashed: "
+               "not in the drawing, the model adds it); the reference plane stays at the layout edge")
+        outline_pen = QPen(QColor(255, 255, 255, 140), 1)
+        outline_pen.setCosmetic(True)
+        outline_pen.setStyle(Qt.DashLine)
+        frame = QGraphicsPathItem()
+        path = QPainterPath()
+        path.addRect(QRectF(QPointF(bx0, -by1), QPointF(bx1, -by0)))
+        frame.setPath(path)
+        frame.setPen(outline_pen)
+        frame.setBrush(QBrush(QColor(255, 255, 255, 18)))
+        frame.setToolTip(tip)
+        items.append(frame)
+        # the metals at the wall, lowest first (a ground plane under the lines)
+        pieces = []
+        for name, v0, v1 in profile:
+            color, z = self._metal_qcolor(name)
+            lo, hi = (max(v0, y0), min(v1, y1)) if vertical else (max(v0, x0), min(v1, x1))
+            if hi > lo:
+                pieces.append((z, color, lo, hi))
+        for z, color, lo, hi in sorted(pieces, key=lambda p: p[0]):
+            rect = (QRectF(QPointF(bx0, -hi), QPointF(bx1, -lo)) if vertical
+                    else QRectF(QPointF(lo, -by1), QPointF(hi, -by0)))
+            piece = QGraphicsPathItem()
+            area = QPainterPath()
+            area.addRect(rect)
+            piece.setPath(area)
+            fill = QColor(color)
+            fill.setAlpha(120)
+            piece.setBrush(QBrush(fill))
+            pen = QPen(QColor(color).lighter(150), 1)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.DashLine)
+            piece.setPen(pen)
+            piece.setToolTip(tip)
+            items.append(piece)
+        # a large outline arrow from the layout edge out to the moved wall
+        length = abs(bx1 - bx0) if vertical else abs(by1 - by0)
+        across = abs(by1 - by0) if vertical else abs(bx1 - bx0)
+        shaft = min(0.22 * length, 0.08 * across)
+        head = 2.2 * shaft
+        head_len = min(0.35 * length, 1.6 * head)
+        start, end = 0.12 * length, 0.88 * length
+        pts = [(start, -shaft / 2), (end - head_len, -shaft / 2), (end - head_len, -head / 2), (end, 0.0),
+               (end - head_len, head / 2), (end - head_len, shaft / 2), (start, shaft / 2)]
+        mid = (by0 + by1) / 2 if vertical else (bx0 + bx1) / 2
+
+        def place(t, w):                              # t outward from the layout edge, w across
+            if side == "xmin":
+                return QPointF(x0 - t, -(mid + w))
+            if side == "xmax":
+                return QPointF(x1 + t, -(mid + w))
+            if side == "ymin":
+                return QPointF(mid + w, -(y0 - t))
+            return QPointF(mid + w, -(y1 + t))
+        arrow = QGraphicsPathItem()
+        path = QPainterPath()
+        path.addPolygon(QPolygonF([place(t, w) for t, w in pts] + [place(*pts[0])]))
+        arrow.setPath(path)
+        pen = QPen(QColor(255, 255, 255, 230), 2.5)
+        pen.setCosmetic(True)
+        pen.setJoinStyle(Qt.MiterJoin)
+        arrow.setPen(pen)
+        arrow.setBrush(QBrush(QColor(255, 255, 255, 40)))
+        arrow.setToolTip(tip)
+        items.append(arrow)
+        label = QGraphicsSimpleTextItem(f"feed +{E:g} µm")
+        font = QFont()
+        font.setPointSize(10)
+        font.setBold(True)
+        label.setFont(font)
+        label.setBrush(QBrush(QColor(255, 255, 255)))
+        label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        r = label.boundingRect()
+        if vertical:                                  # above the arrow
+            label.setTransform(QTransform.fromTranslate(-r.width() / 2, -r.height() - 2))
+            label.setPos(place(length / 2, head / 2))
+        else:                                         # beside the arrow
+            label.setTransform(QTransform.fromTranslate(4, -r.height() / 2))
+            label.setPos(place(length / 2, head / 2))
+        label.setToolTip(tip)
+        items.append(label)
+        return items
+
+    def _draw_simulation_box(self):
+        """the simulation box around the layout, not to scale (see BOX_FRAME_OFFSET); nothing without box settings
+        from the main window (setupThermal)"""
+        scene = self.canvas.scene()
+        for item in getattr(self, "_box_items", []):
+            scene.removeItem(item)
+        self._box_items = []
+        get_sides = getattr(self.MainWindow, "box_sides_for_preview", None)
+        bbox = getattr(self, "_layout_bbox", None)
+        sides = get_sides() if get_sides is not None else None
+        if not sides or bbox is None:
+            return
+        x0, x1, y0, y1 = bbox
+        d = BOX_FRAME_OFFSET * max(x1 - x0, y1 - y0, 1e-9)
+        offset = {}
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            info = sides[side]
+            if info["portwall"]:
+                offset[side] = info.get("extension") or 0.0        # a moved port wall: to scale, it is real geometry
+            else:
+                offset[side] = 0.0 if ((info["margin"] or 0) + (info["air"] or 0)) == 0 else d
+        fx0, fx1 = x0 - offset["xmin"], x1 + offset["xmax"]
+        fy0, fy1 = y0 - offset["ymin"], y1 + offset["ymax"]
+        self._box_rect = QRectF(QPointF(fx0, -fy1), QPointF(fx1, -fy0))
+
+        def add(item, z=-1):
+            item.setZValue(z)
+            scene.addItem(item)
+            self._box_items.append(item)
+            return item
+
+        pen = QPen(QColor(BOX_FRAME_COLOR), 1.5)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.DashLine)
+        frame = QGraphicsPathItem()
+        path = QPainterPath()
+        path.addRect(QRectF(QPointF(fx0, -fy1), QPointF(fx1, -fy0)))
+        frame.setPath(path)
+        frame.setPen(pen)
+        add(frame)
+        wall_pen = QPen(QColor(PORT_WALL_COLOR), 5)
+        wall_pen.setCosmetic(True)
+        ends = {"xmin": ((fx0, fy0), (fx0, fy1)), "xmax": ((fx1, fy0), (fx1, fy1)),
+                "ymin": ((fx0, fy0), (fx1, fy0)), "ymax": ((fx0, fy1), (fx1, fy1))}
+        # the feed extension between a moved port wall and the layout edge (not in the drawing): the cross-section at
+        # the wall drawn on to the moved wall (dashed outlines: geometry the model adds), a band outline and a large
+        # outline arrow pointing out to the wall
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            E = sides[side].get("extension") or 0.0 if sides[side]["portwall"] else 0.0
+            if not E:
+                continue
+            for item in self._extension_items(side, E, sides[side].get("profile") or [], (x0, x1, y0, y1),
+                                              (fx0, fx1, fy0, fy1)):
+                add(item, z=1e6 - 3)
+        for side, ((ax, ay), (bx, by)) in ends.items():
+            if sides[side]["portwall"]:
+                line = QGraphicsLineItem(QLineF(QPointF(ax, -ay), QPointF(bx, -by)))
+                line.setPen(wall_pen)
+                line.setToolTip(f"{side}: port wall (PEC at the layout edge)")
+                add(line, z=self._highlight_zvalue + 0.5 if hasattr(self, "_highlight_zvalue") else 0)
+
+        # reference plane shifted into the layout along the feed: a dashed line at its real position, in the port colour
+        plane_pen = QPen(QColor(PORT_OUTLINE_COLOR), 2)
+        plane_pen.setCosmetic(True)
+        plane_pen.setStyle(Qt.DashLine)
+        plane_font = QFont()
+        plane_font.setPointSize(9)
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            shift = sides[side].get("shift", 0.0) if sides[side]["portwall"] else 0.0
+            if not shift:
+                continue
+            if side in ("xmin", "xmax"):
+                x = x0 + shift if side == "xmin" else x1 - shift
+                ends, anchor = ((x, y0), (x, y1)), (x, -y1)
+            else:
+                y = y0 + shift if side == "ymin" else y1 - shift
+                ends, anchor = ((x0, y), (x1, y)), (x1, -y)
+            line = QGraphicsLineItem(QLineF(QPointF(ends[0][0], -ends[0][1]), QPointF(ends[1][0], -ends[1][1])))
+            line.setPen(plane_pen)
+            line.setToolTip(f"{side}: reference plane {shift:g} µm into the layout (Ports tab, Port walls)")
+            add(line, z=1e6 - 1)
+            label = QGraphicsSimpleTextItem(f"{side} ref. plane {shift:+g} µm")
+            label.setFont(plane_font)
+            label.setBrush(QBrush(QColor(PORT_OUTLINE_COLOR)))
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            label.setTransform(QTransform.fromTranslate(4, 2) if side in ("xmin", "xmax")
+                               else QTransform.fromTranslate(-r.width() - 4, -r.height() - 2))
+            label.setPos(*anchor)
+            add(label, z=1e6)
+
+        # where the cross-section at a port wall stops being uniform (from the last port wall check): the device starts
+        # there, and a reference plane shift must stay before it
+        end_pen = QPen(QColor(UNIFORM_END_COLOR), 1.5)
+        end_pen.setCosmetic(True)
+        end_pen.setStyle(Qt.DotLine)
+        for side in ("xmin", "xmax", "ymin", "ymax"):
+            end = sides[side].get("uniform") if sides[side]["portwall"] else None
+            if end is None:
+                continue
+            if side in ("xmin", "xmax"):
+                x = x0 + end if side == "xmin" else x1 - end
+                ends, anchor = ((x, y0), (x, y1)), (x, -y0)
+            else:
+                y = y0 + end if side == "ymin" else y1 - end
+                ends, anchor = ((x0, y), (x1, y)), (x0, -y)
+            line = QGraphicsLineItem(QLineF(QPointF(ends[0][0], -ends[0][1]), QPointF(ends[1][0], -ends[1][1])))
+            line.setPen(end_pen)
+            line.setToolTip(f"{side}: the cross-section at the port wall stays the same up to here ({end:.0f} µm); "
+                            "the device starts here, a reference plane shift must stay before it")
+            add(line, z=1e6 - 2)
+            label = QGraphicsSimpleTextItem(f"{side} uniform feed {end:.0f} µm")
+            label.setFont(plane_font)
+            label.setBrush(QBrush(QColor(UNIFORM_END_COLOR)))
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            # xmin and ymin at one end of their lines, xmax and ymax at the other: two walls close together do not
+            # put their labels on top of each other
+            if side in ("xmin", "xmax"):
+                at_top = side == "xmax"
+                anchor = (x, -y1) if at_top else (x, -y0)
+                label.setTransform(QTransform.fromTranslate(4, 2) if at_top else QTransform.fromTranslate(4, -r.height() - 2))
+            else:
+                at_right = side == "ymax"
+                anchor = (x1, -y) if at_right else (x0, -y)
+                label.setTransform(QTransform.fromTranslate(-r.width() - 4, 2) if at_right else QTransform.fromTranslate(4, 2))
+            label.setPos(*anchor)
+            add(label, z=1e6)
+
+        def text_of(side):
+            # the side is clear from where the label is; a symbol before it shows the boundary type
+            info = sides[side]
+            if info["portwall"]:
+                E = info.get("extension") or 0.0
+                return "port wall" + (f", moved {E:g} µm out" if E else "")
+            parts = [info["bc"]]
+            if info["margin"] is not None:
+                parts.append(f"oversize {info['margin']:g} µm")
+            parts.append(f"air {info['air']:g} µm")
+            return ", ".join(parts)
+
+        opener = getattr(self.MainWindow, "open_box_sides_dialog", None)
+
+        def on_click():
+            if opener is not None:
+                opener()
+                self._draw_simulation_box()
+
+        font = QFont()
+        font.setPointSize(9)
+        # (side, anchor in scene coordinates, rotation): each label, with its boundary symbol, centred on its side just
+        # outside the frame; the x side labels are turned to run along the side
+        mid_x, mid_y = (fx0 + fx1) / 2, -(fy0 + fy1) / 2
+        anchors = [("xmin", (fx0, mid_y), -90), ("xmax", (fx1, mid_y), 90),
+                   ("ymin", (mid_x, -fy0), 0), ("ymax", (mid_x, -fy1), 0)]
+        gap = 6
+        for side, (px, py), rotation in anchors:
+            label = _ClickableBoxLabel(text_of(side), on_click)
+            label.setFont(font)
+            label.setBrush(QBrush(QColor(PORT_WALL_COLOR if sides[side]["portwall"] else BOX_FRAME_COLOR)))
+            label.setToolTip(("Port wall: PEC at the layout edge, no dielectric oversize, no air. " if sides[side]["portwall"] else "")
+                             + "Click to change the box sides (Mesh and Boundaries > Advanced...)")
+            label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            r = label.boundingRect()
+            # symbol and text centred together; in the label's own (turned) coordinates out of the box is up, except
+            # below the box
+            size = max(16, int(1.4 * r.height()))
+            total = size + 4 + r.width()
+            symbol_left, text_left = -total / 2, -total / 2 + size + 4
+            text_top = gap if side == "ymin" else -r.height() - gap
+            turn = QTransform() if side in ("ymin", "ymax") else QTransform().rotate(rotation)
+            label.setTransform(QTransform(turn).translate(text_left, text_top))
+            label.setPos(px, py)
+            add(label, z=1e6)
+            color = QColor(PORT_WALL_COLOR if sides[side]["portwall"] else BOX_FRAME_COLOR)
+            kind = "PEC" if sides[side]["portwall"] else _boundary_kind(sides[side]["bc"])
+            symbol = QGraphicsPixmapItem(_boundary_symbol(kind, color, size, outward_up=side != "ymin"))
+            symbol.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            symbol.setToolTip(BOUNDARY_SYMBOL_TIPS.get(kind, ""))
+            symbol.setTransform(QTransform(turn).translate(symbol_left, text_top + (r.height() - size) / 2))
+            symbol.setPos(px, py)
+            add(symbol, z=1e6)
+        z_text = "   ".join(f"{side}: {sides[side]['bc']}, air {sides[side]['air']:g} µm" for side in ("zmin", "zmax"))
+        z_label = _ClickableBoxLabel(z_text, on_click)
+        z_label.setFont(font)
+        z_label.setBrush(QBrush(QColor("#8fd3ff")))
+        z_label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        r = z_label.boundingRect()
+        # centred under the frame, below the ymin label
+        z_label.setTransform(QTransform.fromTranslate(-r.width() / 2, 6 + r.height() + 6))
+        z_label.setPos(mid_x, -fy0)
+        add(z_label, z=1e6)
+
     def _polygon_points(self, poly):
         return QPolygonF([QPointF(float(x), float(-y)) for x, y in zip(poly.pts_x, poly.pts_y)])
 
@@ -865,6 +1242,8 @@ class LayoutPreviewWindow(QDialog):
             scene = self.canvas.scene()
             self.canvas.forget_measurement_items()
             scene.clear()
+            self._box_items = []
+            self._layout_bbox = allpolygons.get_bounding_box()
             self._clear_legend()
 
             # regular stackup layers, bottom (lowest zmin) to top - so later (higher)
@@ -1100,7 +1479,15 @@ class LayoutPreviewWindow(QDialog):
             # info_label (base text + selection, if any) via _update_info_label()
             self.set_highlighted_layer(self._highlighted_layer_name)
 
+            self._box_rect = None
+            self._draw_simulation_box()
+
+            # fit the layout and its box: labels have a fixed size in pixels, and on a small layout they would
+            # dominate the bounding rectangle and leave the layout small in a corner
             rect = scene.itemsBoundingRect()
+            if self._box_rect is not None:
+                m = 0.18 * max(self._box_rect.width(), self._box_rect.height())
+                rect = self._box_rect.adjusted(-m, -m, m, m)
             if not rect.isEmpty():
                 scene.setSceneRect(rect)
                 self.canvas.fitInView(rect, Qt.KeepAspectRatio)

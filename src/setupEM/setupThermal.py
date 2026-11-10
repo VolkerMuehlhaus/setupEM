@@ -57,6 +57,7 @@ if __package__ in (None, ""):
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
@@ -70,6 +71,7 @@ else:
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
         find_paraview_exe, MODEL_KIND_THERMAL,
@@ -752,8 +754,14 @@ class MeshTab(QWidget):
         self.margins_layout.addWidget(self.margins_edit)
         self.label8 = QLabel(" µm from metal drawing")
         self.margins_layout.addWidget(self.label8)
+        # single sides can be overridden, merged into a 4-value settings['margin'] by save_values()
+        self._margin_overrides = {}
+        self.margin_override_btn = QPushButton("Advanced...")
+        self.margin_override_btn.clicked.connect(self.open_margin_override_dialog)
+        self.margins_layout.addWidget(self.margin_override_btn)
         self.margins_layout.addStretch()
         self.mesh_layout.addLayout(self.margins_layout)
+        self._update_margin_override_button_label()
 
         self.mesh_group.setLayout(self.mesh_layout)
         self.main_layout.addWidget(self.mesh_group)
@@ -787,11 +795,13 @@ class MeshTab(QWidget):
 
         try:
             value = float(self.margins_edit.text())
+            if value < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value for dielectric oversize margin")
             self.margins_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "margin", "100")))
             return False
-        saved_values ["margin"] = float(value)
+        saved_values ["margin"] = margin_to_saved(value, self._margin_overrides)
 
         # iterative or direct solver for Elmer
         saved_values["iterative"] = "iterative" in self.solver_box.currentText()
@@ -806,13 +816,28 @@ class MeshTab(QWidget):
         self._refined_cellsize_override = list(saved_values.get("refined_cellsize_override", []))
         self._update_refined_override_button_label()
         self.cells_maxsize_edit.setText(str(saved_values.get("meshsize_max", get_preference(app_name, "meshsize_max", "100"))))
-        self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "100"))))
+        margin_text, self._margin_overrides = margin_from_saved(saved_values.get("margin", get_preference(app_name, "margin", "100")))
+        self.margins_edit.setText(margin_text)
+        self._update_margin_override_button_label()
 
         if saved_values.get("iterative", False):
             self.solver_box.setCurrentIndex(0)
         else:
             self.solver_box.setCurrentIndex(1)
 
+
+    def _update_margin_override_button_label(self):
+        overrides = self._margin_overrides
+        self.margin_override_btn.setText(f"Advanced... ({len(overrides)})" if overrides else "Advanced...")
+        lines = [f"{side}: {value:g} µm" for side, value in overrides.items()]
+        self.margin_override_btn.setToolTip("Per-side overrides:\n" + "\n".join(lines) if lines
+                                            else "Set the dielectric oversize per side")
+
+    def open_margin_override_dialog(self):
+        dialog = MarginSidesDialog(self, self.margins_edit.text().strip(), self._margin_overrides)
+        if dialog.exec() == QDialog.Accepted:
+            self._margin_overrides = dialog.get_overrides()
+            self._update_margin_override_button_label()
 
     def _update_refined_override_button_label(self):
         n = len(self._refined_cellsize_override)
@@ -1498,7 +1523,8 @@ class PreferencesDialog(QDialog):
             float(self.viamerge_edit.text())
             float(self.refined_cellsize_edit.text())
             float(self.meshsize_max_edit.text())
-            float(self.margin_edit.text())
+            if float(self.margin_edit.text()) < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid numeric value")
             return
@@ -1741,6 +1767,9 @@ class MainWindow(MainWindowBase):
         # Load all saved data into tabs
         self.load_all_tabs()
 
+        # size and position of the last session
+        self._restore_window_layout()
+
     # ---------- Menu actions ----------
 
     def show_version(self):
@@ -1811,7 +1840,7 @@ class MainWindow(MainWindowBase):
         "refined_cellsize": ("mesh_tab", ["refinement_edit"]),
         "refined_cellsize_override": ("mesh_tab", ["refined_override_btn"]),
         "meshsize_max": ("mesh_tab", ["cells_maxsize_edit"]),
-        "margin": ("mesh_tab", ["margins_edit"]),
+        "margin": ("mesh_tab", ["margins_edit", "margin_override_btn"]),
         "iterative": ("mesh_tab", ["solver_box"]),
     }
 

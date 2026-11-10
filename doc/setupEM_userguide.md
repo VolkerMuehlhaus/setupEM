@@ -52,6 +52,7 @@ Document version: 2026-10-31
 
 This chapter gives a brief overview of major features added since the previous edition of this guide. For the complete, dated change log, see [`CHANGES.md`](CHANGES.md).
 
+- **Calibrated ports at port walls**: a box side can be a **Port wall**, and the ports on it are calibrated with standards instead of the estimated port inductance — see "[Port walls](#port-walls-calibrated-ports-at-the-layout-edge)".
 - **A built-in 3D field viewer**, an in-app alternative to external ParaView, with a clip plane, vector-arrow overlay, and per-solver color presets — see chapter "[3D Field Viewer](#3d-field-viewer)".
 - **A graphical Stackup XML Editor**, reachable from **Tools > Edit Stackup XML...** in both apps — see chapter "[The Stackup Editor](#the-stackup-editor)". It replaces hand-editing the stackup XML in a text editor, and covers Materials, Dielectric Stack, drawn and Derived Layers, Variables/expressions, and Thermal Tables.
 - **setupThermal**, a companion app for building Elmer thermal simulation models the same guided way as setupEM builds Palace/Elmer EM models — see chapter "[setupThermal](#setupthermal)".
@@ -193,6 +194,19 @@ Palace doesn't use the port **voltage** parameter physically - setupEM repurpose
 
 <img src="./png/ports2.png" alt="ports" width="700">
 
+### Port walls (calibrated ports at the layout edge)
+
+A port at the edge of the layout can be calibrated instead of getting the estimated port inductance. Make that side a **Port wall** in **Mesh and Boundaries > Advanced...**: a PEC wall right at the layout edge, where the lines leave the layout. Draw the lines to the edge, the port polygon on the edge over the end of each line (its depth is the gap that gds2palace cuts out of the line), and let ground metal reach the edge next to the lines. See "Calibrated de-embedding at port walls" in the gds2palace user guide for why and how.
+
+When a side is a port wall:
+
+- **Port overview** shows in the column **De-embedding** what happens at each port: "port wall xmin, calibrated", "estimated port inductance" for other ports, or in amber a port that lies on an edge which is not a port wall.
+- The **Direction** of a port on a port wall is set by the side (into the layout) and can't be changed.
+- A **via port** on a port wall, e.g. from the KLayout plug-in's export, stays in the list as you defined it; the De-embedding column says "via port used as a gap port on TopMetal2", and gds2palace makes it one when the model is written. This needs one end of the via port to be the line and the other a ground plane (or no metal); otherwise the check shows an error for that port wall.
+- The group **Port walls** lists each port wall after **Check port walls**: its ports, the ground metal found at the cut, D, the lengths of the two calibration standards, the frequency up to which the calibration is valid, and warnings or the error. **Reference plane shift (µm)** moves the reference plane into the layout along the feed. **Extension (µm)** (blank, a length or `auto`) moves the port wall outward for a device close to the wall: the feed is extended by the cross-section at the wall and the reference plane shifted back to the layout edge; the layout preview shades the extension. It is exact for lines over a plane, not for ground strips that end open before the device, see "Moving the port wall outward" in the gds2palace user guide.
+
+**Check port walls** reads the layout, without meshing. When a port lies on an edge that is not a port wall, it asks whether to make that side a port wall (once per side and session). **Create Model** runs the same check when a port wall is set, and stops when a port wall can't be calibrated, e.g. without ground metal at the cut.
+
 ## Mesh and Boundaries tab
 
 Controls the mesh used for simulation, trading off accuracy against simulation time.
@@ -213,9 +227,11 @@ Details and measured errors: "Choosing the conductor model" in the gds2palace us
 
 The same group holds Palace's linear solver setting, which controls how Palace solves each frequency. It is also only shown with **Show advanced configuration** set to **Yes**. **Complex coarse solve** (default **Yes** for every model, changeable in **Preferences > Palace**) makes Palace's sparse direct coarse solver factorize the full complex system instead of only its real part. With **No** (Palace's own default), absorbing boundaries, port resistances and losses are missing from the preconditioner. Some models then don't converge at some frequencies, and get **wrong S-parameters** there. This can't be predicted from the settings, and doesn't depend on **Conductor model**: a D-band line failed at 170 GHz, and an inductor failed at a single frequency, 2.4 GHz, giving 1.1 nH instead of 2.5 nH, while it converged at 0.1 and 10 GHz. With **Yes** both converged in 1 to 31 iterations and ran 3.5 to 6 times faster. Models that already converge give identical results, in about the same or less time. The price is more peak RAM, which depends on the model: 1.0-1.6× at order 2 and 1.5-1.9× at order 1 in our test cases. The RAM estimate next to **AMR maximum DOF** includes this. Choose **No** only if a model doesn't fit into memory, and watch for the non-convergence warning described below. **Maximum solver iterations** (default 400) and **Solver tolerance** (default 1e-6) rarely need changing, so they are set in **Preferences > Palace** only and apply to every project. These settings require gds2palace v0.8.0 or later; with an older version they are hidden, since that version always uses the Palace defaults.
 
-The **Boundary settings** group sets the boundary condition on the outside of the simulation box: **Absorbing**, **PEC** or **PMC**. The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here - **both must be non-zero**, or meshing will fail.
+The **Boundary settings** group sets the boundary condition on the outside of the simulation box: **Absorbing**, **PEC** or **PMC**. The oversize of dielectrics from the drawn geometry, and the additional air layer around everything, are also set here. Both can be 0, but **the air layer can't be 0 on all six sides**: no air volume is left then, and the model stops with an error.
 
-**Advanced...** next to **Boundary conditions** sets the boundary condition and the air layer thickness for single sides of the simulation box: xmin, xmax, ymin, ymax, zmin (bottom) and zmax (top). A blank entry uses the value from the tab. The button shows how many sides have their own setting, and its tooltip lists them. A typical use is a backside ground plane: **PEC** at zmin with 0 µm air puts the boundary right at the bottom of the substrate, instead of an air layer below it.
+**Advanced...** next to **Boundary conditions** sets the boundary condition, the dielectric oversize and the air layer thickness for single sides of the simulation box: xmin, xmax, ymin, ymax, zmin (bottom) and zmax (top). The oversize has no z sides, because the stackup sets the z range of the dielectrics. A blank entry uses the value from the tab. The button shows how many sides have their own setting, and its tooltip lists them. A typical use is a backside ground plane: **PEC** at zmin with 0 µm air puts the boundary right at the bottom of the substrate, instead of an air layer below it. With 0 µm oversize and 0 µm air on a side, metal at the edge of the drawing ends directly at the boundary. An **Absorbing** boundary right at a conductor or sheet resistor changes its result, and the log shows a warning, so keep some air there unless you have checked this; see "Conductors at the simulation boundary" in the gds2palace user guide.
+
+**Port wall** (xmin, xmax, ymin and ymax, Palace only) is a PEC wall at the layout edge for calibrated ports, see "[Port walls](#port-walls-calibrated-ports-at-the-layout-edge)" in the Ports tab chapter. Choosing it sets the oversize and the air of that side to 0 and locks them. The layout preview draws the simulation box around the layout: one frame per side, not to scale, with the side's boundary, oversize and air as a label, and a port wall as a white line on the layout edge. A click on a label opens this dialog.
 
 <img src="./png/mesh2.png" alt="box sides" width="460">
 
@@ -245,6 +261,21 @@ If Palace's linear solver reaches **Maximum solver iterations** without convergi
 
 To convert simulation results to Touchstone SnP format, use script `combine_snp` (see the `scripts` directory) - it scans your working directory and below, and supports both Palace and Elmer S-parameter output. This already runs automatically as the last step of `run_sim`.
 
+### A split region (pieces)
+
+The KLayout plug-in klayout_em_export can split a large region into pieces (Split Region). Each piece is simulated as its own model, and setupEM joins the results into one result of the whole region. Open the export's `<name>.simcfg` as usual:
+
+- **Pieces** (the list above the log) shows p1, p2, ... with their position and size, and an unticked **full (check)** row: the whole region as one model, to compare with the joined result.
+- **One set of settings for the whole region.** Frequencies, mesh, solver and boundaries are the same for all pieces: whichever piece is selected, a change in the tabs applies to all of them ("Changed for all pieces: ..." in the log). The boundaries are those of the whole region. The sides of a piece follow from them: a cut is a port wall in both pieces, and where the region has a port wall but the piece none of its ports, that stretch is PEC at the layout edge, as in the full model. These sides are locked in **Advanced...** ("split"); the bar at the top of the Mesh and Boundaries tab lists them.
+- **An own mesh for one piece.** Tick **Own mesh settings for p2** in that bar, e.g. for a finer mesh in one difficult piece; the mesh settings of the tab are then p2's own, everything else stays shared. The Pieces list shows "own mesh" in its row. Untick it to go back to the region's mesh.
+- **Start Simulation** runs the ticked pieces one after another, without a gmsh window, so it needs nobody at the screen: Create Mesh (skipped when the piece was meshed with the same settings before), then the simulation. Then it joins their results at the cuts and writes `<name>_deembedded.sNp` where a single model of the whole region would have it (`palace_model/<name>_data/output/<name>/`). Its ports are the outer ports of the region; the header names each port's piece. **View S-Parameters** shows the joined result first ("Joined result of <name>"), the pieces' results below it. **Model Fit** fits the joined result (`<name>_dc_deembedded.sNp` if the sweep did not start at 0 Hz, else `<name>_deembedded.sNp`), whichever piece is selected.
+- **Unchanged pieces are reused.** A piece whose layout, settings and gds2palace version are the same as at its last run is not simulated again ("unchanged, reused"). After a Palace update, tick **Run unchanged pieces too**.
+- **Join Pieces** joins again, e.g. after you ran the pieces elsewhere. Command line: `python -m setupEM.join_pieces <name>.simcfg`.
+
+Why the join is exact: where two pieces meet, each has a port wall port on the line crossing the cut, calibrated with its reference plane on the cut. The two ports meet at the same plane, so their results connect directly. What the joined result does not contain: coupling between the pieces other than through those lines (the cut is a metal wall in both pieces). The wall runs through the whole stack, the substrate included: the join was checked with ground metal along the cut lines; where a line's return current flows in the substrate instead (no ground metal near it), check the joined result against the full model.
+
+The pieces live in `<name>_pieces/` next to the export: `p1.simcfg`, `p1.py` (once created), `palace_model/p1_data`, ...
+
 ## Code tab
 
 The generated Python model script - what the GUI would otherwise ask you to write by hand. It refreshes automatically every time you switch to this tab, so it always reflects the current state of every other tab (including any Variable overrides on the Input Files tab). This does mean any manual edit made directly in this text box is lost the next time you leave and return to the tab, so treat it as a live preview, not a place to hand-patch the script.
@@ -266,7 +297,7 @@ Once you have Touchstone SnP results, click **View Results...** on the Create Mo
 
 <img src="./png/resultviewer_button.png" alt="view results button" width="700">
 
-The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter out the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result, so you can start with just the raw file and bring in the others only when needed.
+The Result Viewer recursively scans the target directory for `.sNp` Touchstone files and lists them in a tree, grouped by the folder each file came from - useful once a target directory accumulates results from several simulation runs. Check individual files to overlay them, or check/uncheck a whole run's group entry to select or deselect every file below it at once. **Include _dc files** / **Include _deembedded files** filter the DC-extrapolated and de-embedded variants that `combine_extend_snp.py` creates alongside the raw result. The de-embedded files are listed from the start, and the viewer opens with the raw result and its `_deembedded` result shown together. With port walls or a moved reference plane the `_deembedded` result is the one that counts: its ports are calibrated, with the reference plane at the wall (or where you moved it), while the raw result still holds the uncalibrated gap ports. Untick **Include _deembedded files** to see the raw result alone.
 
 <img src="./png/resultviewer1.png" alt="result viewer" width="750">
 
@@ -294,7 +325,7 @@ If snp2le isn't installed, setupEM offers to install it for you via pip:
 
 Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - there's no need to click Model Fit a second time. Choosing **Cancel** instead logs the manual install command and the project link.
 
-Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run (with port walls or a moved reference plane: the calibrated `_dc_deembedded` file, else `_deembedded`; the log says which) and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
 
 <img src="./png/modelfit2.png" alt="snp2le starting" width="700">
 
@@ -441,6 +472,8 @@ Choose the value from the smallest heat source. An npn's heat areas are its emit
 
 **Advanced...** next to the mesh size sets a different value for single heat sources or metal layers. A heat source is listed as `source_<GDS layer>`. Use it when one source needs a much finer mesh than the others, e.g. an npn's emitter fingers next to large resistors: a fine mesh at every source makes the mesh large for nothing. A metal layer in the list gets a fine mesh along its edges, which is not done otherwise. Use it where a thin metal carries the heat away from a source.
 
+**Advanced...** next to the dielectric oversize sets it for single sides: xmin, xmax, ymin and ymax. A blank entry uses the value from the tab.
+
 **Solver** chooses Elmer's direct or iterative solver. There is no adaptive mesh refinement: a steady-state thermal solve doesn't sweep frequency, so there's nothing to adapt against. Also, no air material around the stackup.
 
 ### Temperature per device (setupThermal)
@@ -449,7 +482,7 @@ After a run, the log lists the temperature of each heat source below the results
 
 **T mean** is the average over the heat source volume. It is the device temperature to compare with a compact model's self-heating. **T max** is the hottest mesh node of the heat source; it depends more on the mesh. **dT** is the rise above the lowest constant temperature of the model, the value a circuit simulator takes as temperature rise per instance (`trise` in Spectre, `dtemp` in ngspice).
 
-Resistor temperatures from a thermal export are not accurate yet: the heat source of a resistor sits in the silicon at the height of Activ, not in polysilicon on oxide, so the resistor comes out too cool.
+Heat sources of IHP devices belong in the stackup's heat target layers (gds2palace 0.10.0): `HEAT_TRANSISTOR` for transistors (the top 40 nm of the silicon) and `HEAT_RESISTOR` for resistors (the polysilicon body on the field oxide). The thermal export of the KLayout plug-in sets them. With `Activ` as the target layer, the devices come out too cool. Resistor temperatures are not validated yet: for eight resistor sizes, the thermal resistance was 1.5 to 2.5 times the value of the PDK's resistor model, and most of the temperature rise is across the oxide below the resistor.
 
 The temperatures include the heat of all devices in the model. For the self-heating of one device alone, run the model with only its power set.
 

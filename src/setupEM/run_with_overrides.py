@@ -131,6 +131,10 @@ def _plain(value):
 def _record_model(run, settings, result):
     if run.record is None:
         return
+    if settings.get("_calibration_standard"):
+        # a port wall's calibration standard: built inside its model's create_palace(), solved by that model's
+        # run_sim before the model, so it is part of that model, not a model of its own
+        return
     if settings.get("elmer_thermal"):
         solver = "elmer_thermal"
     elif settings.get("elmer"):
@@ -175,10 +179,15 @@ def _patch(module, run):
         return
 
     def create_model(*args, **kwargs):
-        run.models_started += 1
         settings = kwargs.get("settings")
         if settings is None:
             settings = next((a for a in reversed(args) if isinstance(a, dict)), None)
+        if settings is not None and settings.get("_calibration_standard"):
+            # a port wall's calibration standard, built by its model's create_model() before that returns: not a
+            # model of its own (not counted, not recorded, and no stop after it, or its model would stay unbuilt)
+            settings.update(run.overrides)
+            return original(*args, **kwargs)
+        run.models_started += 1
         if settings is not None:
             settings.update(run.overrides)
             if run.gui_first_only and run.models_started > 1:

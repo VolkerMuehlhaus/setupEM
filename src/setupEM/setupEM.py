@@ -17,7 +17,7 @@
 ########################################################################
 
 
-import sys, json, os, ast, webbrowser, argparse, shutil, re, glob, subprocess
+import sys, json, os, ast, webbrowser, argparse, shutil, re, glob, subprocess, textwrap
 import numpy as np
 import importlib.metadata
 import importlib.util
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit,QComboBox,QTableWidget,QHeaderView,
     QPushButton, QFileDialog, QTabWidget, QMessageBox, QGroupBox,
     QCheckBox, QAbstractItemView,QStyleFactory,QTableWidgetItem, QPlainTextEdit, QDialog,
-    QDialogButtonBox,
+    QDialogButtonBox, QSplitter, QStyle,
     )
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QFontMetrics, QSyntaxHighlighter, QPainter, QPen, QActionGroup
 from PySide6.QtCore import Qt, QRegularExpression, QProcess, QRect, QStandardPaths, QTimer
@@ -55,6 +55,7 @@ if __package__ in (None, ""):
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MARGIN_SIDES, as_side_values, format_number_text, most_common_value, margin_from_saved, margin_to_saved,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -72,6 +73,7 @@ else:
         SECONDARY_BUTTON_WIDTH,
         FileDropLineEdit, FileInputTab, PythonHighlighter, CodeEditor,
         VectorWidget, PopUpWindow, CreateModelTabBase, MainWindowBase, RefinedCellsizeOverrideDialog,
+        MARGIN_SIDES, as_side_values, format_number_text, most_common_value, margin_from_saved, margin_to_saved,
         epsilon_to_color, default_stackup_dielectric_label, default_stackup_metal_label,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
@@ -216,6 +218,30 @@ def palace_solver_preferences(app_name):
 
 
 # ---------- OTHER TABS ----------
+
+
+_WARNING_ICON = None
+
+
+def _warning_icon():
+    """An amber warning triangle with '!', the same on every platform."""
+    global _WARNING_ICON
+    if _WARNING_ICON is None:
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QIcon, QPixmap, QPolygonF, QBrush
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#9a6700"), 1.5))
+        painter.setBrush(QBrush(QColor("#f2b01e")))
+        painter.drawPolygon(QPolygonF([QPointF(16, 3), QPointF(30, 28), QPointF(2, 28)]))
+        painter.setPen(QPen(QColor("#3d2a00"), 3.2))
+        painter.drawLine(QPointF(16, 11), QPointF(16, 19))
+        painter.drawPoint(QPointF(16, 24))
+        painter.end()
+        _WARNING_ICON = QIcon(pixmap)
+    return _WARNING_ICON
 
 class FrequenciesTab(QWidget):
     def __init__(self, MainWindow):
@@ -444,8 +470,9 @@ class PortsTab(QWidget):
         self.portslist.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.bottom_layout.addWidget(self.portslist)
 
-        self.portslist.setColumnCount(8)
-        self.portslist.setHorizontalHeaderLabels(["Z0", "Voltage", "Source layer", "Target layer", "From layer", "To layer","Direction",""])
+        self.portslist.setColumnCount(9)
+        self.portslist.setHorizontalHeaderLabels(["Z0", "Voltage", "Source layer", "Target layer", "From layer", "To layer","Direction","",
+                                                  "De-embedding"])
         header = self.portslist.horizontalHeader()
         for col in range(self.portslist.columnCount()-1):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
@@ -487,8 +514,8 @@ class PortsTab(QWidget):
         self.direction_box.setStyleSheet(COMBO_STYLE_REQUIRED)
         self.direction_box.addItems(["X", "Y", "Z", "-X", "-Y", "-Z"])
         self.direction_layout.addWidget(self.direction_box)
-        label2 = QLabel(" (negative for reversed polarity)")
-        self.direction_layout.addWidget(label2)
+        self.direction_note = QLabel(" (negative for reversed polarity)")
+        self.direction_layout.addWidget(self.direction_note)
         self.direction_layout.addStretch()
         self.details_layout.addLayout(self.direction_layout)
 
@@ -578,7 +605,65 @@ class PortsTab(QWidget):
         self.main_layout.addWidget(self.top_group)
         self.main_layout.addSpacing(20)
 
-        self.main_layout.addWidget(self.bottom_group)
+        # Port overview and Port walls share the rest of the height; drag the handle between them
+        self.lists_splitter = QSplitter(Qt.Vertical)
+        self.lists_splitter.setObjectName("ports_lists")      # its position is kept between sessions
+        self.lists_splitter.setChildrenCollapsible(False)
+        # a visible grip: Qt's default handle is a few invisible pixels
+        self.lists_splitter.setHandleWidth(9)
+        self.lists_splitter.setStyleSheet("QSplitter::handle:vertical { margin: 3px 8px; background: #c8c8c8; "
+                                          "border-radius: 1px; } QSplitter::handle:vertical:hover { background: #909090; }")
+        self.lists_splitter.addWidget(self.bottom_group)
+        self.main_layout.addWidget(self.lists_splitter, 1)
+
+        # port walls: box sides set to Port wall on the Mesh and Boundaries tab. The ports on them are
+        # calibrated; this group shows what the last check found, and holds the reference plane shift
+        self._wall_of_port = {}         # port number -> side, from the last check
+        self._converted_port = {}       # port number -> the line's metal, for a via port used as a gap port
+        self._port_wall_shift = {}      # side -> reference plane shift (um)
+        self._port_wall_result = {}     # side -> cells and status of the last check
+        self._keep_sides = set()        # sides the user chose to keep (not a port wall), this session
+        self._port_wall_extension = {}  # side -> 'auto' or a length (um): the port wall moved outward
+        self.portwall_group = QGroupBox("Port walls")
+        portwall_layout = QVBoxLayout()
+        self.portwall_table = QTableWidget()
+        self.portwall_table.setColumnCount(9)
+        self.portwall_table.setHorizontalHeaderLabels(["Side", "Ports", "Ground at cut", "D (µm)", "Standards L, 2L (µm)",
+                                                       "Valid to (GHz)", "Reference plane shift (µm)", "Extension (µm)",
+                                                       "Status"])
+        self.portwall_table.verticalHeader().setVisible(False)
+        self.portwall_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.portwall_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        portwall_header = self.portwall_table.horizontalHeader()
+        for col in range(8):
+            portwall_header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        portwall_header.setStretchLastSection(True)
+        self.portwall_table.setWordWrap(False)
+        self.portwall_table.setToolTip("Hover over a status for the full text, double-click to show it")
+        self.portwall_table.cellDoubleClicked.connect(self._show_port_wall_status)
+        portwall_layout.addWidget(self.portwall_table)
+        portwall_buttons = QHBoxLayout()
+        self.check_portwall_button = QPushButton("Check port walls")
+        self.check_portwall_button.setToolTip("Reads the layout, no meshing. A port on a layout edge that is not a port "
+                                              "wall gets the question whether to make it one. A port wall without ground "
+                                              "metal at the cut stops model creation.")
+        self.check_portwall_button.clicked.connect(lambda: self.check_port_walls(ask=True))
+        portwall_buttons.addWidget(self.check_portwall_button)
+        # only without a port wall: where to set one
+        self.portwall_hint = QLabel(" No port wall: set one per side in Mesh and Boundaries > Advanced...")
+        self.portwall_hint.setToolTip("A port wall is a PEC wall at the layout edge. The ports drawn on it are "
+                                      "calibrated instead of getting the estimated port inductance.")
+        portwall_buttons.addWidget(self.portwall_hint)
+        portwall_buttons.addStretch()
+        portwall_layout.addLayout(portwall_buttons)
+        self.portwall_group.setLayout(portwall_layout)
+        self.lists_splitter.addWidget(self.portwall_group)
+        self.lists_splitter.setStretchFactor(0, 3)
+        self.lists_splitter.setStretchFactor(1, 1)
+        self.lists_splitter.setSizes([600, 160])
+        self.lists_splitter.handle(1).setToolTip("Drag to share the height between the port list and the port walls")
+        self.portwall_group.setVisible(util_calibration is not None)
+
         self.setLayout(self.main_layout)
 
 
@@ -669,7 +754,9 @@ class PortsTab(QWidget):
             safe_get_for_lineedit(1,self.voltage_edit,"1")
             safe_get_for_lineedit(2,self.sourcelayer_edit,"")
 
-            safe_get_for_combobox(3,self.target_box,0)
+            # a via port row has no target: show the topmost metal (not the first layer in the list), so that
+            # switching such a port to in-plane doesn't pick an unrelated layer
+            safe_get_for_combobox(3,self.target_box,max(self.target_box.findText(getattr(self, "_top_metal", None) or ""), 0))
             safe_get_for_combobox(4,self.from_box,0)
             safe_get_for_combobox(5,self.to_box,0)
             safe_get_for_combobox(6,self.direction_box,2)
@@ -698,7 +785,8 @@ class PortsTab(QWidget):
                 # assume that we have an line that is not empty, so get port details from this line
                 if item.text() != "":
                     self.get_port_values_from_table()
-            else:
+            self._update_direction_lock(selected_row)
+            if item is None:
                 suggestion = self._suggest_source_layer()
                 if suggestion is not None:
                     self.sourcelayer_edit.setText(str(suggestion))
@@ -759,6 +847,340 @@ class PortsTab(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh_missing_layer_annotations()
+        self.refresh_port_wall_rows()
+        # a port wall without a result (e.g. after loading a settings file): check it once the tab is drawn
+        sides = self.MainWindow.mesh_tab.port_wall_sides() if util_calibration is not None else []
+        if sides and not self.MainWindow.ElmerMode and any(side not in self._port_wall_result for side in sides):
+            QTimer.singleShot(0, lambda: self.check_port_walls(quiet=True))
+
+    # ---------------------------------------------------------------- port walls
+
+    def _update_direction_lock(self, row):
+        """a port on a port wall points into the layout: its direction is set by the side, not by the user"""
+        side = self._wall_of_port.get(row + 1)
+        self.direction_box.setEnabled(side is None)
+        if side and row + 1 in self._converted_port:
+            self.direction_note.setText(f" on port wall {side}: used as a gap port on {self._converted_port[row + 1]}, "
+                                        f"pointing into the layout")
+        elif side:
+            self.direction_note.setText(f" on port wall {side}: points into the layout")
+        else:
+            self.direction_note.setText(" (negative for reversed polarity)")
+
+    def _set_port_wall_shift(self, side, edit):
+        text = edit.text().strip() or "0"
+        try:
+            value = float(text)
+        except ValueError:
+            QMessageBox.warning(self, "Error", f"Not a valid reference plane shift for port wall {side}")
+            edit.setText(format_number_text(self._port_wall_shift.get(side, 0.0)))
+            return
+        if value:
+            self._port_wall_shift[side] = value
+        else:
+            self._port_wall_shift.pop(side, None)
+        preview = getattr(self.MainWindow, "layout_preview_window", None)
+        if preview is not None:
+            preview._draw_simulation_box()
+
+    def _set_port_wall_extension(self, side, edit):
+        text = edit.text().strip().lower()
+        if text in ("", "0", "none"):
+            self._port_wall_extension.pop(side, None)
+        elif text == "auto":
+            self._port_wall_extension[side] = "auto"
+        else:
+            try:
+                value = float(text)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Error", f"Extension for port wall {side}: a length in µm (0 or more) or auto")
+                edit.setText(str(self._port_wall_extension.get(side, "")))
+                return
+            self._port_wall_extension[side] = value
+        self._port_wall_result.pop(side, None)          # the check's numbers no longer hold
+        self.refresh_port_wall_rows()
+
+    def refresh_port_wall_rows(self):
+        """one row per port wall, with the result of the last check"""
+        if util_calibration is None:
+            return
+        self.portwall_group.setVisible(not self.MainWindow.ElmerMode)
+        sides = self.MainWindow.mesh_tab.port_wall_sides()
+        for side in list(self._port_wall_result):
+            if side not in sides:
+                self._port_wall_result.pop(side)
+        self.portwall_hint.setVisible(not sides)
+        self.portwall_table.setVisible(bool(sides))
+        # without a port wall the panel is just its button row; the port list gets the rest of the height
+        self.portwall_group.setMaximumHeight(16777215 if sides else self.portwall_group.minimumSizeHint().height())
+        table = self.portwall_table
+        table.setRowCount(len(sides))
+        for row, side in enumerate(sides):
+            result = self._port_wall_result.get(side)
+            cells = [side] + (result["cells"] if result else ["", "", "", "", ""])
+            for col, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                table.setItem(row, col, item)
+            holder = table.cellWidget(row, 6)
+            if holder is not None and holder.property("side") == side:
+                # keep the field: a new one per refresh would sit on top of the old until Qt deletes it
+                holder.findChild(QLineEdit).setText(format_number_text(self._port_wall_shift.get(side, 0.0)))
+            else:
+                edit = QLineEdit(format_number_text(self._port_wall_shift.get(side, 0.0)))
+                edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+                edit.setFixedWidth(70)
+                edit.setToolTip("Moves the reference plane into the layout along the feed (µm). Exact only if the feed "
+                                "is the standards' line, including how its ground is connected at the far end.")
+                edit.editingFinished.connect(lambda s=side, e=edit: self._set_port_wall_shift(s, e))
+                holder = QWidget()
+                holder.setProperty("side", side)
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(4, 1, 4, 1)
+                holder_layout.addWidget(edit)
+                holder_layout.addStretch()
+                table.setCellWidget(row, 6, holder)
+            # the extension: blank (none), a length, or auto; after a check, auto shows the length it chose
+            text = str(self._port_wall_extension.get(side, ""))
+            holder = table.cellWidget(row, 7)
+            if holder is not None and holder.property("side") == side:
+                edit = holder.findChild(QLineEdit)
+            else:
+                edit = QLineEdit()
+                edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+                edit.setFixedWidth(70)
+                edit.setPlaceholderText("none")
+                edit.editingFinished.connect(lambda s=side, e=edit: self._set_port_wall_extension(s, e))
+                holder = QWidget()
+                holder.setProperty("side", side)
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(4, 1, 4, 1)
+                holder_layout.addWidget(edit)
+                holder_layout.addStretch()
+                table.setCellWidget(row, 7, holder)
+            edit.setText(text if text != "0" else "")
+            chosen = result.get("extension") if result else None
+            edit.setToolTip((f"auto chose {chosen:g} µm in the last check.\n\n" if text == "auto" and chosen is not None else "")
+                            + EXTENSION_TOOLTIP)
+            # a cut of a split region: no shift, no extension (the reference plane stays on the cut for the join)
+            why = (getattr(self.MainWindow.mesh_tab, "_split_locked_sides", None) or {}).get(side, "")
+            on_cut = why.startswith("cut")
+            shift_edit = table.cellWidget(row, 6).findChild(QLineEdit)
+            for field in (shift_edit, edit):
+                field.setEnabled(not on_cut)
+                if on_cut:
+                    field.setText("")
+                    field.setToolTip(f"{why}: no shift or extension here, the reference plane stays on the cut "
+                                     "for the join")
+            full = result["status"] if result else 'not checked yet: "Check port walls"'
+            status = QTableWidgetItem(result.get("short", full) if result else full)
+            status.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if result and result.get("error"):
+                status.setForeground(QColor("#b00020"))
+                status.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+            elif result and result.get("warning"):
+                status.setForeground(QColor("#8a5a00"))
+                # an amber triangle of our own: some desktop themes (Ubuntu's Yaru) draw the standard warning icon as
+                # a red circle, which reads as an error next to the error rows
+                status.setIcon(_warning_icon())
+            # a tooltip is one line per line of text: wrap long texts, one bullet per warning
+            status.setToolTip(result.get("tooltip") or textwrap.fill(full, 70) if result else full)
+            status.setData(Qt.UserRole, full)
+            table.setItem(row, 8, status)
+        table.resizeRowsToContents()
+
+    def _show_port_wall_status(self, row, col):
+        item = self.portwall_table.item(row, 8)
+        side = self.portwall_table.item(row, 0)
+        if item is not None and side is not None:
+            QMessageBox.information(self, f"Port wall {side.text()}", item.data(Qt.UserRole) or item.text())
+
+    def _read_layout_for_port_walls(self, quiet=False):
+        """the layout as gds2palace reads it, or None after a message (in the Status column when quiet)"""
+        import io, contextlib
+        mw = self.MainWindow
+        layernumbers = mw.metals_list.getlayernumbers() + list(simulation_ports.portlayers)
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                return gds_reader.read_gds(saved_values["GdsFile"], layernumbers, cellname=saved_values["cellname"],
+                                           purposelist=saved_values["purpose"], metals_list=mw.metals_list,
+                                           preprocess=saved_values["preprocess_gds"],
+                                           merge_polygon_size=saved_values["merge_polygon_size"],
+                                           gds_boundary_layers=mw.dielectrics_list.get_boundary_layers())
+        except (Exception, SystemExit) as e:
+            details = captured.getvalue().strip() or str(e)
+            if quiet:
+                for side in self.MainWindow.mesh_tab.port_wall_sides():
+                    self._port_wall_result[side] = {"cells": ["", "", "", "", ""], "short": "could not read the layout",
+                                                    "status": f"Could not read the GDSII layout: {details}", "error": True}
+                self.refresh_port_wall_rows()
+            else:
+                QMessageBox.critical(self, "Port walls", f"Could not read the GDSII layout:\n\n{details}")
+            return None
+
+    def check_port_walls(self, ask=True, only_with_port_walls=False, quiet=False):
+        """Check the ports on the layout edge against the port walls. Reads the layout, no meshing. Offers to make a
+        side a port wall when a port lies on it, fills the Port walls rows and the De-embedding column. Returns False
+        when the model must not be created (an error at a port wall). With only_with_port_walls (model creation),
+        nothing is read unless a port wall is set. quiet (the tab shows itself): no message boxes, no questions,
+        the files as already saved; problems show in the Status column."""
+        mw = self.MainWindow
+        if util_calibration is None or mw.ElmerMode:
+            return True
+        if quiet:
+            ask = False
+            only_with_port_walls = True
+            if not os.path.isfile(str(saved_values.get("GdsFile", ""))):
+                return True
+        if only_with_port_walls and not mw.mesh_tab.port_wall_sides():
+            self._wall_of_port = {}
+            self._update_deembedding_column({}, [], None)
+            return True
+        if mw.metals_list is None or mw.dielectrics_list is None or mw.materials_list is None:
+            if not only_with_port_walls:
+                QMessageBox.warning(self, "Port walls", "Load a GDSII file and XML stackup first")
+            return not only_with_port_walls
+        if not ((quiet or mw.file_tab.save_values()) and mw.frequencies_tab.save_values() and mw.mesh_tab.save_values()
+                and self.save_values()):
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            allpolygons = self._read_layout_for_port_walls(quiet)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if allpolygons is None:
+            return False
+
+        # ports on a layout edge that is not a port wall: ask once per side and session
+        edge = util_calibration.ports_on_layout_edge(allpolygons, simulation_ports)
+        changed = False
+        for side in sorted(set(edge.values()), key=util_calibration.WALL_SIDES.index):
+            if side in mw.mesh_tab.port_wall_sides() or side in self._keep_sides or not ask:
+                continue
+            ports = [p for p, s in sorted(edge.items()) if s == side]
+            names = ", ".join(str(p) for p in ports)
+            box = QMessageBox(self)
+            box.setWindowTitle("Port walls")
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"Port{'s' if len(ports) > 1 else ''} {names} {'lie' if len(ports) > 1 else 'lies'} on the "
+                        f"layout edge at {side}, which is not a port wall. Set {side} to port wall?")
+            box.setInformativeText("A port wall calibrates the ports on it. Otherwise they get the estimated port "
+                                   "inductance.")
+            set_button = box.addButton("Set port wall", QMessageBox.AcceptRole)
+            box.addButton("Keep as is", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is set_button:
+                mw.mesh_tab.set_port_wall(side)
+                changed = True
+            else:
+                self._keep_sides.add(side)
+        if changed and not mw.mesh_tab.save_values():
+            return False
+
+        walls = mw.mesh_tab.port_wall_sides()
+        result, error = None, None
+        if walls:
+            fmax = [saved_values.get("fstop")] + list(saved_values.get("fpoint") or []) + list(saved_values.get("fdump") or [])
+            fmax = max(float(f) for f in fmax if f not in (None, "")) * 1e9
+            try:
+                result = util_calibration.analyze_port_walls(
+                    allpolygons, mw.metals_list, mw.materials_list, mw.dielectrics_list, simulation_ports,
+                    saved_values["boundary"], fmax, float(saved_values.get("unit", 1e-6)),
+                    reference_plane_shift=dict(self._port_wall_shift), deembedding_length=saved_values.get("deembedding_length"),
+                    collect_errors=True, port_wall_extension=dict(self._port_wall_extension))
+            except util_calibration.PortWallError as e:
+                error = str(e)
+        errors = dict((result or {}).get("errors", {}))
+        if result is not None and errors:
+            error = "\n".join(f"{side}: {text}" for side, text in errors.items())
+        self._show_port_wall_result(result, error, walls, errors)
+        self._update_deembedding_column(edge, walls, error)
+        selected = self.portslist.selectedIndexes()
+        if selected:
+            self._update_direction_lock(selected[0].row())
+        if error and ask:
+            QMessageBox.critical(self, "Port walls", f"The ports can't be calibrated at the port walls:\n\n{error}")
+            return False
+        return True
+
+    def _show_port_wall_result(self, result, error, walls, errors=None):
+        self._wall_of_port = {}
+        self._converted_port = {}
+        self._port_wall_result = {}
+        groups = {g["side"]: g for g in (result or {}).get("groups", [])}
+        errors = errors or {}
+        for side in walls:
+            g = groups.get(side)
+            if g is None:
+                if side in errors:
+                    text = f"ERROR: {errors[side]}"
+                else:
+                    text = f"ERROR: {error}" if error and (side in error or not any(w in error for w in walls)) else ""
+                self._port_wall_result[side] = {"cells": ["", "", "", "", ""], "status": text or "not checked",
+                                                "short": (text if len(text) <= 70 else text[:70] + "...") if text else "not checked",
+                                                "error": bool(text)}
+                continue
+            valid = f"{g['valid_to_GHz']:.3g}" + (" (all)" if g["valid_to_GHz"] >= 0.9999 * g["fmax_GHz"] else "")
+            status = "OK" + ((": " + "; ".join(g["warnings"])) if g["warnings"] else "")
+            n = len(g["warnings"])
+            u, size, E = g.get("uniform_from_wall"), g.get("device_size"), g.get("extension", 0.0)
+            distance = (f"device {u + E:.0f} µm from the port wall" if u is not None else "no device within the checked range")
+            if E:
+                distance = f"port wall moved {E:g} µm out, " + distance
+            if n:
+                first = g["warnings"][0]
+                short = (f"{n} warning{'s' if n > 1 else ''}: " + (first if len(first) <= 70 else first[:70] + "..."))
+            else:
+                short = "OK" + (f", port wall moved {E:g} µm out" if E else "")
+            lines = ["OK" + (f", {n} warning{'s' if n > 1 else ''}:" if n else "")]
+            lines += [textwrap.fill(w, 70, initial_indent="• ", subsequent_indent="   ") for w in g["warnings"]]
+            lines.append(distance[0].upper() + distance[1:])
+            lines += [textwrap.fill(note, 70) for note in g.get("notes", [])]
+            self._port_wall_result[side] = {"short": short, "warning": bool(n), "tooltip": "\n\n".join(lines),
+                "uniform": u, "extension": g.get("extension", 0.0), "profile": g.get("profile") or [],
+                "cells": [", ".join(str(p) for p in g["ports"]), ", ".join(g["ground_layers"]), f"{g['D']:.4g}",
+                          f"{g['L']:g}, {2 * g['L']:g}", valid], "status": status, "error": False}
+            for p in g["ports"]:
+                self._wall_of_port[p] = side
+            for detail in g["port_details"]:
+                if detail.get("converted"):
+                    self._converted_port[detail["portnumber"]] = detail["target_layer"]
+        self.refresh_port_wall_rows()
+        preview = getattr(self.MainWindow, "layout_preview_window", None)
+        if preview is not None:
+            preview._draw_simulation_box()
+
+    def _update_deembedding_column(self, edge, walls, error):
+        """per port in words: calibrated at a port wall, or the estimated port inductance"""
+        for row in range(self.portslist.rowCount()):
+            first = self.portslist.item(row, 0)
+            if first is None or first.text() == "":
+                self.portslist.setItem(row, 8, None)
+                continue
+            port = row + 1
+            color = None
+            if port in self._wall_of_port and port in self._converted_port:
+                # the row stays the via port as defined; gds2palace makes it a gap port when writing the model
+                side = self._wall_of_port[port]
+                text = f"port wall {side}, calibrated (via port used as a gap port on {self._converted_port[port]})"
+            elif port in self._wall_of_port:
+                side = self._wall_of_port[port]
+                text = f"port wall {side}, calibrated"
+                self.portslist.setItem(row, 6, QTableWidgetItem(util_calibration.INWARD[side].upper()))
+            elif port in edge and edge[port] in walls:
+                text, color = f"port wall {edge[port]}: not calibrated, see the error below", "#b00020"
+            elif port in edge:
+                text, color = f"touches box side {edge[port]}, which is not a port wall: estimated port inductance", "#8a6d00"
+            else:
+                text = "estimated port inductance" if edge or walls else ""
+            item = QTableWidgetItem(text)
+            item.setToolTip(text)
+            if color:
+                item.setForeground(QColor(color))
+            self.portslist.setItem(row, 8, item)
 
 
     def save_values(self):
@@ -810,11 +1232,39 @@ class PortsTab(QWidget):
                                                                                 target_layername=target_name,
                                                                                 direction=direction))
 
+        # reference plane shift per port wall (only sides that are port walls, only values other than 0)
+        walls = self.MainWindow.mesh_tab.port_wall_sides() if util_calibration is not None else []
+        shift = {side: value for side, value in self._port_wall_shift.items() if side in walls and value}
+        if shift:
+            saved_values["reference_plane_shift"] = shift
+        else:
+            saved_values.pop("reference_plane_shift", None)
+        extension = {side: value for side, value in self._port_wall_extension.items() if side in walls and value}
+        if extension:
+            saved_values["port_wall_extension"] = extension
+        else:
+            saved_values.pop("port_wall_extension", None)
         return True
 
     def load_values(self):
-        ...
-        # self.log.setText(data.get("log", ""))
+        shift = saved_values.get("reference_plane_shift") or {}
+        try:
+            self._port_wall_shift = {side: float(value) for side, value in dict(shift).items()}
+        except (TypeError, ValueError):
+            self._port_wall_shift = {}
+        extension = saved_values.get("port_wall_extension") or {}
+        self._port_wall_extension = {}
+        for side, value in dict(extension).items():
+            if str(value).lower() == "auto":
+                self._port_wall_extension[side] = "auto"
+            else:
+                try:
+                    self._port_wall_extension[side] = float(value)
+                except (TypeError, ValueError):
+                    pass
+        self._port_wall_result = {}
+        self._wall_of_port = {}
+        self._keep_sides = set()
 
     def update_layers(self, metals_list):
         self.target_box.clear()
@@ -823,14 +1273,20 @@ class PortsTab(QWidget):
         if metals_list is None:
             return
         for metal in metals_list.metals:
-            self.target_box.addItems([metal.name])
+            # an in-plane port sits on a metal: no via layers and no drawn dielectrics (e.g. LBE) as its target
+            if not (metal.is_via or metal.is_dielectric):
+                self.target_box.addItems([metal.name])
             self.from_box.addItems([metal.name])
             self.to_box.addItems([metal.name])
-        # try to preset useful values for SG13G2 technology
-        index = self.target_box.findText('TopMetal2')  # returns -1 if not found
-        if index != -1:
-            self.target_box.setCurrentIndex(index)
-            self.to_box.setCurrentIndex(index)
+        # preset the topmost metal of the stackup (TopMetal2 in SG13G2, TopMetal1 in SG13CMOS5L, the top copper of
+        # a PCB) as target and as the via port's upper end. Each box by its own index: the target box leaves out
+        # via and dielectric layers, so its indices differ from the via port boxes'
+        conductors = [metal for metal in metals_list.metals if metal.is_metal]
+        self._top_metal = max(conductors, key=lambda metal: metal.zmax).name if conductors else None
+        if self._top_metal is not None:
+            self.target_box.setCurrentIndex(max(self.target_box.findText(self._top_metal), 0))
+            self.to_box.setCurrentIndex(max(self.to_box.findText(self._top_metal), 0))
+        # the via port's lower end: Metal1 for the IHP technologies (the lowest conductor there is Activ)
         index = self.from_box.findText('Metal1')  # returns -1 if not found
         if index != -1:
             self.from_box.setCurrentIndex(index)
@@ -884,48 +1340,38 @@ BOX_SIDES = [("xmin", "xmin"), ("xmax", "xmax"), ("ymin", "ymin"), ("ymax", "yma
 BOUNDARY_DISPLAY_TO_SETTING = {"Absorbing": "ABC", "PEC": "PEC", "PMC": "PMC"}
 BOUNDARY_SETTING_TO_DISPLAY = {v: k for k, v in BOUNDARY_DISPLAY_TO_SETTING.items()}
 
-
-def as_six_values(value):
-    """Normalize a saved boundary/air_around value to a list of 6 strings, or
-    None if it's a single value. A native .simcfg stores a list, a .py import
-    a tuple, or the raw text if it couldn't be resolved."""
-    if isinstance(value, str):
-        value = [v.strip().strip("'\"") for v in value.strip("[]() ").split(",")]
-    if isinstance(value, (list, tuple)) and len(value) == 6:
-        return [str(v).strip() for v in value]
-    return None
-
-
-def format_number_text(value):
-    """Plain text for a float: 200.0 -> "200", 12.5 -> "12.5"."""
-    value = float(value)
-    return str(int(value)) if value.is_integer() else str(value)
-
-
-def most_common_value(values, preferred_order=()):
-    """Most frequent entry of values. On a tie, the first one in
-    preferred_order, else the first one in values."""
-    counts = {}
-    for v in values:
-        counts[v] = counts.get(v, 0) + 1
-    best = max(counts.values())
-    tied = [v for v in counts if counts[v] == best]
-    for v in preferred_order:
-        if v in tied:
-            return v
-    return tied[0]
+# Port wall: a box side type for calibrated ports at the layout edge (PEC, no dielectric oversize,
+# no air), offered per side in the Simulation Box Sides dialog only, never as the tab default.
+# gds2palace 0.10.0 and later; with an older gds2palace the choice is not offered.
+try:
+    from gds2palace import util_calibration
+except ImportError:
+    util_calibration = None
+PORTWALL = "PORTWALL"
+PORTWALL_DISPLAY = "Port wall"
+PORTWALL_TOOLTIP = "A port wall is PEC at the layout edge: no dielectric oversize, no air"
+EXTENSION_TOOLTIP = ("Moves the port wall outward: the feed is extended by the cross-section at the wall,\n"
+                     "and the reference plane is shifted back to the layout edge.\n"
+                     "A length in µm, or auto (until the device is D and half its size from the wall).\n"
+                     "Exact where the return current flows in a plane under the lines;\n"
+                     "not with ground strips that end open before the device.")
+if util_calibration is not None:
+    BOUNDARY_SETTING_TO_DISPLAY[PORTWALL] = PORTWALL_DISPLAY
 
 
 class BoxSidesOverrideDialog(QDialog):
-    """Popup editor for per-side boundary conditions and air layer thickness,
-    opened from MeshTab's "Advanced..." button in the Boundary settings group.
-    Each side either uses the default from the tab (blank / "default") or
-    overrides it. Both are edited together, since they usually go together,
-    e.g. PEC with 0 air at zmin is a backside ground plane at the box boundary.
-    overrides: {side: {'bc': 'PEC', 'air': 0.0}}, either key optional.
+    """Popup editor for per-side boundary conditions, dielectric oversize and air
+    layer thickness, opened from MeshTab's "Advanced..." button in the Boundary
+    settings group. Each side either uses the default from the tab (blank /
+    "default") or overrides it. All are edited together, since they usually go
+    together, e.g. PEC with 0 air at zmin is a backside ground plane at the box
+    boundary. The dielectric oversize has no z sides: the stackup sets the z range.
+    overrides: {side: {'bc': 'PEC', 'margin': 10.0, 'air': 0.0}}, all keys optional.
+    margin_editable: False if a script edited in place sets the margin itself.
     """
 
-    def __init__(self, parent, default_bc_display, default_air_text, current_overrides):
+    def __init__(self, parent, default_bc_display, default_air_text, current_overrides,
+                 default_margin_text="", margin_editable=True, allow_port_wall=False, locked_sides=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle("Simulation Box Sides")
@@ -936,17 +1382,26 @@ class BoxSidesOverrideDialog(QDialog):
             self._default_air = float(default_air_text)
         except ValueError:
             self._default_air = None
+        try:
+            self._default_margin = float(default_margin_text)
+        except ValueError:
+            self._default_margin = None
+        self._margin_editable = margin_editable
+        self._current_overrides = current_overrides
         self._result = {}
+        self._locked_by_port_wall = set()
+        # a piece of a split region: {side: why}, the sides the split sets (setupEM piece_set.locked_sides)
+        self._locked_sides = dict(locked_sides or {})
 
         layout = QVBoxLayout()
 
-        info = QLabel("Override the boundary condition or air layer thickness for single sides\n"
-                      "of the simulation box (blank = default from the tab).")
+        info = QLabel("Override the boundary condition, dielectric oversize or air layer thickness\n"
+                      "for single sides of the simulation box (blank = default from the tab).")
         layout.addWidget(info)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Side", "Boundary", "Air layer (µm)"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Side", "Boundary", "Dielectric oversize (µm)", "Air layer (µm)"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         # only the cell widgets take focus - no focus highlight on the Side column
@@ -955,9 +1410,11 @@ class BoxSidesOverrideDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
         self._bc_boxes = {}
+        self._margin_edits = {}
         self._air_edits = {}
         self.table.setRowCount(len(BOX_SIDES))
         for row, (side, label) in enumerate(BOX_SIDES):
@@ -970,11 +1427,29 @@ class BoxSidesOverrideDialog(QDialog):
             combo.addItem(f"default ({default_bc_display})", None)
             for display, setting in BOUNDARY_DISPLAY_TO_SETTING.items():
                 combo.addItem(display, setting)
+            if (allow_port_wall or current_overrides.get(side, {}).get("bc") == PORTWALL) and side in MARGIN_SIDES:
+                combo.addItem(PORTWALL_DISPLAY, PORTWALL)
             bc = current_overrides.get(side, {}).get("bc")
             if bc is not None:
                 combo.setCurrentIndex(max(combo.findData(bc), 0))
             self.table.setCellWidget(row, 1, combo)
             self._bc_boxes[side] = combo
+
+            if side in MARGIN_SIDES:
+                margin_edit = QLineEdit()
+                margin_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
+                margin_edit.setPlaceholderText(default_margin_text)
+                margin = current_overrides.get(side, {}).get("margin")
+                if margin is not None:
+                    margin_edit.setText(format_number_text(margin))
+                margin_edit.setEnabled(margin_editable)
+                self.table.setCellWidget(row, 2, margin_edit)
+                self._margin_edits[side] = margin_edit
+            else:
+                no_margin_item = QTableWidgetItem("")
+                no_margin_item.setFlags(Qt.ItemFlag.NoItemFlags)
+                no_margin_item.setToolTip("The stackup sets the z range of the dielectrics")
+                self.table.setItem(row, 2, no_margin_item)
 
             air_edit = QLineEdit()
             air_edit.setStyleSheet(EDIT_STYLE_OPTIONAL)
@@ -982,15 +1457,38 @@ class BoxSidesOverrideDialog(QDialog):
             air = current_overrides.get(side, {}).get("air")
             if air is not None:
                 air_edit.setText(format_number_text(air))
-            self.table.setCellWidget(row, 2, air_edit)
+            self.table.setCellWidget(row, 3, air_edit)
             self._air_edits[side] = air_edit
+            combo.currentIndexChanged.connect(lambda _index, s=side: self._apply_port_wall_state(s))
+            self._apply_port_wall_state(side)
+            if side in self._locked_sides:
+                why = self._locked_sides[side]
+                for widget in (combo, self._margin_edits.get(side), air_edit):
+                    if widget is not None:
+                        widget.setEnabled(False)
+                        widget.setToolTip(f"Set by the split: {why}")
+                side_item.setText(f"{label} (split)")
+                side_item.setToolTip(f"Set by the split: {why}")
         self.table.resizeRowsToContents()
         # fixed 6 rows: size the table to fit them exactly, no empty area or scrollbar
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setFixedHeight(self.table.horizontalHeader().sizeHint().height()
                                   + sum(self.table.rowHeight(r) for r in range(self.table.rowCount()))
                                   + 2 * self.table.frameWidth())
-        self.table.setMinimumWidth(440)
+        self.table.setMinimumWidth(600)
+
+        if self._locked_sides:
+            split_note = QLabel("Set by the split, the same as in the whole region:\n"
+                                + "\n".join(f"  {side}: {why}" for side, why in self._locked_sides.items()))
+            split_note.setWordWrap(True)
+            layout.addWidget(split_note)
+
+        if allow_port_wall:
+            note = QLabel("Port wall: a PEC wall at the layout edge where lines are cut. Ports drawn on that edge are "
+                          "calibrated with standards (see the Ports tab). Needs ground metal reaching the edge next "
+                          "to each cut line.")
+            note.setWordWrap(True)
+            layout.addWidget(note)
 
         button_layout = QHBoxLayout()
         reset_btn = QPushButton("Reset all")
@@ -1007,19 +1505,71 @@ class BoxSidesOverrideDialog(QDialog):
 
         self.setLayout(layout)
 
+    def _apply_port_wall_state(self, side):
+        """a port wall has no dielectric oversize and no air: both cells show 0 and are locked"""
+        if side in getattr(self, "_locked_sides", {}):
+            return      # set by the split
+        is_wall = self._bc_boxes[side].currentData() == PORTWALL
+        edits = [self._margin_edits.get(side), self._air_edits[side]]
+        for edit in edits:
+            if edit is None:
+                continue
+            if is_wall:
+                edit.setText("0")
+                edit.setEnabled(False)
+                edit.setToolTip(PORTWALL_TOOLTIP)
+            elif side in self._locked_by_port_wall:
+                edit.clear()
+                edit.setEnabled(edit is not self._margin_edits.get(side) or self._margin_editable)
+                edit.setToolTip("")
+        if is_wall:
+            self._locked_by_port_wall.add(side)
+        else:
+            self._locked_by_port_wall.discard(side)
+
     def _reset_all(self):
         for side, _ in BOX_SIDES:
+            if side in self._locked_sides:
+                continue
             self._bc_boxes[side].setCurrentIndex(0)
             self._air_edits[side].clear()
+            if self._margin_editable and side in self._margin_edits:
+                self._margin_edits[side].clear()
 
     def _on_ok(self):
         overrides = {}
         for side, label in BOX_SIDES:
             override = {}
             bc = self._bc_boxes[side].currentData()
+            if bc == PORTWALL:
+                # no dielectric oversize and no air on a port wall (gds2palace sets the same)
+                override = {"bc": PORTWALL, "margin": 0.0, "air": 0.0}
+                if not self._margin_editable:
+                    override.pop("margin")
+                    if "margin" in self._current_overrides.get(side, {}):
+                        override["margin"] = self._current_overrides[side]["margin"]
+                overrides[side] = override
+                continue
             # an explicit choice equal to the default is the same as "default"
             if bc is not None and bc != self._default_bc:
                 override["bc"] = bc
+
+            if not self._margin_editable:
+                # set by the script: keep what the script has
+                if "margin" in self._current_overrides.get(side, {}):
+                    override["margin"] = self._current_overrides[side]["margin"]
+            elif side in self._margin_edits:
+                margin_text = self._margin_edits[side].text().strip()
+                if margin_text:
+                    try:
+                        margin = float(margin_text)
+                        if margin < 0:
+                            raise ValueError
+                    except ValueError:
+                        QMessageBox.warning(self, "Error", f"Not a valid dielectric oversize for side '{label}'")
+                        return
+                    if margin != self._default_margin:
+                        override["margin"] = margin
 
             air_text = self._air_edits[side].text().strip()
             if air_text:
@@ -1042,6 +1592,20 @@ class BoxSidesOverrideDialog(QDialog):
     def get_overrides(self):
         return self._result
 
+
+
+def _default_without_port_walls(text, overrides, sides, port_walls):
+    """(default text, overrides) of a per-side value, the default chosen among the sides that are not port walls"""
+    try:
+        default = float(text)
+    except ValueError:
+        return text, overrides
+    values = {side: overrides.get(side, default) for side in sides}
+    others = [v for side, v in values.items() if side not in port_walls]
+    if not others:
+        return text, overrides
+    new_default = most_common_value(others)
+    return format_number_text(new_default), {side: v for side, v in values.items() if v != new_default}
 
 class MeshTab(QWidget):
     def __init__(self, MainWindow):
@@ -1470,6 +2034,8 @@ class MeshTab(QWidget):
             parts = []
             if "bc" in override:
                 parts.append(BOUNDARY_SETTING_TO_DISPLAY[override["bc"]])
+            if "margin" in override:
+                parts.append(f"oversize {format_number_text(override['margin'])} µm")
             if "air" in override:
                 parts.append(f"air {format_number_text(override['air'])} µm")
             if parts:
@@ -1478,14 +2044,107 @@ class MeshTab(QWidget):
             self.boundary_override_btn.setToolTip("Per-side overrides:\n" + "\n".join(lines))
         else:
             self.boundary_override_btn.setToolTip(
-                "Set the boundary condition and air layer thickness per side of the simulation box")
+                "Set the boundary condition, dielectric oversize and air layer thickness per side of the simulation box")
+        # a default field applies to the sides without their own value: with none left, it would change nothing
+        for widget, key, sides in ((self.boundary_box, "bc", [side for side, _ in BOX_SIDES]),
+                                   (self.margins_edit, "margin", list(MARGIN_SIDES)),
+                                   (self.airaround_edit, "air", [side for side, _ in BOX_SIDES])):
+            free = [side for side in sides if key not in overrides.get(side, {})]
+            widget.setEnabled(bool(free))
+            widget.setToolTip("" if free else "Every side has its own value: set them in Advanced...")
 
     def open_box_sides_override_dialog(self):
         dialog = BoxSidesOverrideDialog(self, self.boundary_box.currentText(),
-                                        self.airaround_edit.text().strip(), self._box_side_overrides)
+                                        self.airaround_edit.text().strip(), self._box_side_overrides,
+                                        default_margin_text=self.margins_edit.text().strip(),
+                                        margin_editable=self.margins_edit.isEnabled(),
+                                        allow_port_wall=util_calibration is not None and not self.MainWindow.ElmerMode,
+                                        locked_sides=getattr(self, "_split_locked_sides", None))
         if dialog.exec() == QDialog.Accepted:
             self._box_side_overrides = dialog.get_overrides()
             self._update_boundary_override_button_label()
+            self.MainWindow.ports_tab.refresh_port_wall_rows()
+
+    def show_piece(self, piece_set, row):
+        """A piece of a split region is loaded (piece_set None: no split region): the bar at the top says which
+        settings are shared, offers the piece's own mesh, and the box sides the split sets are locked."""
+        if not hasattr(self, "piece_bar"):
+            self.piece_bar = QGroupBox("Split region")
+            bar = QVBoxLayout()
+            self.piece_bar_label = QLabel()
+            self.piece_bar_label.setWordWrap(True)
+            bar.addWidget(self.piece_bar_label)
+            self.piece_own_check = QCheckBox()
+            self.piece_own_check.setToolTip("Mesh settings for this piece only, e.g. a finer mesh in one difficult "
+                                            "piece. Unticked: the mesh settings of the whole region.")
+            self.piece_own_check.toggled.connect(lambda on: self.MainWindow.set_piece_own_mesh(on))
+            bar.addWidget(self.piece_own_check)
+            self.piece_bar.setLayout(bar)
+            self.main_layout.insertWidget(0, self.piece_bar)
+        if piece_set is None or row is None:
+            self.piece_bar.setVisible(False)
+            self._split_locked_sides = None
+            return
+        locked = piece_set.locked_sides(row)
+        self._split_locked_sides = locked
+        name = row.get("piece")
+        own = bool(piece_set.own(row))
+        text = (f"{piece_set.name}: these settings apply to all pieces, the boundaries are those of the whole "
+                "region. ")
+        if locked:
+            text += "Set by the split for " + name + ": " + "; ".join(f"{s} {w}" for s, w in locked.items()) + ". "
+        if own:
+            text += f"The mesh settings below are {name}'s own."
+        self.piece_bar_label.setText(text)
+        self.piece_own_check.blockSignals(True)
+        self.piece_own_check.setText(f"Own mesh settings for {name}")
+        self.piece_own_check.setChecked(own)
+        self.piece_own_check.setVisible(not row.get("full"))
+        self.piece_own_check.blockSignals(False)
+        self.piece_bar.setVisible(True)
+
+    def box_sides_for_preview(self):
+        """per side: boundary (display name), port wall or not, dielectric oversize (None for z) and air, for the box
+        drawn in the layout preview"""
+        default_bc = BOUNDARY_DISPLAY_TO_SETTING.get(self.boundary_box.currentText(), "ABC")
+        try:
+            default_margin = float(self.margins_edit.text())
+        except ValueError:
+            default_margin = 0.0
+        try:
+            default_air = float(self.airaround_edit.text())
+        except ValueError:
+            default_air = default_margin
+        out = {}
+        for side, _ in BOX_SIDES:
+            override = self._box_side_overrides.get(side, {})
+            bc = override.get("bc", default_bc)
+            out[side] = {"bc": BOUNDARY_SETTING_TO_DISPLAY.get(bc, bc), "portwall": bc == PORTWALL,
+                         "margin": override.get("margin", default_margin) if side in MARGIN_SIDES else None,
+                         "air": override.get("air", default_air),
+                         "shift": self.MainWindow.ports_tab._port_wall_shift.get(side, 0.0) if bc == PORTWALL else 0.0,
+                         "uniform": (self.MainWindow.ports_tab._port_wall_result.get(side) or {}).get("uniform")
+                                    if bc == PORTWALL else None,
+                         "extension": self._extension_for_preview(side) if bc == PORTWALL else 0.0,
+                         "profile": (self.MainWindow.ports_tab._port_wall_result.get(side) or {}).get("profile") or []
+                                    if bc == PORTWALL else []}
+        return out
+
+    def _extension_for_preview(self, side):
+        ports = self.MainWindow.ports_tab
+        value = ports._port_wall_extension.get(side, 0.0)
+        if value == "auto":
+            return (ports._port_wall_result.get(side) or {}).get("extension") or 0.0
+        return float(value or 0.0)
+
+    def port_wall_sides(self):
+        """the box sides set to Port wall"""
+        return [side for side, _ in BOX_SIDES if self._box_side_overrides.get(side, {}).get("bc") == PORTWALL]
+
+    def set_port_wall(self, side):
+        """make one side a port wall (the Ports tab offers this for a port on that edge)"""
+        self._box_side_overrides[side] = {"bc": PORTWALL, "margin": 0.0, "air": 0.0}
+        self._update_boundary_override_button_label()
 
     def update_amr_ram_note(self, *_):
         # the memory stop limit is a preference, so re-read it on every update
@@ -1613,11 +2272,16 @@ class MeshTab(QWidget):
 
         try:
             value = float(self.margins_edit.text())
+            if value < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value for dielectric oversize margin")
             self.margins_edit.setText(str(get_preference(self.MainWindow.APP_NAME, "margin", "200")))
             return False
-        saved_values ["margin"] = float(value)
+        # a single value unless some side is overridden, then one value per side
+        saved_values ["margin"] = margin_to_saved(value, {side: override["margin"]
+                                                          for side, override in self._box_side_overrides.items()
+                                                          if "margin" in override})
 
         try:
             value = float(self.airaround_edit.text())
@@ -1666,7 +2330,6 @@ class MeshTab(QWidget):
         self.amr_maxdof_edit.setText(str(saved_values.get("amr_max_dof", get_preference(app_name, "amr_max_dof", "2000000"))))
         self.amr_conformal_box.setCurrentIndex(1 if saved_values.get(
             "adaptive_mesh_conformal", get_preference_bool(app_name, "adaptive_mesh_conformal", False)) else 0)
-        self.margins_edit.setText(str(saved_values.get("margin", get_preference(app_name, "margin", "200"))))
 
         self.mesh_order_box.setCurrentIndex(int(saved_values.get("order", 2))-1)
         # older .simcfg files and model scripts have filled_metals (True = 'solve_inside') instead
@@ -1691,19 +2354,38 @@ class MeshTab(QWidget):
         # the other sides become overrides in the "Advanced..." dialog.
         self._box_side_overrides = {}
         boundary = saved_values.get("boundary", "")
-        bc_values = as_six_values(boundary)
+        bc_values = as_side_values(boundary)
         if bc_values is None:
             bc_values = [str(boundary).strip("[]() '\"")] * 6
         # gds2palace treats PML the same as ABC; missing/unknown -> default Absorbing
         bc_values = [v.upper() if v.upper() in BOUNDARY_SETTING_TO_DISPLAY else "ABC" for v in bc_values]
-        default_bc = most_common_value(bc_values, preferred_order=list(BOUNDARY_SETTING_TO_DISPLAY))
+        # a port wall is never the tab default, only a side override
+        default_bc = most_common_value([v for v in bc_values if v != PORTWALL] or ["ABC"],
+                                       preferred_order=list(BOUNDARY_DISPLAY_TO_SETTING.values()))
         self.boundary_box.setCurrentText(BOUNDARY_SETTING_TO_DISPLAY[default_bc])
         for (side, _), bc in zip(BOX_SIDES, bc_values):
             if bc != default_bc:
                 self._box_side_overrides.setdefault(side, {})["bc"] = bc
 
+        # margin: a single value or 4 values (xmin, xmax, ymin, ymax), same scheme. A port wall always has 0 and is
+        # its own override: it does not take part in choosing the default, else two port walls make 0 the default
+        # and the other sides overrides, and the default field would set nothing
+        port_walls = {side for (side, _), bc in zip(BOX_SIDES, bc_values) if bc == PORTWALL}
+        margin_text, margin_overrides = margin_from_saved(saved_values.get("margin", get_preference(app_name, "margin", "200")))
+        if port_walls and margin_overrides is not None:
+            margin_text, margin_overrides = _default_without_port_walls(margin_text, margin_overrides, MARGIN_SIDES,
+                                                                        port_walls)
+        self.margins_edit.setText(margin_text)
+        for side, value in margin_overrides.items():
+            self._box_side_overrides.setdefault(side, {})["margin"] = value
+
         air = saved_values.get("air_around", "")
-        air_values = as_six_values(air)
+        if str(air).strip() == "" and margin_overrides and str(get_preference(app_name, "air_around", "")) == "":
+            # no air_around with a margin per side: gds2palace's default, the margin
+            # of each side and the largest one for the z sides
+            margin_values = [margin_overrides.get(side, float(margin_text)) for side in MARGIN_SIDES]
+            air = margin_values + [max(margin_values)] * 2
+        air_values = as_side_values(air)
         if air_values is not None:
             try:
                 air_values = [float(v) for v in air_values]
@@ -1711,7 +2393,8 @@ class MeshTab(QWidget):
                 air_values = None
                 air = ""
         if air_values is not None:
-            default_air = most_common_value(air_values)
+            others = [v for (side, _), v in zip(BOX_SIDES, air_values) if side not in port_walls]
+            default_air = most_common_value(others or air_values)
             self.airaround_edit.setText(format_number_text(default_air))
             for (side, _), value in zip(BOX_SIDES, air_values):
                 if value != default_air:
@@ -1724,7 +2407,7 @@ class MeshTab(QWidget):
             if str(air_pref) != "":
                 self.airaround_edit.setText(str(air_pref))
             else:
-                self.airaround_edit.setText(str(saved_values.get("margin", get_preference(self.MainWindow.APP_NAME, "margin", "200"))))
+                self.airaround_edit.setText(self.margins_edit.text())
         else:
             # we have air_around defined as a single value
             self.airaround_edit.setText(str(air).strip("[]() "))
@@ -1840,6 +2523,11 @@ class CreateModelTab(CreateModelTabBase):
     # real RSS of the actual palace-x86_64 process(es) (one per MPI rank) - the same
     # process name _kill_palace_process_for_ram_limit() already pkills by.
     _RE_MPI = re.compile(r"Running with (\d+) MPI processes")
+    # run_sim of a model with port walls solves the calibration standards first, then the model, and says so:
+    #   "calibration standard 1 of 2: cal_xmin_L, 3 frequencies", "  reused, solved ...", "device model"
+    _RE_STANDARD = re.compile(r"^calibration standard (\d+) of (\d+): ([^,\s]+)")
+    _RE_STANDARD_REUSED = re.compile(r"^\s*reused, solved")
+    _RE_DEVICE_MODEL = re.compile(r"^device model\s*$")
     _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
@@ -1893,6 +2581,7 @@ class CreateModelTab(CreateModelTabBase):
         # unconverged solve seen in this run - see _report_nonconvergence()
         self._status_solve_freq_ghz = None
         self._nonconverged = []
+        self._status_stage = None       # with port walls: which solve of run_sim runs (a standard or the model)
         self._update_status_line()
 
     def _reset_status_for_run(self):
@@ -1923,7 +2612,26 @@ class CreateModelTab(CreateModelTabBase):
     def _reset_live_status(self):
         self._init_status_state()
 
+    def _new_solve(self, stage):
+        """A new Palace run in run_sim (a calibration standard or the model): its own ports and frequencies"""
+        self._status_stage = stage
+        self._status_port_cur = self._status_port_total = None
+        self._status_freq_display = None
+        self._status_solve_display = ""
+        self._update_status_line()
+
     def _parse_palace_status_line(self, line):
+        m = self._RE_STANDARD.search(line)
+        if m:
+            self._new_solve(f"calibration standard {m.group(1)}/{m.group(2)} ({m.group(3)})")
+            return
+        if self._RE_STANDARD_REUSED.search(line) and self._status_stage:
+            self._status_stage = self._status_stage + ", reused"
+            self._update_status_line()
+            return
+        if self._RE_DEVICE_MODEL.search(line):
+            self._new_solve("model")
+            return
         m = self._RE_NOT_CONVERGED.search(line)
         if m:
             self._report_nonconvergence(int(m.group(1)))
@@ -2191,7 +2899,9 @@ class CreateModelTab(CreateModelTabBase):
         solve = self._status_solve_display
         amr = "n/a" if self._status_amr_max is None else f"{self._status_amr_cur}/{self._status_amr_max}"
 
+        stage = getattr(self, "_status_stage", None)
         self.status_line.setText(
+            (f"Running: {stage}    |    " if stage else "") +
             f"MPI processes: {mpi}    |    Est. memory: {mem}    |    "
             f"Port: {port}    |    Freq: {freq}{solve}    |    AMR iteration: {amr}"
         )
@@ -2233,6 +2943,18 @@ class CreateModelTab(CreateModelTabBase):
         else:
             from .result_viewer import find_touchstone_files, is_amr_iteration_snapshot
 
+        piece_set = getattr(self.MainWindow, "piece_set", None)
+        if piece_set is not None:
+            # a split region: the joined result of all pieces (calibrated, the only kind joined; with the DC point
+            # when the sweep did not start at 0 Hz)
+            joined = piece_set.joined_results()
+            if not joined:
+                QMessageBox.warning(self, "Model Fit", f"No joined result of {piece_set.name} yet. Start Simulation "
+                                    "runs the pieces and joins them.")
+                return
+            self._start_snp2le(joined[0], SNP2LE_URL)
+            return
+
         if self.MainWindow.PalaceMode:
             run_path = self.run_folder("palace_model")
         else:
@@ -2257,7 +2979,22 @@ class CreateModelTab(CreateModelTabBase):
             for path in final_candidates:
                 self.log_area.appendPlainText("  " + path)
         raw_file = max(final_candidates, key=os.path.getmtime)
+        if __package__ in (None, ""):
+            from result_viewer import has_calibrated_ports
+        else:
+            from .result_viewer import has_calibrated_ports
+        if has_calibrated_ports(self.MainWindow.saved_values):
+            # port walls or a moved reference plane: the calibrated result, with the DC point if there is one
+            stem, ext = os.path.splitext(raw_file)
+            for candidate in (stem + "_dc_deembedded" + ext, stem + "_deembedded" + ext):
+                if os.path.isfile(candidate):
+                    self.log_area.appendPlainText("Port walls / reference plane shift: fitting the calibrated result "
+                                                  f"{os.path.basename(candidate)}, not the raw one.")
+                    raw_file = candidate
+                    break
+        self._start_snp2le(raw_file, SNP2LE_URL)
 
+    def _start_snp2le(self, raw_file, SNP2LE_URL):
         # naming a .sNp file on the command line opens snp2le's GUI on it directly
         # (see https://github.com/iic-jku/snp2le/blob/main/doc/architecture.md);
         # still start it in that file's directory, so any relative paths it uses
@@ -2441,6 +3178,11 @@ class CreateModelTab(CreateModelTabBase):
         # which can do some update to saved_values
         self.MainWindow.save_all_tabs()
 
+        # with a port wall, check the wall ports before writing anything (reads the layout, no meshing);
+        # without one this costs nothing
+        if not self.MainWindow.ports_tab.check_port_walls(ask=True, only_with_port_walls=True):
+            return
+
         if simulation_ports.portcount > 0 or saved_values['preview_only']:
             # save settings on this page to internal data structure
             self.save_values()
@@ -2527,56 +3269,90 @@ class CreateModelTab(CreateModelTabBase):
         a "mesh" parent and writes the resulting .sNp file there too). run_path itself
         is also checked, defensively, in case some variant writes there directly.
         """
+        targets = self._previous_result_targets(run_path)
+        if not targets:
+            return True
+
+        # in a Start Simulation queue (several models of one script), the question was asked before the queue
+        # started (_ask_queue_previous_results)
+        delete = getattr(self, "_queue_clear_choice", None) if self._active_run is not None else None
+        if delete is None:
+            delete = self._ask_previous_results(f"This run's output directory already contains results from a "
+                                                f"previous simulation:\n\n{run_path}")
+            if delete is None:
+                return False
+        if delete:
+            self._delete_results(targets)
+        return True
+
+    def _previous_result_targets(self, run_path):
+        """Solver output of a previous run in run_path: [output folder] (Palace) or the result files (Elmer)."""
         if self.MainWindow.PalaceMode:
             output_dir = find_output_dir(run_path, self.run_basename())
             if not os.path.isdir(output_dir) or not os.listdir(output_dir):
-                return True
-            targets = [output_dir]
-        else:
-            targets = []
-            for search_dir in (os.path.join(run_path, "mesh"), run_path):
-                if not os.path.isdir(search_dir):
+                return []
+            return [output_dir]
+        targets = []
+        for search_dir in (os.path.join(run_path, "mesh"), run_path):
+            if not os.path.isdir(search_dir):
+                continue
+            for fn in os.listdir(search_dir):
+                full_path = os.path.join(search_dir, fn)
+                if not os.path.isfile(full_path):
                     continue
-                for fn in os.listdir(search_dir):
-                    full_path = os.path.join(search_dir, fn)
-                    if not os.path.isfile(full_path):
-                        continue
-                    if fn in ("scalar_results", "scalar_results.names") or \
-                       fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
-                        targets.append(full_path)
-            if not targets:
-                return True
+                if fn in ("scalar_results", "scalar_results.names") or \
+                   fn.startswith("fields") or re.search(r'\.s\d+p$', fn, re.IGNORECASE):
+                    targets.append(full_path)
+        return targets
 
-        # in a Start Simulation queue (several models of one script), ask once
-        delete = getattr(self, "_queue_clear_choice", None) if self._active_run is not None else None
+    def _ask_previous_results(self, text):
+        """Delete / Keep / Cancel simulation: True, False or None (cancelled, or the dialog closed)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Previous simulation results found")
+        box.setText(text + "\n\nDelete the existing results before starting?")
+        delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
+        keep_btn = box.addButton("Keep", QMessageBox.NoRole)
+        box.addButton("Cancel simulation", QMessageBox.RejectRole)
+        box.setDefaultButton(delete_btn)
+        box.exec()
+        if box.clickedButton() not in (delete_btn, keep_btn):
+            return None
+        return box.clickedButton() is delete_btn
+
+    @staticmethod
+    def _delete_results(targets):
+        for target in targets:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+
+    def _ask_queue_previous_results(self, runs):
+        """Before a Start Simulation queue (several models of one script): previous results of any of the ticked
+        models? Asked once, before the first model starts, not between two models; a Delete removes them all
+        now. False when the user cancels."""
+        found = []
+        try:
+            for run in runs:
+                self._active_run = run
+                run_path = self.run_folder("palace_model" if self.MainWindow.PalaceMode else "elmer_model")
+                targets = self._previous_result_targets(run_path)
+                if targets:
+                    found.append((run, targets))
+        finally:
+            self._active_run = None
+        if not found:
+            return True
+        names = "\n".join(run["model_basename"] for run, _ in found)
+        delete = self._ask_previous_results(f"{len(found)} of the {len(runs)} models already have results from a "
+                                            f"previous simulation:\n\n{names}")
         if delete is None:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Question)
-            box.setWindowTitle("Previous simulation results found")
-            more = (" (the same applies to the other models in this run)"
-                    if self._active_run is not None and self._run_queue else "")
-            box.setText(
-                f"This run's output directory already contains results from a previous "
-                f"simulation:\n\n{run_path}\n\nDelete the existing results before starting{more}?"
-            )
-            delete_btn = box.addButton("Delete", QMessageBox.AcceptRole)
-            keep_btn = box.addButton("Keep", QMessageBox.NoRole)
-            box.addButton("Cancel simulation", QMessageBox.RejectRole)
-            box.setDefaultButton(delete_btn)
-            box.exec()
-            if box.clickedButton() not in (delete_btn, keep_btn):
-                # Cancel (or the dialog closed): don't start the simulation at all
-                return False
-            delete = box.clickedButton() is delete_btn
-            if self._active_run is not None:
-                self._queue_clear_choice = delete
-
+            return False
+        self._queue_clear_choice = delete
         if delete:
-            for target in targets:
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                else:
-                    os.remove(target)
+            for _run, targets in found:
+                self._delete_results(targets)
         return True
 
     def run_model(self):
@@ -2867,7 +3643,7 @@ class ModelEditorTab(QWidget):
                       'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
-            ("Simulation boundary", ['boundary', 'margin', 'air_around']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension']),
             ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
         ]
@@ -3327,7 +4103,8 @@ class PreferencesDialog(QDialog):
             float(self.refined_cellsize_edit.text())
             float(self.cells_per_wavelength_edit.text())
             float(self.meshsize_max_edit.text())
-            float(self.margin_edit.text())
+            if float(self.margin_edit.text()) < 0:
+                raise ValueError
         except Exception:
             QMessageBox.warning(self, "Error", "Not a valid value in the Mesh tab")
             return
@@ -3471,6 +4248,9 @@ class MainWindow(MainWindowBase):
 
         # Load all saved data into tabs
         self.load_all_tabs()
+
+        # size, position and the Ports tab's divider of the last session
+        self._restore_window_layout()
 
     # ---------- Menu Bar (Simulator menu is EM-specific) ----------
     def create_additional_menus(self, menu_bar):
@@ -3757,6 +4537,14 @@ class MainWindow(MainWindowBase):
             marker["kind"] = "port"
             marker["group"] = "Ports"
         return markers
+
+    def box_sides_for_preview(self):
+        """the simulation box per side, drawn around the layout in the layout preview"""
+        return self.mesh_tab.box_sides_for_preview()
+
+    def open_box_sides_dialog(self):
+        """a click on a box side's label in the layout preview"""
+        self.mesh_tab.open_box_sides_override_dialog()
 
 
     # ---------- Preferences dialog hook ----------

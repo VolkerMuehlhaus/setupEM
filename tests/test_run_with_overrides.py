@@ -145,3 +145,55 @@ def test_source_runs_other_code_as_the_script(tmp_path):
                        "simulation_setup.create_palace([], settings)\n")
     received = run(tmp_path, "preview_only=True", source=unsaved)
     assert received["fstop"] == 20e9 and received["file"] == "model.py" and received["preview_only"] is True
+
+
+# a port wall's calibration standards: gds2palace builds them inside the model's create_model() (settings copy with
+# _calibration_standard=True, same sim_path) before that returns, and the model's run_sim solves them
+PORTWALL_WORKFLOW = textwrap.dedent("""
+    import json, os
+    def create_model(excite_ports, settings):
+        if not settings.get("_calibration_standard"):
+            for suffix in ("_cal_xmin_L", "_cal_xmin_2L"):
+                standard = dict(settings, model_basename=settings["model_basename"] + suffix,
+                                _calibration_standard=True, no_gui=True)
+                create_model(excite_ports, standard)
+        with open(os.path.join(os.path.dirname(__file__), "built.txt"), "a") as f:
+            f.write(settings["model_basename"] + chr(10))
+        return "config", "data"
+    def create_palace(excite_ports, settings):
+        return create_model(excite_ports, settings)
+""")
+
+PORTWALL_SCRIPT = textwrap.dedent("""
+    import os, sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "localflow"))
+    import util_simulation_setup as simulation_setup
+    settings = {'fstop': 10e9, 'model_basename': 'dut', 'sim_path': os.path.join(os.path.dirname(__file__), 'dut_data')}
+    simulation_setup.create_palace([], settings)
+""")
+
+
+def run_portwall(tmp_path, *extra):
+    flow = tmp_path / "localflow"
+    flow.mkdir()
+    (flow / "util_simulation_setup.py").write_text(PORTWALL_WORKFLOW)
+    script = tmp_path / "wall.py"
+    script.write_text(PORTWALL_SCRIPT)
+    result = subprocess.run([sys.executable, RUNNER, str(script), *extra], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result, (flow / "built.txt").read_text().split()
+
+
+def test_calibration_standards_are_not_models_of_their_own(tmp_path):
+    record = tmp_path / "models.json"
+    result, built = run_portwall(tmp_path, "--record", str(record), "--gui-first-only")
+    assert built == ["dut_cal_xmin_L", "dut_cal_xmin_2L", "dut"]
+    assert [m["model_basename"] for m in json.loads(record.read_text())] == ["dut"]
+    assert "built without a gmsh window" not in result.stdout       # the standards don't count as further models
+
+
+def test_first_only_waits_for_the_model_with_its_standards(tmp_path):
+    # the standards return first; stopping after them would leave the model itself unbuilt
+    result, built = run_portwall(tmp_path, "--first-only")
+    assert built == ["dut_cal_xmin_L", "dut_cal_xmin_2L", "dut"]
+    assert "done after the first model" in result.stdout
