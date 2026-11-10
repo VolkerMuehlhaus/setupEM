@@ -1,4 +1,4 @@
-# What's New - not released yet
+# What's New - November 10, 2026 (setupEM 0.18.0)
 
 **De-embedded results shown**: View S-Parameters lists the `_deembedded` files from the start and opens with the raw result and its `_deembedded` result together. Model Fit fits the calibrated result (`_dc_deembedded`, else `_deembedded`) of a model with port walls or a moved reference plane; the raw result still holds the uncalibrated gap ports.
 
