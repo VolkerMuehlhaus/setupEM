@@ -4,7 +4,12 @@
 
 ## What's New
 
-Reserved PEC/AIR stackup materials, Layout Preview, Results viewer, Model Fit, built-in 3D field viewer, GDSII Layout Simplification, XML Stackup Editor, setupThermal for Elmer thermal simulation.
+- **Port walls**: calibrated ports at the layout edge, de-embedded results
+- **Split regions** from the [KLayout plug-in](https://github.com/VolkerMuehlhaus/klayout_em_export): pieces simulated and joined
+- **Edit \*.py model in place**, also with parameter sweeps
+- **Conductor model** with skin layers, **boundary conditions per side**
+- **setupThermal**: powers and temperatures per device
+- Layout Preview, Results viewer, Model Fit, 3D field viewer, GDSII simplification
 
 See [CHANGES.md](doc/CHANGES.md) for details.
 
