@@ -1,4 +1,4 @@
-# What's New - not released yet
+# What's New - not released yet (setupEM 0.18.1)
 
 **Command line fixes** (from issue #52, use without a display):
 - `--help`, `--version` and a wrong argument of `setupEM`, `setupThermal`, `stackupEditor`, `resultViewer` and `fieldViewer` no longer need a display: the arguments are read before Qt starts. All five have `--version` now.
