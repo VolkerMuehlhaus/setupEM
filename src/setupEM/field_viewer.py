@@ -2766,12 +2766,23 @@ def main():
         # this, Qt's default style on Windows looks visibly different from the full app
         app.setStyle(QStyleFactory.create("Windows"))
 
-    def die(message):
-        print(f"Error: {message}", file=sys.stderr)
-        sys.exit(1)
-
     window = FieldViewerWindow(_StandaloneMainWindow(), file_paths, args.source,
                                 off_screen=bool(args.screenshot))
+
+    def close_and_exit(code):
+        # The window is deleted here, before the application: left to Qt's own cleanup at exit, a finished
+        # --screenshot run crashed there with no display (Linux, PySide6 6.12: PNG written, then exit code 139).
+        nonlocal window
+        window.close()
+        window.deleteLater()
+        window = None
+        app.processEvents()
+        sys.exit(code)
+
+    def die(message):
+        print(f"Error: {message}", file=sys.stderr)
+        close_and_exit(1)
+
     if window._full_mesh is None:
         die(window._load_error or "failed to load the field-result file")
 
@@ -2881,8 +2892,7 @@ def main():
                 break
         window.plotter.screenshot(args.screenshot)
         print(f"Saved screenshot to {args.screenshot}")
-        window.close()
-        sys.exit(0)
+        close_and_exit(0)
 
     window.show()
     sys.exit(app.exec())
