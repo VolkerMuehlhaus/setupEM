@@ -63,12 +63,14 @@ if __package__ in (None, ""):
     import gds_hierarchy_scan
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from script_probe import probe_script
-    from config_update import model_scripts, newer_configs
+    from config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
+                               settings_differences)
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
-    from .config_update import model_scripts, newer_configs
+    from .config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
+                                settings_differences)
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -5088,13 +5090,18 @@ class MainWindowBase(QMainWindow):
             f"{MODEL_KIND_DESCRIPTIONS[owner_kind]}. This is {self.APP_NAME}.\n\n"
             f"Open the file with {owner_app} instead.")
 
-    def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True, quiet=False):
+    def load_configuration_from_file(self, file_path, in_place=False, ask_unsaved=True, quiet=False,
+                                     script_choice=None):
         # in_place: *.py only, from edit_py_model() - edit this script in
         # place (preserve mode) instead of importing its values for a new script.
         # ask_unsaved: offer to save a script edited in place first (False for Revert / Reload)
-        # quiet: a piece of a split region (piece_set.py): no "Loaded" box, no question which model to continue
+        # quiet: a piece of a split region (piece_set.py): no "Loaded" message, no question which model to continue
         # with (its own script if Create Model wrote the file with it, else the file), the set stays open
+        # script_choice: "script" or "config" answers the question whether to continue with the model script
+        # linked to the settings file (command line --continue-with-script / --start-from-config); None: setupEM
+        # decides, and asks only if the two have other settings
         saved_values = self.saved_values
+        unlinked_note = ""
         if file_path:
             if not os.path.isfile(file_path):
                 # e.g. a recent file that was moved; said as that, not as "Unknown data format" further down
@@ -5151,19 +5158,30 @@ class MainWindowBase(QMainWindow):
                             self._update_script_from_config(file_path, data)
                             return
                     else:
-                        # a model script for the same layout has the settings made in setupEM since
-                        script = self._model_script_for_config(file_path, data)
-                        if script and self._written_with(file_path, data, script):
+                        # the model script linked to this settings file has the settings made in setupEM since
+                        script, written_with = self._model_script_for_config(file_path, data)
+                        if script is None:
+                            choice = "config"
+                            if not quiet:
+                                unlinked_note = self._unlinked_scripts_note(file_path, data)
+                        elif script_choice in ("script", "config"):
+                            choice = script_choice
+                        elif written_with:
                             choice = "script"       # Create Model wrote the config with this script: no question
                         elif quiet:
                             choice = "config"
                         else:
-                            choice = self._ask_continue_with_script(file_path, script) if script else "config"
+                            differences = self._script_config_differences(file_path, data, script)
+                            if differences == []:
+                                choice = "script"   # the same settings: continuing with the script loses nothing
+                            else:
+                                choice = self._ask_continue_with_script(file_path, script, differences)
                         if choice == "cancel":
                             return
                         if choice == "script":
                             self.load_configuration_from_file(script, in_place=True, ask_unsaved=False, quiet=quiet)
                             if self.script_model is not None:
+                                self.user_inputs_file = file_path   # Create Model keeps the link (model_script)
                                 self.hide_info_bar()
                                 self._update_script_from_config(file_path, data)
                             return
@@ -5189,6 +5207,8 @@ class MainWindowBase(QMainWindow):
                         log_area.appendPlainText(f"Config loaded from {shorten_path_for_display(file_path)}")
                         for message in path_messages:
                             log_area.appendPlainText(message)
+                        if unlinked_note:
+                            log_area.appendPlainText(unlinked_note)
                         log_area.appendPlainText("")
                     if not quiet and data.get("piece_of"):
                         self.create_model_tab.log_area.appendPlainText(
@@ -5627,31 +5647,83 @@ class MainWindowBase(QMainWindow):
         return "update" if clicked is update else "new" if clicked is new else "cancel"
 
     def _model_script_for_config(self, file_path, data):
-        """The newest model script for the settings file's layout that can be edited in place, else None. It holds
-        the settings made in setupEM after the settings file was last saved (it is the model; Create Model copies
-        its settings to <model>.simcfg); the settings file itself is written again by the layout tool on every
-        export, so it is usually the newer file and its age says nothing."""
+        """(script, written_with) of the model script the settings file is linked to and that can be edited in place,
+        else (None, False). written_with: Create Model wrote the settings file together with the script; else the
+        file names the script as "model_script" (Create Model of a model opened from it, see
+        _link_config_to_script). The script holds the settings made in setupEM after the settings file was last
+        saved; the settings file itself is written again by the layout tool on every export, so it is usually the
+        newer file and its age says nothing. A script that only reads the same GDS file is not linked (see
+        _unlinked_scripts_note)."""
+        for script, written_with in linked_scripts(file_path, data):
+            if not self._in_place_problem(script):
+                return script, written_with
+        return None, False
+
+    def _unlinked_scripts_note(self, file_path, data):
+        """A line for the log about model scripts that read the settings file's GDS file but are not linked to it
+        (e.g. made before setupEM 0.18.1 under another name), "" if there are none: setupEM no longer guesses that
+        such a script is the model."""
         saved = data.get("saved_values") or {}
         gds = saved.get("GdsFile")
         if not gds:
-            return None
+            return ""
         base = os.path.dirname(os.path.abspath(file_path))
         gds = os.path.join(base, gds)
         folders = [base, os.path.dirname(os.path.abspath(gds))]
         if saved.get("sim_path"):
             folders.append(os.path.join(base, saved["sim_path"]))
-        for script in model_scripts(gds, folders):
-            if not self._in_place_problem(script):
-                return script
-        return None
+        names = [os.path.basename(s) for s in model_scripts(gds, folders) if not self._in_place_problem(s)]
+        if not names:
+            return ""
+        listed = ", ".join(names[:3]) + (", ..." if len(names) > 3 else "")
+        return (f"{listed} also read{'s' if len(names) == 1 else ''} this layout. To continue with "
+                f"{'it' if len(names) == 1 else 'one of them'}: File > Edit *.py model in place. Create Model links "
+                f"the script it writes to {os.path.basename(file_path)}, so that it is opened with it next time.")
 
-    @staticmethod
-    def _written_with(file_path, data, script):
-        """True if Create Model wrote the settings file together with script (write_model_config): same folder, its
-        "written_with" names the script. A layout tool's export keeps that key when it updates the file."""
-        return (data.get("written_with") == os.path.basename(script) and
-                os.path.normcase(os.path.dirname(os.path.abspath(file_path))) ==
-                os.path.normcase(os.path.dirname(os.path.abspath(script))))
+    def _script_config_differences(self, file_path, data, script):
+        """The settings in which the script and the settings file differ (settings_differences), [] if none, None if
+        that can't be told (the script was changed after Create Model saved its settings with it)."""
+        snapshot = model_settings_snapshot(script, "." + self.CONFIG_SUFFIX, self.APP_NAME)
+        if snapshot is None:
+            return None
+        return settings_differences(snapshot, data)
+
+    def _link_config_to_script(self, script_path, model_config_path):
+        """Create Model of a model opened from a settings file of another name, e.g. a layout tool's
+        <layout>.simcfg: name the script in that file ("model_script", relative to its folder), so that opening it
+        again (e.g. after the next export, which keeps the key) continues with the script. Only a settings file of
+        this application for the same GDS file; not for a piece of a split region (its file is the piece's own)."""
+        source = getattr(self, "user_inputs_file", None)
+        if not source or not self.config_update_supported() or getattr(self, "piece_set", None) is not None:
+            return
+        if not source.lower().endswith("." + self.CONFIG_SUFFIX.lower()) or not os.path.isfile(source):
+            return
+        if same_path(source, model_config_path or ""):
+            return                                      # the settings file Create Model writes (written_with)
+        try:
+            with open(source, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict) or data.get("application") != self.APP_NAME:
+            return
+        folder = os.path.dirname(os.path.abspath(source))
+        gds = (data.get("saved_values") or {}).get("GdsFile")
+        if not gds or not same_path(gds, self.saved_values.get("GdsFile") or "", folder):
+            return                                      # the model is not of this layout (any more)
+        try:
+            link = os.path.relpath(os.path.abspath(script_path), folder)
+        except ValueError:                              # another drive (Windows)
+            link = os.path.abspath(script_path)
+        link = link.replace("\\", "/")
+        if data.get("model_script") == link:
+            return
+        data["model_script"] = link
+        try:
+            with open(source, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except OSError:
+            pass
 
     def _open_piece_set(self, file_path, data):
         """Open a split region: its pieces in the Models list, the first one's settings in the tabs."""
@@ -5780,10 +5852,12 @@ class MainWindowBase(QMainWindow):
                 json.dump(struct, f, indent=4)
         except OSError:
             return None
+        self._link_config_to_script(script_path, path)
         return path
 
-    def _ask_continue_with_script(self, file_path, script):
-        """A model script exists for the settings file's layout: "script", "config" or "cancel"."""
+    def _ask_continue_with_script(self, file_path, script, differences=None):
+        """The model script linked to the settings file has other settings than the file (differences, readable),
+        or that can't be told (None): "script", "config" or "cancel"."""
         box = QMessageBox(self)
         box.setWindowTitle("Load Config")
         box.setIcon(QMessageBox.Question)
@@ -5792,8 +5866,13 @@ class MainWindowBase(QMainWindow):
             return time.strftime("%H:%M" if stamp[:3] == time.localtime()[:3] else "%Y-%m-%d %H:%M", stamp)
         # the newer file has your latest settings: it is the default
         config_newer = os.path.getmtime(file_path) > os.path.getmtime(script)
+        if differences:
+            found = ("They have other settings:\n  " + "\n  ".join(differences[:8])
+                     + ("\n  ..." if len(differences) > 8 else "") + "\n\n")
+        else:
+            found = "The script was changed after Create Model saved its settings, so they can't be compared.\n\n"
         box.setText(f"{os.path.basename(script)} (changed {when(script)}) is the model script for this layout, "
-                    f"{os.path.basename(file_path)} was saved {when(file_path)}.\n\n"
+                    f"{os.path.basename(file_path)} was saved {when(file_path)}.\n\n" + found +
                     "Continue with the script: its settings (frequencies, mesh, boundaries, ...) and your own code "
                     "stay; ports and layout settings come from the config. Right when you set up the model in "
                     "setupEM after the config was written.\n\n"

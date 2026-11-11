@@ -30,9 +30,11 @@ No Qt in here, so the module can be tested on its own.
 import ast
 import glob
 import json
+import math
 import os
 
-__all__ = ["LAYOUT_KEYS", "port_differences", "layout_differences", "newer_configs", "model_scripts"]
+__all__ = ["LAYOUT_KEYS", "port_differences", "layout_differences", "newer_configs", "model_scripts",
+           "same_path", "linked_scripts", "model_settings_snapshot", "settings_differences"]
 
 # saved_values that belong to the layout export, besides the ports
 LAYOUT_KEYS = ("GdsFile", "SubstrateFile", "cellname", "purpose")
@@ -80,6 +82,11 @@ def port_differences(old_ports, new_ports):
         elif old[number] != new[number]:
             out.append(f"port {number}: was {_describe(old[number])}, now {_describe(new[number])}")
     return out
+
+
+def same_path(a, b, base_dir=""):
+    """True if the paths a and b name the same file; relative paths are taken from base_dir."""
+    return _same_path(a, b, base_dir)
 
 
 def _same_path(a, b, base_dir=""):
@@ -177,3 +184,98 @@ def model_scripts(gds_path, folders):
                 out.append(path)
     out.sort(key=os.path.getmtime, reverse=True)
     return out
+
+
+# ---------- Which model script a settings file belongs to ----------
+#
+# A layout tool's export (e.g. <layout>.simcfg of the KLayout plug-in) and the model script made from it in setupEM
+# are linked in the settings file:
+#   "written_with": "<model>.py"   Create Model wrote this settings file together with the script (same folder)
+#   "model_script": "<path>.py"    Create Model wrote the script for a model opened from this settings file under
+#                                  another name; the path is relative to the settings file's folder
+# The layout tool keeps both keys when it writes the file again. A script that only reads the same GDS file is not
+# linked: it can be any script (an older copy, a hand-written one).
+
+# settings that are not part of the model's setup, or that the GUI takes from the preferences either way
+SETTINGS_NOT_COMPARED = ("unit", "model_basename", "sim_path", "preview_only", "no_preview",
+                         "solver_maxits", "solver_tol", "fdump_enabled")
+
+
+def linked_scripts(config_path, data):
+    """[(script path, written_with)] of the existing model scripts the settings file names, written_with first."""
+    folder = os.path.dirname(os.path.abspath(config_path))
+    out = []
+    for key in ("written_with", "model_script"):
+        name = data.get(key) if isinstance(data, dict) else None
+        if not isinstance(name, str) or not name.lower().endswith(".py"):
+            continue
+        if key == "written_with" and os.path.basename(name) != name:
+            continue                                    # written_with is a file name in the same folder
+        path = os.path.normpath(os.path.join(folder, name))
+        if os.path.isfile(path) and not any(_same_path(path, p) for p, _ in out):
+            out.append((path, key == "written_with"))
+    return out
+
+
+def model_settings_snapshot(script_path, suffix=".simcfg", application="setupEM"):
+    """The settings Create Model wrote with the script (<model>.simcfg, "written_with" the script), if the script was
+    not changed after it; else None (then they say nothing about the script)."""
+    path = os.path.splitext(script_path)[0] + suffix
+    try:
+        if os.path.getmtime(path) < os.path.getmtime(script_path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("application") != application or \
+            data.get("written_with") != os.path.basename(script_path):
+        return None
+    return data
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _same_setting(a, b):
+    """Two values of a setting as saved in settings files: numbers to rounding, a list and a scalar alike if every
+    element is the scalar (the oversize, one value or one per side), lists and dicts element by element."""
+    if _is_number(a) and _is_number(b):
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-15)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same_setting(x, y) for x, y in zip(a, b))
+    if isinstance(a, (list, tuple)) and _is_number(b):
+        return len(a) > 0 and all(_same_setting(x, b) for x in a)
+    if _is_number(a) and isinstance(b, (list, tuple)):
+        return _same_setting(b, a)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same_setting(a[k], b[k]) for k in a)
+    return a == b
+
+
+def _show(value):
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value)) if abs(value) < 1e15 else str(value)
+    return str(value)
+
+
+def settings_differences(script_data, config_data):
+    """Readable differences between the settings of a model script (script_data: the settings file Create Model
+    wrote with it) and a settings file of the same layout (config_data), [] if none. Compared: the settings both
+    files have, except the layout settings and ports (they come from the settings file either way) and
+    SETTINGS_NOT_COMPARED; and the solver (Palace or Elmer)."""
+    script_values = script_data.get("saved_values") or {}
+    config_values = config_data.get("saved_values") or {}
+    out = []
+    if "elmer_mode" in config_data and \
+            bool(script_data.get("elmer_mode", False)) != bool(config_data.get("elmer_mode", False)):
+        solver = lambda data: "Elmer" if data.get("elmer_mode") else "Palace"
+        out.append(f"solver: {solver(script_data)} in the script, {solver(config_data)} in the config")
+    for key in sorted(config_values):
+        if key in LAYOUT_KEYS or key in SETTINGS_NOT_COMPARED or key not in script_values:
+            continue
+        if not _same_setting(script_values[key], config_values[key]):
+            out.append(f"{key}: {_show(script_values[key])} in the script, {_show(config_values[key])} in the config")
+    return out
+

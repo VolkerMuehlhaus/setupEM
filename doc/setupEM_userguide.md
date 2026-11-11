@@ -378,7 +378,11 @@ A layout tool such as the KLayout plug-in klayout_em_export writes the GDSII fil
 
 setupEM therefore takes from the `.simcfg` only what belongs to the layout: the ports, GDSII file, stackup, cell and purpose. Everything else stays as in the script, including your own code. As always when editing in place, Create Model or **File > Save** writes the changes into the script.
 
-- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when a model script for the same GDSII file exists next to it: setupEM asks whether to **Continue with the script** (edit it in place and take the ports and layout settings from the `.simcfg`) or **Start from the config** (the `.simcfg`'s settings for a new model, as before). If Create Model wrote that `.simcfg` together with the script, setupEM continues with the script without asking.
+- **Opening the `.simcfg`** (Load Config, or Open in setupEM in the layout tool) when it is linked to a model script: setupEM continues with the script (edits it in place and takes the ports and layout settings from the `.simcfg`).
+  - Create Model makes the link. It writes `<model>.simcfg` with the script; when you opened the model from a `.simcfg` of another name, such as the layout tool's `<layout>.simcfg`, it also writes the script's name into that file. The layout tool keeps the link when it exports again.
+  - setupEM asks only when the `.simcfg` has other settings than the script, for example other frequencies or another boundary, and lists them: **Continue with the script** or **Start from the config** (the `.simcfg`'s settings for a new model). It also asks when the script was changed after Create Model saved its settings, since they can't be compared then.
+  - A script that only reads the same GDSII file is not linked, so setupEM opens the `.simcfg` and names the script in the log. To continue with it, use **File > Edit \*.py model in place**; the next Create Model links it.
+  - On the command line, `--continue-with-script` or `--start-from-config` (with `-simcfg`) gives the answer, so setupEM doesn't ask.
 - **Loading the `.simcfg` while editing a script in place:** setupEM lists the ports and layout settings that differ and asks whether to **Update the script from it** or **Open it as a new model**.
 - **While editing a script in place**, when a `.simcfg` for the same GDSII file is newer than the script and has other ports or layout settings, the bar below the menu says so, with **Update from it**.
 

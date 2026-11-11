@@ -4658,8 +4658,18 @@ def parse_arguments(argv=None):
     parser.add_argument("-simcfg",   type=str, default = '', help="*.simcfg file that is loaded prior to reading files")
     # Optional argument --elmer to enable menu with solver choices
     parser.add_argument("--elmer",   action="store_true", help="Set Elmer as default simulator")
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument("--continue-with-script", dest="script_choice", action="store_const", const="script",
+                        help="with -simcfg: if the settings file is linked to a model script (Create Model wrote "
+                             "it), edit that script in place, with the ports and layout settings of the settings "
+                             "file, without asking")
+    choice.add_argument("--start-from-config", dest="script_choice", action="store_const", const="config",
+                        help="with -simcfg: a new model from the settings file, also if it is linked to a model "
+                             "script")
     add_version_argument(parser)
     args = parser.parse_args(argv)
+    if args.script_choice and not args.simcfg.lower().endswith(".simcfg"):
+        parser.error("--continue-with-script and --start-from-config need a -simcfg settings file")
     errors = start_file_errors(APP_NAME, args.simcfg, args.gdsfile, args.xmlfile)
     if errors:
         parser.error("\n".join(errors))
@@ -4674,7 +4684,7 @@ def open_main_window(args):
     if args.simcfg != '':
         # read configuration first, before reading the other files
         win.setPalaceMode()  # the default; the file's own solver (Palace or Elmer) is set by the load
-        win.load_configuration_from_file(args.simcfg)
+        win.load_configuration_from_file(args.simcfg, script_choice=args.script_choice)
 
     if args.xmlfile !=  '':
         win.file_tab.set_XML_file(args.xmlfile)
