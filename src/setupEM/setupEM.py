@@ -3645,7 +3645,8 @@ class ModelEditorTab(QWidget):
                       'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
-            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension',
+                                     'wall_extension']),
             ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
         ]

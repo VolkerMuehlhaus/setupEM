@@ -11,6 +11,8 @@
 - The modules without a GUI (`join_pieces`, `thermal_results`, `script_model`, ...) can be imported without loading Qt.
 - User guide: Model Fit starts snp2le with the result file loaded (the text said it has to be loaded by hand).
 
+**Split regions, fix:**a side of the region made a port wall in setupEM after the export (e.g. with via ports of the layout on the region's edge) was a plain PEC wall in every piece and in the full check model: the wall shorted those ports, and the joined result and the full model were both wrong, in the same way. The pieces' port walls on the region's edge are now found from the ports on the edge of each piece's layout; the full model has all of the region's port walls. Where the region has a port wall but a piece none of its ports, that stretch stays PEC and now moves outward with the region's port wall extension (a length; written as `settings['wall_extension']`, needs the next gds2palace), so that all pieces and the full model have the same box.
+
 # What's New - November 10, 2026 (setupEM 0.18.0)
 
 **De-embedded results shown**: View S-Parameters lists the `_deembedded` files from the start and opens with the raw result and its `_deembedded` result together. Model Fit fits the calibrated result (`_dc_deembedded`, else `_deembedded`) of a model with port walls or a moved reference plane; the raw result still holds the uncalibrated gap ports.

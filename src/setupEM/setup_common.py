@@ -5279,6 +5279,8 @@ class MainWindowBase(QMainWindow):
                     "port_wall_extension": "port_wall_extension",
                     "reference_plane_shift": "reference_plane_shift",
                     "deembedding_length": "deembedding_length",
+                    # a piece of a split region: its stretch of a region port wall without a port, moved with it
+                    "wall_extension": "wall_extension",
                 }
 
                 # remove old settings, so that we don't keep old values that don't exist in loaded file
