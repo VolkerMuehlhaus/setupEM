@@ -200,6 +200,28 @@ def test_missing_file_in_the_gui_is_named(monkeypatch, em, tmp_path):
     assert shown == ["File not found"]
 
 
+def test_loaded_config_is_reported_in_the_log_not_a_box(monkeypatch, em, tmp_path):
+    """No "Loaded" box (it blocked a start with no display): the log says it, with a GDS file found next to it."""
+    path = elmer_config(em, tmp_path, False)
+    data = json.loads(open(path).read())
+    elsewhere = tmp_path / "elsewhere"
+    gds = tmp_path / "chip.gds"
+    gds.write_text("")
+    data["saved_values"]["GdsFile"] = str(elsewhere / "chip.gds").replace(os.sep, "/")
+    with open(path, "w") as f:
+        json.dump(data, f)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda parent, title, text, *a: shown.append(title)))
+    window = em()
+    window.create_model_tab.log_area.appendPlainText("left from before")
+    window.load_configuration_from_file(path)
+    assert shown == []
+    log = window.create_model_tab.log_area.toPlainText()
+    assert "left from before" not in log, "the log is cleared first"
+    assert log.startswith("Config loaded from ") and "palace.simcfg" in log.splitlines()[0]
+    assert "GdsFile:" in log and "not found, using" in log and "chip.gds instead" in log
+
+
 # ---------------------------------------------------------------- modules without Qt
 
 def test_modules_without_qt_do_not_load_it():

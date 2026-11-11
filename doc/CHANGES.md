@@ -4,6 +4,7 @@
 - `--help`, `--version` and a wrong argument of `setupEM`, `setupThermal`, `stackupEditor`, `resultViewer` and `fieldViewer` no longer need a display: the arguments are read before Qt starts. All five have `--version` now.
 - `setupEM -simcfg <file>` opens a settings file of an Elmer model in Elmer mode. It opened in Palace mode unless `--elmer` was given, also when started from the KLayout plug-in.
 - A `-simcfg`, `-gdsfile` or `-xmlfile` that does not exist, or a settings file of the other application, ends `setupEM` / `setupThermal` with a message on stderr and exit code 2 instead of an empty window. In the GUI, a settings file that is gone is reported as "File not found", not as "Unknown data format".
+- Loading a settings file no longer shows a "Loaded" box: the log says "Config loaded from ...", with a GDS or stackup file that was not found at its saved path and was taken from the settings file's folder instead.
 - `fieldViewer --screenshot` needs no display and no `QT_QPA_PLATFORM=offscreen`.
 - `python -m setupEM.join_pieces` and `python -m setupEM.thermal_results` have `--help` and `--version`, write their errors to stderr, and a missing file is a message, not a traceback.
 - The modules without a GUI (`join_pieces`, `thermal_results`, `script_model`, ...) can be imported without loading Qt.

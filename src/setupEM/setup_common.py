@@ -5175,13 +5175,15 @@ class MainWindowBase(QMainWindow):
                     self.apply_native_config_data(data)
                     self.load_all_tabs()
                     self._add_recent_file(RECENT_SETTINGS_KEY, file_path)
-                    loaded_message = f"Config loaded from {shorten_path_for_display(file_path)}"
-                    if path_messages:
-                        loaded_message += "\n\n" + "\n".join(path_messages)
                     if not quiet:
-                        QMessageBox.information(self, "Loaded", loaded_message)
-                        self.create_model_tab.log_area.clear()
+                        # in the log, not a message box: nothing to decide, and a box blocks a start with no display
+                        log_area = self.create_model_tab.log_area
+                        log_area.clear()
                         self.create_model_tab._reset_live_status()
+                        log_area.appendPlainText(f"Config loaded from {shorten_path_for_display(file_path)}")
+                        for message in path_messages:
+                            log_area.appendPlainText(message)
+                        log_area.appendPlainText("")
                     if not quiet and data.get("piece_of"):
                         self.create_model_tab.log_area.appendPlainText(
                             f"This is piece {data.get('piece')} of a split region. Open {data['piece_of']} to run "
