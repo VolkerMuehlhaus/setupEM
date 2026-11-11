@@ -25,7 +25,10 @@ import os
 import re
 import shutil
 
-from .join_pieces import _model_place, joined_path, read_set, result_path
+if __package__ in (None, ""):
+    from join_pieces import _model_place, joined_path, read_set, result_path
+else:
+    from .join_pieces import _model_place, joined_path, read_set, result_path
 
 FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 # settings that don't change a piece's result (where it is, what it is called, how setupEM shows it)

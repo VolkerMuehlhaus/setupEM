@@ -237,6 +237,34 @@ def test_modules_without_qt_do_not_load_it():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_setupEM_as_a_plain_script_opens_a_split_region(tmp_path):
+    """setupEM.py run as a file (as a debugger starts it, no package): the imports made when a settings file is
+    opened work too (piece_set and join_pieces were imported relative only)."""
+    split = tmp_path / "region.simcfg"
+    split.write_text(json.dumps({"application": "setupEM", "saved_values": {"unit": 1e-6}, "ports": [],
+                                 "pieces": {"pieces": [{"piece": "p1", "simcfg": "p1.simcfg"}]}}))
+    folder = os.path.abspath(os.path.join(SRC, "setupEM"))
+    code = "\n".join([
+        "import os, runpy, sys",
+        f"sys.path.insert(0, {folder!r})",
+        f"m = runpy.run_path(os.path.join({folder!r}, 'setupEM.py'), run_name='as_script')",
+        "from PySide6.QtWidgets import QApplication",
+        "app = QApplication([])",
+        "MainWindow = m['MainWindow']",
+        "opened = []",
+        "MainWindow._open_piece_set = lambda self, path, data: opened.append(path)",
+        "MainWindow._add_recent_file = lambda *a: None",
+        "win = MainWindow()",
+        f"win.load_configuration_from_file({str(split)!r})",
+        "import piece_set, join_pieces",
+        "print('opened', len(opened))",
+    ])
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path))
+    assert result.returncode == 0 and "opened 1" in result.stdout, result.stdout + result.stderr
+
+
 def test_package_main_starts_the_gui_module(monkeypatch):
     from setupEM import setupEM as module
     monkeypatch.setattr(module, "main", lambda: "started")

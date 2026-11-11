@@ -4508,7 +4508,10 @@ class CreateModelTabBase(QWidget):
 
     def join_pieces(self):
         """Join the pieces' results at the cuts (join_pieces.py) and say where the joined result is."""
-        from .join_pieces import JoinError, join_all
+        if __package__ in (None, ""):
+            from join_pieces import JoinError, join_all
+        else:
+            from .join_pieces import JoinError, join_all
         piece_set = getattr(self.MainWindow, "piece_set", None)
         if piece_set is None:
             return
@@ -5124,7 +5127,10 @@ class MainWindowBase(QMainWindow):
                     self._warn_wrong_app_file(file_path, data["application"])
                     return
                 if data.get("application", "") == self.APP_NAME and not quiet:
-                    from .piece_set import is_set_file
+                    if __package__ in (None, ""):
+                        from piece_set import is_set_file
+                    else:
+                        from .piece_set import is_set_file
                     if is_set_file(data):
                         self._open_piece_set(file_path, data)
                         return
@@ -5649,7 +5655,10 @@ class MainWindowBase(QMainWindow):
 
     def _open_piece_set(self, file_path, data):
         """Open a split region: its pieces in the Models list, the first one's settings in the tabs."""
-        from .piece_set import PieceSet
+        if __package__ in (None, ""):
+            from piece_set import PieceSet
+        else:
+            from .piece_set import PieceSet
         self.hide_info_bar()
         self._stop_preserve_mode()
         self.piece_set = PieceSet(file_path, data)
