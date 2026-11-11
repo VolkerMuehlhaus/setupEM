@@ -7,8 +7,10 @@ pieces are simulated, join_pieces connects their results at the cuts.
 The settings are those of the whole region, in <export>.simcfg, the same for every piece (frequencies, mesh, solver,
 boundaries). Two exceptions:
 - the box sides of a piece follow from the region's: a side on a cut is a port wall (PEC if no line crosses it), a
-  side on the region's edge has the region's boundary there, and where the region has a port wall but this piece
-  none of its ports, that stretch of the wall is PEC at the layout edge, as in the full model;
+  side on the region's edge has the region's boundary there. A port wall of the region is one for the piece that has
+  a port on that edge (found in the piece's layout, so a wall set in setupEM after the export counts too); for a
+  piece without a port there, that stretch of the wall is PEC, at the same place as the port wall (wall_extension
+  for the region's port_wall_extension), as in the full model;
 - a piece may have its own mesh settings (MESH_KEYS, "own_settings" in its .simcfg), e.g. a finer mesh in one
   difficult piece.
 Each piece's .simcfg (and its model script) gets the result of both, so that it is a complete model.
@@ -25,7 +27,10 @@ import os
 import re
 import shutil
 
-from .join_pieces import _model_place, joined_path, read_set, result_path
+if __package__ in (None, ""):
+    from join_pieces import _model_place, joined_path, read_set, result_path
+else:
+    from .join_pieces import _model_place, joined_path, read_set, result_path
 
 FREQUENCY_KEYS = ("fstart", "fstop", "fstep", "fpoint", "fdump")
 # settings that don't change a piece's result (where it is, what it is called, how setupEM shows it)
@@ -41,12 +46,16 @@ MESH_KEYS = ("refined_cellsize", "refined_cellsize_override", "meshsize_max", "c
              "adaptive_mesh_iterations", "amr_tol", "amr_max_dof", "adaptive_mesh_conformal")
 # what is a piece's own in any case: its layout, cell and folder; its box sides follow from the region's
 PIECE_KEYS = {"GdsFile", "cellname", "sim_path", "model_basename", "boundary", "margin", "air_around",
-              "preview_only", "no_preview", "port_wall_extension", "reference_plane_shift"}
+              "preview_only", "no_preview", "port_wall_extension", "reference_plane_shift", "wall_extension"}
 # per-side port wall settings ({side: value}): the region's, on the sides of a piece that are the region's edge; a cut
 # has none (its reference plane must stay on the cut for the join)
 SIDE_SETTINGS = ("port_wall_extension", "reference_plane_shift")
+# gds2palace's setting for a wall that is not a port wall, moved outward: a piece's stretch of a region port wall
+# without a port of the piece, where the region has a port_wall_extension
+WALL_EXTENSION = "wall_extension"
 OWN_KEY = "own_settings"
-WALLS_KEY = "wall_sides"        # the piece's sides with port wall ports (at a cut or on the region's edge)
+WALLS_KEY = "wall_sides"        # the piece's cut sides with port wall ports, as the export recorded them
+EDGE_TOL = 1e-3                 # a port on the layout edge: within this distance (gds2palace's tolerance), um
 SIDES = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
 MARGIN_SIDES = SIDES[:4]
 PORTWALL = "PORTWALL"
@@ -78,6 +87,50 @@ def _load(path):
 def _write(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
+
+
+_edge_cache = {}
+
+
+def ports_on_edge(gds, cellname, port_layers):
+    """The sides of the layout edge (bounding box of the cell) with a port shape on them: {'xmin', ...}. A shape
+    counts on a side when it reaches it, as gds2palace finds the ports of a port wall (in-plane ports and via ports
+    drawn on the edge). None when the layout can't be read."""
+    try:
+        stamp = (os.path.abspath(gds), os.path.getmtime(gds), os.path.getsize(gds), cellname, tuple(sorted(port_layers)))
+    except OSError:
+        return None
+    if stamp in _edge_cache:
+        return _edge_cache[stamp]
+    try:
+        import gdspy
+        lib = gdspy.GdsLibrary(infile=gds)
+        cell = lib.cells.get(cellname) or (lib.top_level() or [None])[0]
+        by_spec = cell.get_polygons(by_spec=True)
+    except Exception:       # noqa: BLE001 - an unreadable layout: the caller falls back to the export's record
+        return None
+    points = [p for polys in by_spec.values() for p in polys if len(p)]
+    if not points:
+        return None
+    x0, y0 = min(p[:, 0].min() for p in points), min(p[:, 1].min() for p in points)
+    x1, y1 = max(p[:, 0].max() for p in points), max(p[:, 1].max() for p in points)
+    out = set()
+    for (layer, _), polys in by_spec.items():
+        if layer not in port_layers:
+            continue
+        for p in polys:
+            if p[:, 0].min() - x0 <= EDGE_TOL:
+                out.add("xmin")
+            if x1 - p[:, 0].max() <= EDGE_TOL:
+                out.add("xmax")
+            if p[:, 1].min() - y0 <= EDGE_TOL:
+                out.add("ymin")
+            if y1 - p[:, 1].max() <= EDGE_TOL:
+                out.add("ymax")
+    if len(_edge_cache) > 64:
+        _edge_cache.clear()
+    _edge_cache[stamp] = out
+    return out
 
 
 def is_set_file(data):
@@ -222,7 +275,36 @@ class PieceSet:
             _write(row["simcfg"], data)
 
     def wall_sides(self, row):
-        return set(_load(row["simcfg"]).get(WALLS_KEY) or [])
+        """The sides of row that are port walls: its cuts with a line across them (the export's record), and the
+        region's port walls with a port of row on that edge. The full model has all of the region's."""
+        region = self.region_sides()
+        region_walls = {side for side in MARGIN_SIDES if region[side][0] == PORTWALL}
+        if row.get("full"):
+            return region_walls
+        data = _load(row["simcfg"])
+        recorded = set(data.get(WALLS_KEY) or [])
+        cuts = set(self.cut_sides(row))
+        values = data.get("saved_values", {})
+        layers = {int(p["source_layernum"]) for p in data.get("ports", []) if p.get("source_layernum") is not None}
+        on_edge = ports_on_edge(values.get("GdsFile") or "", values.get("cellname"), layers)
+        if on_edge is None:     # the layout isn't there: what the export recorded
+            on_edge = recorded
+        return (recorded & cuts) | ((region_walls - cuts) & on_edge)
+
+    def _moved_walls(self, row):
+        """{side: length} for row's stretches of a region port wall without a port of row, where the region moves
+        that port wall outward by a length (port_wall_extension): the PEC wall of row goes with it."""
+        if row.get("full"):
+            return {}
+        walls, cuts, region = self.wall_sides(row), self.cut_sides(row), self.region_sides()
+        extension = self.data.get("saved_values", {}).get("port_wall_extension") or {}
+        out = {}
+        for side in MARGIN_SIDES:
+            value = extension.get(side)
+            if region[side][0] == PORTWALL and side not in walls and side not in cuts \
+                    and isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                out[side] = float(value)
+        return out
 
     def cut_sides(self, row):
         """{side: the piece(s) on the other side} for the sides of row's box that are cuts (shared with other boxes;
@@ -263,6 +345,7 @@ class PieceSet:
     def locked_sides(self, row):
         """{side: why} for the sides of row that follow from the split and can't be set for the piece"""
         walls, cuts, region = self.wall_sides(row), self.cut_sides(row), self.region_sides()
+        moved = self._moved_walls(row)
         out = {}
         for side in SIDES:
             if side in cuts:
@@ -270,11 +353,16 @@ class PieceSet:
                              else f"cut to {cuts[side]}: PEC (no line crosses it)")
             elif region[side][0] == PORTWALL and side not in walls:
                 out[side] = f"PEC: the region's port wall at {side}, without a port of {row.get('piece')}"
+                if side in moved:
+                    out[side] += f", moved {moved[side]:g} outward with it"
+                elif (self.data.get("saved_values", {}).get("port_wall_extension") or {}).get(side) == "auto":
+                    out[side] += " (the port wall's extension 'auto' is not known here: with a length, this wall moves too)"
         return out
 
     def box_sides(self, row):
         """row's boundary, margin and air_around, as saved settings: the region's, with the cuts and the
-        stretches of a port wall without ports of this piece as walls at the layout edge"""
+        stretches of a port wall without ports of this piece as walls at the layout edge (moved outward like the
+        region's port wall there, wall_extension)"""
         walls, cuts, region = self.wall_sides(row), self.cut_sides(row), self.region_sides()
         bc, margin, air = [], [], []
         for side in SIDES:
@@ -290,6 +378,7 @@ class PieceSet:
         for key in SIDE_SETTINGS:
             out[key] = {side: v for side, v in (values.get(key) or {}).items()
                         if side not in cuts and bc[SIDES.index(side)] == PORTWALL}
+        out[WALL_EXTENSION] = self._moved_walls(row)
         return out
 
     def own(self, row):
@@ -312,7 +401,7 @@ class PieceSet:
         values.update(self.shared())
         values.update(self.own(row))
         values.update(self.box_sides(row))
-        for key in SIDE_SETTINGS:
+        for key in SIDE_SETTINGS + (WALL_EXTENSION,):
             if not values.get(key):
                 values.pop(key, None)
         return values

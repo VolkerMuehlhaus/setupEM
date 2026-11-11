@@ -123,8 +123,14 @@ def test_command_line(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Q1" in out and "100.0 K" in out
     assert (sim / "cascode_thermal_temperatures.csv").is_file()
+    capsys.readouterr()
     assert thermal_results.main([str(tmp_path / "missing.tsimcfg")]) == 1
-    assert thermal_results.main([]) == 2
+    captured = capsys.readouterr()
+    assert "missing.tsimcfg" in captured.err and captured.out == "", "a handled error goes to stderr"
+    for arguments, code in (([], 2), (["--help"], 0), (["--version"], 0)):
+        with pytest.raises(SystemExit) as exit_info:
+            thermal_results.main(arguments)
+        assert exit_info.value.code == code
 
 
 def test_setupthermal_writes_temperatures(tmp_path, monkeypatch):

@@ -44,15 +44,20 @@ def messages(monkeypatch):
     return shown
 
 
-def _gds(path, x0, x1):
+def _gds(path, x0, x1, ports=(201, 202), ymin_port=None):
+    """a line from x0 to x1 between two ground strips; ports: the layers of the port at x0 and at x1 (None: no port
+    there); ymin_port: the layer of a port on the lower layout edge"""
     lib = gdspy.GdsLibrary()
     cell = gdspy.Cell("line", exclude_from_current=True)
     lib.add(cell)
     cell.add(gdspy.Rectangle((x0, -5), (x1, 5), layer=134))
     for y0, y1 in ((-55, -15), (15, 55)):
         cell.add(gdspy.Rectangle((x0, y0), (x1, y1), layer=134))
-    cell.add(gdspy.Rectangle((x0, -5), (x0, 5), layer=201))
-    cell.add(gdspy.Rectangle((x1, -5), (x1, 5), layer=202))
+    for layer, x in zip(ports, (x0, x1)):
+        if layer:
+            cell.add(gdspy.Rectangle((x, -5), (x, 5), layer=layer))
+    if ymin_port:
+        cell.add(gdspy.Rectangle((x0 + 20, -55), (x0 + 30, -55), layer=ymin_port))
     lib.write_gds(str(path))
     return str(path).replace("\\", "/")
 
@@ -129,7 +134,8 @@ def test_box_sides_of_the_pieces_follow_the_region(tmp_path):
     s = PieceSet(make_set(tmp_path))
     p1, p2, full = s.rows()
     assert s.cut_sides(p1) == {"xmax": "p2"} and s.cut_sides(p2) == {"xmin": "p1"} and s.cut_sides(full) == {}
-    assert s.wall_sides(p1) == {"xmin", "xmax"}, "recorded from the export's port walls"
+    assert s.wall_sides(p1) == {"xmin", "xmax"}, "the cut as recorded, the region's port wall with p1's port on it"
+    assert s.wall_sides(full) == {"xmin", "xmax"}, "the full model: the region's port walls"
     assert set(s.locked_sides(p1)) == {"xmax"} and "cut to p2" in s.locked_sides(p1)["xmax"]
     sides = s.box_sides(p1)
     assert {k: sides[k] for k in ("boundary", "margin", "air_around")} == {
@@ -143,11 +149,68 @@ def test_box_sides_of_the_pieces_follow_the_region(tmp_path):
     s.store(p1, dict(s.effective_values(p1), boundary=["PORTWALL", "ABC", "PEC", "ABC", "ABC", "ABC"]))
     assert s.effective_values(p1)["boundary"][1] == "PORTWALL"
     # a region port wall without a port of this piece is PEC at the layout edge, as in the full model
-    data = json.load(open(p2["simcfg"]))
-    data["wall_sides"] = ["xmin"]
-    json.dump(data, open(p2["simcfg"], "w"))
+    _gds(tmp_path / "whole_pieces" / "p2.gds", 240, 480, ports=(201, None))
     assert s.box_sides(p2)["boundary"][1] == "PEC" and s.box_sides(p2)["margin"][1] == 0.0
     assert "without a port of p2" in s.locked_sides(p2)["xmax"]
+    assert "wall_extension" not in s.effective_values(p2), "the region's port wall isn't moved outward"
+
+
+def test_region_port_walls_set_after_the_export(tmp_path):
+    """The export records only the port walls it made (the cuts; via ports on the region's edge are not port wall
+    ports to it). A side of the region made a port wall later, in setupEM, is one for the piece with a port on that
+    edge and for the full model; it was PEC for all of them, which shorted the via ports in the wall plane."""
+    path = make_set(tmp_path)
+    folder = tmp_path / "whole_pieces"
+    for name, recorded in (("p1", ["xmax"]), ("p2", ["xmin"]), ("full", [])):
+        data = json.load(open(folder / f"{name}.simcfg"))
+        data["wall_sides"] = recorded
+        json.dump(data, open(folder / f"{name}.simcfg", "w"))
+    s = PieceSet(path)
+    p1, p2, full = s.rows()
+    walls = ["PORTWALL", "PORTWALL", "ABC", "ABC", "ABC", "ABC"]
+    assert s.wall_sides(p1) == {"xmin", "xmax"} and s.wall_sides(p2) == {"xmin", "xmax"}
+    assert [s.effective_values(r)["boundary"] for r in (p1, p2, full)] == [walls] * 3
+    assert set(s.locked_sides(p1)) == {"xmax"} and s.locked_sides(full) == {}
+    # without the layout (an export moved without its pieces): what the export recorded
+    os.rename(folder / "p1.gds", folder / "p1_away.gds")
+    assert s.wall_sides(p1) == {"xmax"}
+    os.rename(folder / "p1_away.gds", folder / "p1.gds")
+
+
+def test_port_wall_without_a_port_of_the_piece_moves_with_it(tmp_path):
+    """The region's ymin is a port wall, moved 30 outward, with a port of p1 only. p2's stretch of it is PEC and
+    moves 30 outward too (gds2palace's wall_extension): the same box as p1's at their cut, and as the full model."""
+    path = make_set(tmp_path)
+    folder = tmp_path / "whole_pieces"
+    _gds(folder / "p1.gds", 0, 240, ymin_port=203)
+    _gds(tmp_path / "whole.gds", 0, 480, ymin_port=203)
+    for name in ("p1", "full"):
+        data = json.load(open(folder / f"{name}.simcfg"))
+        data["ports"].append(dict(data["ports"][0], portnumber=3, source_layernum=203, direction="Y"))
+        json.dump(data, open(folder / f"{name}.simcfg", "w"))
+    data = json.load(open(path))
+    data["saved_values"]["boundary"] = ["PORTWALL", "PORTWALL", "PORTWALL", "ABC", "ABC", "ABC"]
+    data["saved_values"]["port_wall_extension"] = {"ymin": 30.0}
+    json.dump(data, open(path, "w"))
+    s = PieceSet(path)
+    p1, p2, full = s.rows()
+    v1, v2, vf = (s.effective_values(r) for r in (p1, p2, full))
+    assert v1["boundary"][2] == "PORTWALL" and v1["port_wall_extension"] == {"ymin": 30.0} and "wall_extension" not in v1
+    assert v2["boundary"][2] == "PEC" and v2["margin"][2] == 0.0 and v2["air_around"][2] == 0.0
+    assert v2["wall_extension"] == {"ymin": 30.0} and "port_wall_extension" not in v2
+    assert vf["boundary"][2] == "PORTWALL" and vf["port_wall_extension"] == {"ymin": 30.0} and "wall_extension" not in vf
+    assert "moved 30 outward with it" in s.locked_sides(p2)["ymin"]
+    # the pieces' files carry it, and it is the piece's own: not a shared setting, a change of p2's key only
+    s.write_pieces()
+    assert json.load(open(p2["simcfg"]))["saved_values"]["wall_extension"] == {"ymin": 30.0}
+    assert "wall_extension" not in s.shared()
+    # 'auto' is found by gds2palace in the piece with the port: not known for the others
+    data = json.load(open(path))
+    data["saved_values"]["port_wall_extension"] = {"ymin": "auto"}
+    json.dump(data, open(path, "w"))
+    s = PieceSet(path)
+    p1, p2, full = s.rows()
+    assert "wall_extension" not in s.effective_values(p2) and "'auto' is not known here" in s.locked_sides(p2)["ymin"]
 
 
 def test_shared_settings_and_an_own_mesh(tmp_path):

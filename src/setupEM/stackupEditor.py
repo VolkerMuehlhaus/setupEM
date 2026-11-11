@@ -65,9 +65,11 @@ from gds2palace import stackup_reader
 if __package__ in (None, ""):
   import stackup_writer
   import momentum_import
+  from cli_common import add_version_argument
 else:
   from . import stackup_writer
   from . import momentum_import
+  from .cli_common import add_version_argument
 
 # __package__ is None/"" when this file is run directly rather than imported
 # as part of the setupEM package, so relative import fails.
@@ -3397,6 +3399,12 @@ def main():
        simulation setup involved. Preview coloring/labeling still matches the real app (see
        _StandaloneMainWindow).
     """
+    # arguments first: --help, --version and a wrong argument need no display
+    parser = argparse.ArgumentParser(prog="stackupEditor", description="Standalone stackup XML editor")
+    parser.add_argument("xmlfile", nargs="?", default=None, help="stackup XML file to open")
+    add_version_argument(parser)
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
 
     # Pin a light color scheme so the explicit light backgrounds set on
@@ -3413,10 +3421,6 @@ def main():
         # matches setupEM.py's/setupThermal.py's main() - without this, Qt's default style
         # on Windows looks visibly different (fonts/widget chrome) from the full app
         app.setStyle(QStyleFactory.create("Windows"))
-
-    parser = argparse.ArgumentParser(description="Standalone stackup XML editor")
-    parser.add_argument("xmlfile", nargs="?", default=None, help="stackup XML file to open")
-    args = parser.parse_args()
 
     window = StackupEditorWindow(_StandaloneMainWindow(), initial_filename=args.xmlfile)
     window.show()

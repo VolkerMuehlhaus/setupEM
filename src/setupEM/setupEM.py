@@ -67,6 +67,7 @@ if __package__ in (None, ""):
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
     from config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from cli_common import add_version_argument, start_file_errors
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -85,6 +86,7 @@ else:
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
     from .config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from .cli_common import add_version_argument, start_file_errors
 
 
 '''
@@ -3643,7 +3645,8 @@ class ModelEditorTab(QWidget):
                       'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
             ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
                                           'adaptive_mesh_conformal']),
-            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension']),
+            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension',
+                                     'wall_extension']),
             ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
             ("Script control", ['preview_only', 'no_preview']),
         ]
@@ -4647,7 +4650,63 @@ def parse_python_ports_definitions (file_path):
 
 # ---------- RUN APP ----------
 
+def parse_arguments(argv=None):
+    """The command line. Read before Qt starts, so that --help, --version and a wrong argument need no display;
+    a file that cannot be opened ends here with a message on stderr and exit code 2."""
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="Set up Palace and Elmer EM models with gds2palace")
+    parser.add_argument("-gdsfile",  type=str, default = '', help="GDSII file to read")
+    parser.add_argument("-xmlfile",  type=str, default = '', help="XML stackup file to read")
+    parser.add_argument("-simcfg",   type=str, default = '', help="*.simcfg file that is loaded prior to reading files")
+    # Optional argument --elmer to enable menu with solver choices
+    parser.add_argument("--elmer",   action="store_true", help="Set Elmer as default simulator")
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument("--continue-with-script", dest="script_choice", action="store_const", const="script",
+                        help="with -simcfg: if the settings file is linked to a model script (Create Model wrote "
+                             "it), edit that script in place, with the ports and layout settings of the settings "
+                             "file, without asking")
+    choice.add_argument("--start-from-config", dest="script_choice", action="store_const", const="config",
+                        help="with -simcfg: a new model from the settings file, also if it is linked to a model "
+                             "script")
+    add_version_argument(parser)
+    args = parser.parse_args(argv)
+    if args.script_choice and not args.simcfg.lower().endswith(".simcfg"):
+        parser.error("--continue-with-script and --start-from-config need a -simcfg settings file")
+    errors = start_file_errors(APP_NAME, args.simcfg, args.gdsfile, args.xmlfile)
+    if errors:
+        parser.error("\n".join(errors))
+    return args
+
+
+def open_main_window(args):
+    """The main window with the files of the command line loaded."""
+    win = MainWindow()
+    win.show()
+
+    if args.simcfg != '':
+        # read configuration first, before reading the other files
+        win.setPalaceMode()  # the default; the file's own solver (Palace or Elmer) is set by the load
+        win.load_configuration_from_file(args.simcfg, script_choice=args.script_choice)
+
+    if args.xmlfile !=  '':
+        win.file_tab.set_XML_file(args.xmlfile)
+        win.read_XML()
+
+    if args.gdsfile !=  '':
+        win.file_tab.set_gds_file(args.gdsfile)
+
+    if args.elmer:
+        # start in Elmer mode (instead of default choice Palace)
+        win.setElmerMode()
+    elif args.simcfg == '':
+        win.setPalaceMode()
+    # else: the solver of the loaded file stays (a settings file with "elmer_mode", an Elmer model script)
+
+    return win
+
+
 def main():
+    args = parse_arguments()
+
     app = QApplication(sys.argv)
 
     # Pin a light color scheme so the explicit light backgrounds set on
@@ -4663,40 +4722,7 @@ def main():
     if sys.platform.startswith("win"):
         app.setStyle(QStyleFactory.create("Windows"))
 
-    # evaluate commandline
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-gdsfile",  type=str, default = '', help="GDSII file to read")
-    parser.add_argument("-xmlfile",  type=str, default = '', help="XML stackup file to read")
-    parser.add_argument("-simcfg",   type=str, default = '', help="*.simcfg file that is loaded prior to reading files")
-    # Optional argument --elmer to enable menu with solver choices
-    parser.add_argument("--elmer",   action="store_true", help="Set Elmer as default simulator")
-    args = parser.parse_args()
-
-    # evaluate optional parameters
-    gdsfile = args.gdsfile
-    xmlfile = args.xmlfile
-    simcfg  = args.simcfg
-    elmer   = args.elmer
-
-    win = MainWindow()
-    win.show()
-
-    if simcfg != '':
-        # read configuration first, before reading the other files
-        win.load_configuration_from_file(simcfg)
-
-    if xmlfile !=  '':
-        win.file_tab.set_XML_file(xmlfile)
-        win.read_XML()
-
-    if gdsfile !=  '':
-        win.file_tab.set_gds_file(gdsfile)
-
-    if elmer:
-        # start in Elmer mode (instead of default choice Palace)
-        win.setElmerMode()
-    else:
-        win.setPalaceMode()
+    win = open_main_window(args)  # noqa: F841 (kept alive until the event loop ends)
 
     sys.exit(app.exec())
 

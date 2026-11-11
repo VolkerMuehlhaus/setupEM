@@ -96,9 +96,11 @@ from pyvistaqt import QtInteractor
 if __package__ in (None, ""):
     from palace_results import find_paraview_files, is_amr_iteration_path
     from thermal_results import find_thermal_paraview_file
+    from cli_common import add_version_argument
 else:
     from .palace_results import find_paraview_files, is_amr_iteration_path
     from .thermal_results import find_thermal_paraview_file
+    from .cli_common import add_version_argument
 
 
 # Axis name -> unit normal vector, for both the clip plane and the slider's bounds lookup.
@@ -2635,24 +2637,8 @@ class _StandaloneMainWindow:
 
 
 def main():
-    app = QApplication(sys.argv)
-
-    # Pin a light color scheme so the explicit light backgrounds set on
-    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
-    # auto-palette on accounts where Windows' per-user dark-mode setting is
-    # on (PySide6 6.5+ only; older versions just skip this and rely on the
-    # explicit "color:" rules already set on those field stylesheets).
-    try:
-        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
-    except AttributeError:
-        pass
-
-    if sys.platform.startswith("win"):
-        # matches setupEM.py's/setupThermal.py's/result_viewer.py's main() - without
-        # this, Qt's default style on Windows looks visibly different from the full app
-        app.setStyle(QStyleFactory.create("Windows"))
-
-    parser = argparse.ArgumentParser(description="Standalone 3D field result viewer")
+    # arguments first: --help, --version and a wrong argument need no display
+    parser = argparse.ArgumentParser(prog="fieldViewer", description="Standalone 3D field result viewer")
     parser.add_argument("file_path", nargs="?",
                          help="path to a .pvd/.pvtu/.vtu field-result file. If omitted, "
                               "use --run-path with --source to resolve one automatically.")
@@ -2718,6 +2704,7 @@ def main():
     parser.add_argument("--screenshot",
                          help="render off-screen and save a PNG here instead of opening an "
                               "interactive window, then exit - works with no display")
+    add_version_argument(parser)
     args = parser.parse_args()
 
     if (args.clip_position is not None or args.clip_max) and not args.clip_axis:
@@ -2758,12 +2745,44 @@ def main():
     if not file_paths:
         parser.error("no file_path given, and none could be resolved from --run-path")
 
-    def die(message):
-        print(f"Error: {message}", file=sys.stderr)
-        sys.exit(1)
+    if args.screenshot:
+        # rendered off-screen (see FieldViewerWindow's off_screen): no display needed, so don't let Qt look for one
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    app = QApplication(sys.argv)
+
+    # Pin a light color scheme so the explicit light backgrounds set on
+    # QLineEdit/QComboBox fields elsewhere aren't fighting an inherited dark
+    # auto-palette on accounts where Windows' per-user dark-mode setting is
+    # on (PySide6 6.5+ only; older versions just skip this and rely on the
+    # explicit "color:" rules already set on those field stylesheets).
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:
+        pass
+
+    if sys.platform.startswith("win"):
+        # matches setupEM.py's/setupThermal.py's/result_viewer.py's main() - without
+        # this, Qt's default style on Windows looks visibly different from the full app
+        app.setStyle(QStyleFactory.create("Windows"))
 
     window = FieldViewerWindow(_StandaloneMainWindow(), file_paths, args.source,
                                 off_screen=bool(args.screenshot))
+
+    def close_and_exit(code):
+        # The window is deleted here, before the application: left to Qt's own cleanup at exit, a finished
+        # --screenshot run crashed there with no display (Linux, PySide6 6.12: PNG written, then exit code 139).
+        nonlocal window
+        window.close()
+        window.deleteLater()
+        window = None
+        app.processEvents()
+        sys.exit(code)
+
+    def die(message):
+        print(f"Error: {message}", file=sys.stderr)
+        close_and_exit(1)
+
     if window._full_mesh is None:
         die(window._load_error or "failed to load the field-result file")
 
@@ -2873,8 +2892,7 @@ def main():
                 break
         window.plotter.screenshot(args.screenshot)
         print(f"Saved screenshot to {args.screenshot}")
-        window.close()
-        sys.exit(0)
+        close_and_exit(0)
 
     window.show()
     sys.exit(app.exec())

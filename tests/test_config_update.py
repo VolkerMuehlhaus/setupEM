@@ -81,3 +81,69 @@ def test_newer_configs_and_scripts(tmp_path):
     # the script saved after the config: the config is no longer newer
     _touch(tmp_path / "chip_em.py", script_text, 1)
     assert newer_configs(str(tmp_path / "chip_em.py"), str(gds), [str(tmp_path)]) == []
+
+
+# ---------- linked scripts and the settings compared ----------
+
+from setupEM.config_update import (linked_scripts, model_settings_snapshot, settings_differences,  # noqa: E402
+                                   _same_setting)
+
+
+def test_linked_scripts(tmp_path):
+    (tmp_path / "chip_em.py").write_text("")
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "amp.py").write_text("")
+    config = str(tmp_path / "export.simcfg")
+    assert linked_scripts(config, {}) == []
+    assert linked_scripts(config, {"written_with": "chip_em.py", "model_script": "models/amp.py"}) == [
+        (str(tmp_path / "chip_em.py"), True), (os.path.normpath(str(tmp_path / "models" / "amp.py")), False)]
+    assert linked_scripts(config, {"model_script": "missing.py"}) == []
+    assert linked_scripts(config, {"written_with": "models/amp.py"}) == [], "written_with: same folder only"
+    assert linked_scripts(config, {"written_with": "chip_em.py", "model_script": "chip_em.py"}) == [
+        (str(tmp_path / "chip_em.py"), True)]
+
+
+def test_model_settings_snapshot(tmp_path):
+    script = tmp_path / "amp.py"
+    script.write_text("")
+    snapshot = tmp_path / "amp.simcfg"
+    data = {"application": "setupEM", "written_with": "amp.py", "saved_values": {"fstop": 7.0}}
+    snapshot.write_text(json.dumps(data))
+    os.utime(script, (1000, 1000))
+    os.utime(snapshot, (1000, 1000))
+    assert model_settings_snapshot(str(script)) == data
+    os.utime(script, (2000, 2000))
+    assert model_settings_snapshot(str(script)) is None, "the script was changed after"
+    os.utime(snapshot, (3000, 3000))
+    assert model_settings_snapshot(str(script), ".tsimcfg", "setupThermal") is None
+    snapshot.write_text(json.dumps(dict(data, written_with="other.py")))
+    os.utime(snapshot, (3000, 3000))
+    assert model_settings_snapshot(str(script)) is None, "not written with this script"
+
+
+def test_same_setting():
+    assert _same_setting(100.0, 100) and _same_setting(1e-6, 1.0000000000001e-6)
+    assert not _same_setting(100.0, 100.1)
+    assert _same_setting(50, [50.0, 50.0, 50.0, 50.0]) and _same_setting([50, 50], 50)
+    assert not _same_setting(50, [50.0, 40.0, 50.0, 50.0])
+    assert _same_setting(["PEC", "ABC"], ("PEC", "ABC")) and not _same_setting(["PEC"], ["ABC"])
+    assert _same_setting({"Metal1": 1.0}, {"Metal1": 1}) and not _same_setting({"a": 1}, {"b": 1})
+    assert _same_setting("x", "x") and not _same_setting(None, 0)
+
+
+def test_settings_differences():
+    script = {"elmer_mode": False, "saved_values": {
+        "fstop": 100.0, "margin": [50.0] * 4, "GdsFile": "a.gds", "solver_maxits": 400, "order": 2,
+        "boundary": ["ABC"] * 6}}
+    config = {"saved_values": {
+        "fstop": 100.0, "margin": 50, "GdsFile": "b.gds", "solver_maxits": 999, "unit": 1e-6, "amr_tol": 0.01}}
+    assert settings_differences(script, config) == [], \
+        "layout keys, preference settings and settings only one file has are not compared"
+    config["saved_values"].update(order=3, boundary=["ABC"] * 4 + ["PORTWALL", "ABC"])
+    config["elmer_mode"] = True
+    assert settings_differences(script, config) == [
+        "solver: Palace in the script, Elmer in the config",
+        "boundary: ['ABC', 'ABC', 'ABC', 'ABC', 'ABC', 'ABC'] in the script, "
+        "['ABC', 'ABC', 'ABC', 'ABC', 'PORTWALL', 'ABC'] in the config",
+        "order: 2 in the script, 3 in the config"]
+

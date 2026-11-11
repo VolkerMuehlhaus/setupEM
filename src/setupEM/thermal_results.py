@@ -436,16 +436,23 @@ def temperatures_from_tsimcfg(tsimcfg_path):
 
 def main(argv=None):
     """python -m setupEM.thermal_results <model>.tsimcfg: temperature per heat source, also as a CSV file."""
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 1:
-        print("usage: python -m setupEM.thermal_results <model>.tsimcfg\n"
-              "  writes the temperature per heat source of the model's Elmer result to <model>_temperatures.csv "
-              "next to the model script, with the instance names of the thermal export")
-        return 2
+    import argparse
+    if __package__ in (None, ""):
+        from cli_common import add_version_argument
+    else:
+        from .cli_common import add_version_argument
+    parser = argparse.ArgumentParser(
+        prog="python -m setupEM.thermal_results",
+        description="Writes the temperature per heat source of the model's Elmer result to <model>_temperatures.csv "
+                    "next to the model script, with the instance names of the thermal export. "
+                    "Exit code 0 written, 1 not written (the reason on stderr), 2 wrong arguments.")
+    parser.add_argument("tsimcfg", help="<model>.tsimcfg of a setupThermal model that has been simulated")
+    add_version_argument(parser)
+    args = parser.parse_args(argv)
     try:
-        rows, t_ref, csv_path = temperatures_from_tsimcfg(argv[0])
+        rows, t_ref, csv_path = temperatures_from_tsimcfg(args.tsimcfg)
     except ValueError as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print("\n".join(format_temperature_table(rows)))
     print(f"\nwritten: {csv_path}")

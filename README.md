@@ -250,7 +250,7 @@ If snp2le isn't installed, setupEM offers to install it for you via pip:
 
 Choosing **Install** runs `pip install snp2le` in the Log panel and, once it succeeds, continues automatically - no need to click Model Fit a second time. Choosing **Cancel** logs the manual install command and the project link instead.
 
-Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and launches the snp2le GUI in that file's directory. snp2le's GUI has no command-line option to preload a file, so the exact path is printed to the Log panel - load it via snp2le's own file picker:
+Once snp2le is available, Model Fit locates the raw (not `_dc`, not `_deembedded`) Touchstone result file for the current run and starts the snp2le GUI with that file loaded, in that file's directory. The Log panel names the file:
 
 <img src="./doc/png/modelfit2.png" alt="snp2le starting" width="700">
 

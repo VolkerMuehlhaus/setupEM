@@ -1,3 +1,18 @@
+# What's New - not released yet (setupEM 0.18.1)
+
+**Command line fixes** (from issue #52, use without a display):
+- `--help`, `--version` and a wrong argument of `setupEM`, `setupThermal`, `stackupEditor`, `resultViewer` and `fieldViewer` no longer need a display: the arguments are read before Qt starts. All five have `--version` now.
+- `setupEM -simcfg <file>` opens a settings file of an Elmer model in Elmer mode. It opened in Palace mode unless `--elmer` was given, also when started from the KLayout plug-in.
+- A `-simcfg`, `-gdsfile` or `-xmlfile` that does not exist, or a settings file of the other application, ends `setupEM` / `setupThermal` with a message on stderr and exit code 2 instead of an empty window. In the GUI, a settings file that is gone is reported as "File not found", not as "Unknown data format".
+- Loading a settings file no longer shows a "Loaded" box: the log says "Config loaded from ...", with a GDS or stackup file that was not found at its saved path and was taken from the settings file's folder instead.
+- Opening a `.simcfg` continues with the model script only when the file is linked to it, and asks only when the two have other settings (the question lists them). Create Model links: besides `<model>.simcfg` it writes the script's name (`"model_script"`) into the `.simcfg` the model was opened from, e.g. the KLayout plug-in's export, which keeps it on the next export. A script that only reads the same GDSII file is no longer taken for the model; the log names it. New options `--continue-with-script` and `--start-from-config` answer the question on the command line.
+- `fieldViewer --screenshot` needs no display and no `QT_QPA_PLATFORM=offscreen`.
+- `python -m setupEM.join_pieces` and `python -m setupEM.thermal_results` have `--help` and `--version`, write their errors to stderr, and a missing file is a message, not a traceback.
+- The modules without a GUI (`join_pieces`, `thermal_results`, `script_model`, ...) can be imported without loading Qt.
+- User guide: Model Fit starts snp2le with the result file loaded (the text said it has to be loaded by hand).
+
+**Split regions, fix:**a side of the region made a port wall in setupEM after the export (e.g. with via ports of the layout on the region's edge) was a plain PEC wall in every piece and in the full check model: the wall shorted those ports, and the joined result and the full model were both wrong, in the same way. The pieces' port walls on the region's edge are now found from the ports on the edge of each piece's layout; the full model has all of the region's port walls. Where the region has a port wall but a piece none of its ports, that stretch stays PEC and now moves outward with the region's port wall extension (a length; written as `settings['wall_extension']`, needs gds2palace 0.10.1), so that all pieces and the full model have the same box.
+
 # What's New - November 10, 2026 (setupEM 0.18.0)
 
 **De-embedded results shown**: View S-Parameters lists the `_deembedded` files from the start and opens with the raw result and its `_deembedded` result together. Model Fit fits the calibrated result (`_dc_deembedded`, else `_deembedded`) of a model with port walls or a moved reference plane; the raw result still holds the uncalibrated gap ports.
