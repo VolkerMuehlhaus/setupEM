@@ -72,8 +72,10 @@ from PySide6.QtCore import Qt, QTimer, QProcess
 # throughout setupEM.py/setup_common.py for sibling imports.
 if __package__ in (None, ""):
     from palace_results import find_output_dir, find_live_iteration_dirs, read_port_s_data
+    from cli_common import add_version_argument
 else:
     from .palace_results import find_output_dir, find_live_iteration_dirs, read_port_s_data
+    from .cli_common import add_version_argument
 
 
 # ------------------------------------------------------------------
@@ -1435,6 +1437,14 @@ class _StandaloneMainWindow:
 
 
 def main():
+    # arguments first: --help, --version and a wrong argument need no display
+    parser = argparse.ArgumentParser(prog="resultViewer", description="Standalone S-parameter result viewer")
+    parser.add_argument("target_dir", nargs="?", default=os.getcwd(),
+                         help="directory to search recursively for Touchstone (.sNp) "
+                              "files (default: current directory)")
+    add_version_argument(parser)
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
 
     # Pin a light color scheme so the explicit light backgrounds set on
@@ -1451,12 +1461,6 @@ def main():
         # matches setupEM.py's/setupThermal.py's main() - without this, Qt's default
         # style on Windows looks visibly different (fonts/widget chrome) from the full app
         app.setStyle(QStyleFactory.create("Windows"))
-
-    parser = argparse.ArgumentParser(description="Standalone S-parameter result viewer")
-    parser.add_argument("target_dir", nargs="?", default=os.getcwd(),
-                         help="directory to search recursively for Touchstone (.sNp) "
-                              "files (default: current directory)")
-    args = parser.parse_args()
 
     window = ResultViewerWindow(_StandaloneMainWindow(args.target_dir))
     window.show()

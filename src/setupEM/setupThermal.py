@@ -66,6 +66,7 @@ if __package__ in (None, ""):
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
         device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from script_model import ScriptModel
+    from cli_common import add_version_argument, start_file_errors
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -80,6 +81,7 @@ else:
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
         device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from .script_model import ScriptModel
+    from .cli_common import add_version_argument, start_file_errors
 
 
 '''
@@ -1964,7 +1966,43 @@ def parse_python_thermal_definitions (file_path):
 
 # ---------- RUN APP ----------
 
+def parse_arguments(argv=None):
+    """The command line. Read before Qt starts, so that --help, --version and a wrong argument need no display;
+    a file that cannot be opened ends here with a message on stderr and exit code 2."""
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="Set up Elmer thermal models with gds2palace")
+    parser.add_argument("-gdsfile",  type=str, default = '', help="GDSII file to read")
+    parser.add_argument("-xmlfile",  type=str, default = '', help="XML stackup file to read")
+    parser.add_argument("-simcfg",   type=str, default = '', help="*.tsimcfg file that is loaded prior to reading files")
+    add_version_argument(parser)
+    args = parser.parse_args(argv)
+    errors = start_file_errors(APP_NAME, args.simcfg, args.gdsfile, args.xmlfile)
+    if errors:
+        parser.error("\n".join(errors))
+    return args
+
+
+def open_main_window(args):
+    """The main window with the files of the command line loaded."""
+    win = MainWindow()
+    win.show()
+
+    if args.simcfg != '':
+        # read configuration first, before reading the other files
+        win.load_configuration_from_file(args.simcfg)
+
+    if args.xmlfile !=  '':
+        win.file_tab.set_XML_file(args.xmlfile)
+        win.read_XML()
+
+    if args.gdsfile !=  '':
+        win.file_tab.set_gds_file(args.gdsfile)
+
+    return win
+
+
 def main():
+    args = parse_arguments()
+
     app = QApplication(sys.argv)
 
     # Pin a light color scheme so the explicit light backgrounds set on
@@ -1980,31 +2018,7 @@ def main():
     if sys.platform.startswith("win"):
         app.setStyle(QStyleFactory.create("Windows"))
 
-    # evaluate commandline
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-gdsfile",  type=str, default = '', help="GDSII file to read")
-    parser.add_argument("-xmlfile",  type=str, default = '', help="XML stackup file to read")
-    parser.add_argument("-simcfg",   type=str, default = '', help="*.tsimcfg file that is loaded prior to reading files")
-    args = parser.parse_args()
-
-    # evaluate optional parameters
-    gdsfile = args.gdsfile
-    xmlfile = args.xmlfile
-    simcfg  = args.simcfg
-
-    win = MainWindow()
-    win.show()
-
-    if simcfg != '':
-        # read configuration first, before reading the other files
-        win.load_configuration_from_file(simcfg)
-
-    if xmlfile !=  '':
-        win.file_tab.set_XML_file(xmlfile)
-        win.read_XML()
-
-    if gdsfile !=  '':
-        win.file_tab.set_gds_file(gdsfile)
+    win = open_main_window(args)  # noqa: F841 (kept alive until the event loop ends)
 
     sys.exit(app.exec())
 

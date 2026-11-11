@@ -180,15 +180,26 @@ def join_all(set_path):
 
 
 def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 1:
-        print(__doc__)
-        return 2
+    """python -m setupEM.join_pieces <export>.simcfg: 0 joined, 1 not joined (the reason on stderr), 2 wrong
+    arguments."""
+    import argparse
+    if __package__ in (None, ""):
+        from cli_common import add_version_argument
+    else:
+        from .cli_common import add_version_argument
+    parser = argparse.ArgumentParser(prog="python -m setupEM.join_pieces", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("simcfg", help="<export>.simcfg of a split region (with a pieces section)")
+    add_version_argument(parser)
+    args = parser.parse_args(argv)
     try:
-        for message in join_all(argv[0]):
+        for message in join_all(args.simcfg):
             print(message)
     except JoinError as e:
-        print(f"not joined: {e}")
+        print(f"not joined: {e}", file=sys.stderr)
+        return 1
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"not joined: {args.simcfg} cannot be read: {e}", file=sys.stderr)
         return 1
     return 0
 

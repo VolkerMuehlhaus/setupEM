@@ -5093,6 +5093,10 @@ class MainWindowBase(QMainWindow):
         # with (its own script if Create Model wrote the file with it, else the file), the set stays open
         saved_values = self.saved_values
         if file_path:
+            if not os.path.isfile(file_path):
+                # e.g. a recent file that was moved; said as that, not as "Unknown data format" further down
+                QMessageBox.warning(self, "File not found", f"File not found:\n{file_path}")
+                return
             if ask_unsaved and not self.confirm_unsaved_script():
                 return
 

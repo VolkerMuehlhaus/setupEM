@@ -21,7 +21,14 @@ setupEM package
 A Python tool for EM setup using gds2palace.
 """
 
-from .setupEM import main
+
+
+def main():
+    """Start the setupEM GUI. Imported here only when called, so that the modules without Qt (join_pieces,
+    thermal_results, script_model, ...) can be imported without loading it."""
+    from .setupEM import main as _main
+    return _main()
+
 
 __all__ = ["main"]
 __version__ = "0.18.0"
