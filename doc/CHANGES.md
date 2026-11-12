@@ -1,4 +1,4 @@
-# What's New - not released yet
+# What's New - November 12, 2026 (setupEM 0.18.2)
 
 **Command line fixes** (from issue #52):
 - A script from File > Export runs without a display: gds2palace 0.10.4 and newer builds the model without the gmsh window on Linux with no display (ssh, container, batch job). Before, the script stopped with "Can't open display". The exported script also has the switch as a comment, `# settings['no_gui'] = True`, for unattended runs where a display exists.
