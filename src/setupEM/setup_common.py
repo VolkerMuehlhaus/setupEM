@@ -436,6 +436,12 @@ def is_openems_model_script(file_path):
     return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
 
 
+# File > Export: the switch for running the exported script with no gmsh window, commented out (an import
+# reads no settings from comments). gds2palace 0.10.4 and newer turns it on by itself without a display.
+NO_GUI_EXPORT_LINE = ("# settings['no_gui'] = True   # no gmsh window, for unattended runs "
+                      "(on Linux without a display, gds2palace 0.10.4 and newer skips it by itself)")
+
+
 # Which kind of model each app handles - MainWindow.MODEL_KIND, and the kind
 # detect_model_script_kind() reports for a script.
 MODEL_KIND_EM = "EM"

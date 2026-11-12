@@ -60,7 +60,7 @@ if __package__ in (None, ""):
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL,
+        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
         protected_script_message,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
@@ -75,7 +75,7 @@ else:
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL,
+        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
         protected_script_message,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
@@ -1234,6 +1234,8 @@ class ModelEditorTab(QWidget):
 
         add_text("\n# ===================== input files and settings =======================")
         add_text("settings={}")
+        if forExport:
+            add_text(NO_GUI_EXPORT_LINE)
 
 
         # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before

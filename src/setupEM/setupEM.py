@@ -62,7 +62,7 @@ if __package__ in (None, ""):
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths,
+        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
@@ -81,7 +81,7 @@ else:
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths,
+        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
@@ -3589,6 +3589,8 @@ class ModelEditorTab(QWidget):
 
         add_text("\n# ===================== input files and settings =======================")
         add_text("settings={}")
+        if forExport:
+            add_text(NO_GUI_EXPORT_LINE)
 
 
         # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before
