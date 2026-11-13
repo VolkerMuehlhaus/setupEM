@@ -66,7 +66,7 @@ if __package__ in (None, ""):
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
-    from config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from cli_common import add_version_argument, start_file_errors
 else:
     from .setup_common import (
@@ -85,7 +85,7 @@ else:
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
-    from .config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from .config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from .cli_common import add_version_argument, start_file_errors
 
 
@@ -4520,7 +4520,7 @@ class MainWindow(MainWindowBase):
         layout = {key: saved[key] for key in LAYOUT_KEYS if key in saved}
         for key in ("GdsFile", "SubstrateFile"):
             if layout.get(key):
-                layout[key] = os.path.join(base_dir, layout[key]).replace("\\", "/")
+                layout[key] = join_path(base_dir, layout[key]).replace("\\", "/")
         resolve_missing_file_paths(layout, base_dir)
         self.saved_values.update(layout)
         self.ports_tab.update_port_from_import(data.get("ports", []))

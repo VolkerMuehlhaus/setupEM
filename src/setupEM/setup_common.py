@@ -64,13 +64,13 @@ if __package__ in (None, ""):
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from script_probe import probe_script
     from config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
-                               settings_differences)
+                               settings_differences, is_absolute_path)
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
     from .config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
-                                settings_differences)
+                                settings_differences, is_absolute_path)
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -364,20 +364,35 @@ def resolve_missing_file_paths(saved_values, reference_dir, keys=("GdsFile", "Su
     messages describing each substitution made, for the caller to show the user -
     silently swapping in a different file (even same-named) without saying so could
     be confusing if it's actually a stale/different copy.
+
+    A stackup not found there is looked up among the stackups that ship with gds2palace (the same name): a
+    script written on Windows names D:/.../XML_stackup/latest/IHP/<name>, the same file is elsewhere on Linux.
     """
     messages = []
     for key in keys:
         old_path = saved_values.get(key)
         if not old_path or os.path.isfile(old_path):
             continue
-        candidate = os.path.join(reference_dir, os.path.basename(old_path))
-        if os.path.isfile(candidate):
+        name = os.path.basename(str(old_path).replace('\\', '/'))
+        candidate = os.path.join(reference_dir, name)
+        if not os.path.isfile(candidate) and key == "SubstrateFile":
+            candidate = _bundled_stackup_path(name)
+        if candidate and os.path.isfile(candidate):
             saved_values[key] = candidate.replace('\\', '/')
             messages.append(
                 f"{key}: {shorten_path_for_display(old_path)} not found, "
                 f"using {shorten_path_for_display(candidate)} instead"
             )
     return messages
+
+
+def _bundled_stackup_path(name):
+    """Path of the stackup of that name that ships with gds2palace (0.9.1 and later), else None."""
+    try:
+        path = gds2palace.utilities.get_stackup_path(name)
+    except Exception:       # noqa: BLE001 - older gds2palace, or no stackup of that name
+        return None
+    return str(path) if path and os.path.isfile(str(path)) else None
 
 
 def collect_module_level_constants(file_path):
@@ -5364,7 +5379,7 @@ class MainWindowBase(QMainWindow):
                                     # a relative path in the script is relative to the script's
                                     # folder (also "../XML_stackup/..."), not to setupEM's own
                                     # working directory
-                                    if not os.path.isabs(import_value):
+                                    if not is_absolute_path(import_value):
                                         import_value = os.path.normpath(
                                             os.path.join(modelcode_path, import_value)).replace('\\', '/')
                                     saved_values[varname] = import_value
@@ -5568,7 +5583,7 @@ class MainWindowBase(QMainWindow):
             return int(value)
         if key in ("GdsFile", "SubstrateFile"):
             value = str(value)
-            if not os.path.isabs(value):
+            if not is_absolute_path(value):
                 value = os.path.normpath(os.path.join(modelcode_path, value)).replace('\\', '/')
             return value
         if isinstance(value, tuple):
