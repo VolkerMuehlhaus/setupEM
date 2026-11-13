@@ -5390,7 +5390,12 @@ class MainWindowBase(QMainWindow):
                 # often don't resolve here even as a full absolute path (the bare-relative-
                 # path fallback above only fires when there's no directory component at
                 # all) - fall back to a same-named file next to this model script instead
+                script_paths = {key: saved_values.get(key) for key in ("GdsFile", "SubstrateFile")}
                 path_messages = resolve_missing_file_paths(saved_values, modelcode_path)
+                # the paths swapped here are not what the script says: edited in place, the script gets the
+                # path the GUI shows (see _start_preserve_mode)
+                self._swapped_script_paths = {key: path for key, path in script_paths.items()
+                                              if path and saved_values.get(key) != path}
                 for key, label in (("GdsFile", "GDSII file"), ("SubstrateFile", "Stackup file")):
                     path = saved_values.get(key)
                     if path and not os.path.isfile(path):
@@ -6193,6 +6198,12 @@ class MainWindowBase(QMainWindow):
         self.save_all_tabs()
         self.script_model = model
         self.preserve_baseline = self._preserve_snapshot()
+        # a GDS / stackup path of another machine, swapped on import for the same-named file next to the script
+        # (resolve_missing_file_paths): the script still has the old path, so the swap is a change to write,
+        # else the Code tab and Create Model keep a path the GUI doesn't show
+        for key, path in (getattr(self, "_swapped_script_paths", None) or {}).items():
+            self.preserve_baseline["values"][key] = path
+        self._swapped_script_paths = {}
         # Create Model always writes back to this script
         self.create_model_tab.set_output_locked(True)
         self.load_script_runs()
