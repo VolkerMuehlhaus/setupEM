@@ -1,4 +1,4 @@
-# What's New - November 12, 2026 (setupEM 0.18.2)
+# What's New - November 13, 2026 (setupEM 0.18.2)
 
 **Ports and thermal objects:** Return in a text field of the form (source layer, Z0, voltage; in setupThermal layer, power, temperature) applies the settings to the selected row, like the Apply button. With no row selected, the status bar says so.
 
