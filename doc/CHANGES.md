@@ -1,5 +1,7 @@
 # What's New - November 12, 2026 (setupEM 0.18.2)
 
+**Ports and thermal objects:** Return in a text field of the form (source layer, Z0, voltage; in setupThermal layer, power, temperature) applies the settings to the selected row, like the Apply button. With no row selected, the status bar says so.
+
 **Command line fixes** (from issue #52):
 - A script from File > Export runs without a display: gds2palace 0.10.4 and newer builds the model without the gmsh window on Linux with no display (ssh, container, batch job). Before, the script stopped with "Can't open display". The exported script also has the switch as a comment, `# settings['no_gui'] = True`, for unattended runs where a display exists.
 - `combine_extend_snp.py` (`combine_snp`, in `scripts/`) has `--help` and `--version`, and takes the folder to search as an optional argument. Before, any option was ignored and the conversion ran. Same file as in gds2palace 0.10.4.

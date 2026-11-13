@@ -591,6 +591,11 @@ class PortsTab(QWidget):
         self.buttons_layout.setAlignment(Qt.AlignRight)
         self.apply_button.setFixedWidth(button_width)
         self.apply_button.clicked.connect(self.apply_port_values_to_table)
+        # Return in a text field of the form applies it, like the button. Not the combo boxes (Return there also
+        # confirms an open list), and not on focus loss (a click on another row would write into the old one).
+        self.apply_button.setToolTip("Write these settings into the selected row. Return in a text field does the same.")
+        for edit in (self.sourcelayer_edit, self.impedance_edit, self.voltage_edit):
+            edit.returnPressed.connect(self.apply_from_return)
 
         self.remove_button = QPushButton(text="Remove")
         self.buttons_layout.addWidget(self.remove_button)
@@ -694,6 +699,14 @@ class PortsTab(QWidget):
 
         # set this AFTER apply_port_values_to_table(), not earlier!
         self.portslist.itemSelectionChanged.connect(self.portslist_selection_changed)
+
+
+    def apply_from_return(self):
+        """Return in a text field of the form: apply, or say why nothing happens."""
+        if not self.portslist.selectedIndexes():
+            self.MainWindow.statusBar().showMessage("Select a row in the table first, then Apply.", 5000)
+            return
+        self.apply_port_values_to_table()
 
 
     # callback when applying changes to the selected port
