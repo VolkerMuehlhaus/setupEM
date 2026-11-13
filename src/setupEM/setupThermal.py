@@ -60,7 +60,7 @@ if __package__ in (None, ""):
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL,
+        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
         protected_script_message,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
@@ -75,7 +75,7 @@ else:
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL,
+        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
         protected_script_message,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
@@ -256,6 +256,11 @@ class PortsTab(QWidget):
         self.buttons_layout.setAlignment(Qt.AlignRight)
         self.apply_button.setFixedWidth(button_width)
         self.apply_button.clicked.connect(self.apply_port_values_to_table)
+        # Return in a text field of the form applies it, like the button. Not the combo boxes (Return there also
+        # confirms an open list), and not on focus loss (a click on another row would write into the old one).
+        self.apply_button.setToolTip("Write these settings into the selected row. Return in a text field does the same.")
+        for edit in (self.sourcelayer_edit, self.power_edit, self.temp_edit):
+            edit.returnPressed.connect(self.apply_from_return)
 
         self.remove_button = QPushButton(text="Remove")
         self.buttons_layout.addWidget(self.remove_button)
@@ -299,6 +304,14 @@ class PortsTab(QWidget):
 
         # set this AFTER apply_port_values_to_table(), not earlier!
         self.thermalobjectslist.itemSelectionChanged.connect(self.portslist_selection_changed)
+
+
+    def apply_from_return(self):
+        """Return in a text field of the form: apply, or say why nothing happens."""
+        if not self.thermalobjectslist.selectedIndexes():
+            self.MainWindow.statusBar().showMessage("Select a row in the table first, then Apply.", 5000)
+            return
+        self.apply_port_values_to_table()
 
 
     # callback when applying changes to the selected port
@@ -1234,6 +1247,8 @@ class ModelEditorTab(QWidget):
 
         add_text("\n# ===================== input files and settings =======================")
         add_text("settings={}")
+        if forExport:
+            add_text(NO_GUI_EXPORT_LINE)
 
 
         # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before

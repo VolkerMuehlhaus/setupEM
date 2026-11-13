@@ -332,3 +332,21 @@ def test_notice_about_newer_config(win, layout):
     win.hide_info_bar()
     win.refresh_config_notice()                     # the settings now match the config: no notice
     assert win.info_bar.isHidden()
+
+
+def test_path_of_another_machine_is_written(win, layout):
+    """A script saved on another machine (/mnt/... for P:/...): on opening it the GDS path is swapped for the
+    same-named file next to it. The Code tab and Create Model write the path the GUI shows, not the old one
+    (it was kept, because the swapped path counted as unchanged)."""
+    folder, _ = layout
+    script = folder / "chip_em.py"
+    gds = str(folder / "chip_em.gds").replace(os.sep, "/")
+    text = script.read_text(encoding="utf-8").replace(repr(gds), repr("/mnt/pub/other_machine/chip_em.gds"))
+    assert "/mnt/pub/other_machine/chip_em.gds" in text
+    script.write_text(text, encoding="utf-8")
+    win.edit_py_model(str(script))
+    assert win.script_model is not None
+    assert win.file_tab.gds_file_edit.text().replace(os.sep, "/") == gds
+    code = code_of(win)
+    assert "/mnt/pub" not in code
+    assert "settings['GdsFile'] = 'chip_em.gds'" in code       # next to the script: relative

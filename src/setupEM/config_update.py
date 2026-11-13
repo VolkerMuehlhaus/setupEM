@@ -32,9 +32,25 @@ import glob
 import json
 import math
 import os
+import pathlib
 
 __all__ = ["LAYOUT_KEYS", "port_differences", "layout_differences", "newer_configs", "model_scripts",
-           "same_path", "linked_scripts", "model_settings_snapshot", "settings_differences"]
+           "same_path", "linked_scripts", "model_settings_snapshot", "settings_differences", "is_absolute_path",
+           "join_path"]
+
+
+def is_absolute_path(path):
+    """True for an absolute path of this or the other OS: a script or settings file written on Windows names
+    D:/... or a UNC path, which os.path.isabs() on Linux takes as relative (and a join with the file's folder
+    gives /mnt/.../D:/...)."""
+    path = str(path)
+    return os.path.isabs(path) or bool(pathlib.PureWindowsPath(path).drive) or path.startswith(("/", "\\"))
+
+
+def join_path(base_dir, path):
+    """path taken from base_dir if it is relative (of either OS, see is_absolute_path), else path itself."""
+    return path if is_absolute_path(path) else os.path.join(base_dir, path)
+
 
 # saved_values that belong to the layout export, besides the ports
 LAYOUT_KEYS = ("GdsFile", "SubstrateFile", "cellname", "purpose")
@@ -92,7 +108,7 @@ def same_path(a, b, base_dir=""):
 def _same_path(a, b, base_dir=""):
     if not a or not b:
         return a == b
-    norm = lambda p: os.path.normcase(os.path.abspath(os.path.join(base_dir, p)))
+    norm = lambda p: os.path.normcase(os.path.abspath(join_path(base_dir, p)))
     return norm(a) == norm(b)
 
 

@@ -64,13 +64,13 @@ if __package__ in (None, ""):
     from script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from script_probe import probe_script
     from config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
-                               settings_differences)
+                               settings_differences, is_absolute_path)
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
     from .config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
-                                settings_differences)
+                                settings_differences, is_absolute_path)
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -364,20 +364,35 @@ def resolve_missing_file_paths(saved_values, reference_dir, keys=("GdsFile", "Su
     messages describing each substitution made, for the caller to show the user -
     silently swapping in a different file (even same-named) without saying so could
     be confusing if it's actually a stale/different copy.
+
+    A stackup not found there is looked up among the stackups that ship with gds2palace (the same name): a
+    script written on Windows names D:/.../XML_stackup/latest/IHP/<name>, the same file is elsewhere on Linux.
     """
     messages = []
     for key in keys:
         old_path = saved_values.get(key)
         if not old_path or os.path.isfile(old_path):
             continue
-        candidate = os.path.join(reference_dir, os.path.basename(old_path))
-        if os.path.isfile(candidate):
+        name = os.path.basename(str(old_path).replace('\\', '/'))
+        candidate = os.path.join(reference_dir, name)
+        if not os.path.isfile(candidate) and key == "SubstrateFile":
+            candidate = _bundled_stackup_path(name)
+        if candidate and os.path.isfile(candidate):
             saved_values[key] = candidate.replace('\\', '/')
             messages.append(
                 f"{key}: {shorten_path_for_display(old_path)} not found, "
                 f"using {shorten_path_for_display(candidate)} instead"
             )
     return messages
+
+
+def _bundled_stackup_path(name):
+    """Path of the stackup of that name that ships with gds2palace (0.9.1 and later), else None."""
+    try:
+        path = gds2palace.utilities.get_stackup_path(name)
+    except Exception:       # noqa: BLE001 - older gds2palace, or no stackup of that name
+        return None
+    return str(path) if path and os.path.isfile(str(path)) else None
 
 
 def collect_module_level_constants(file_path):
@@ -434,6 +449,12 @@ def is_openems_model_script(file_path):
     except (OSError, UnicodeDecodeError):
         return False
     return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
+
+
+# File > Export: the switch for running the exported script with no gmsh window, commented out (an import
+# reads no settings from comments). gds2palace 0.10.4 and newer turns it on by itself without a display.
+NO_GUI_EXPORT_LINE = ("# settings['no_gui'] = True   # no gmsh window, for unattended runs "
+                      "(on Linux without a display, gds2palace 0.10.4 and newer skips it by itself)")
 
 
 # Which kind of model each app handles - MainWindow.MODEL_KIND, and the kind
@@ -5358,7 +5379,7 @@ class MainWindowBase(QMainWindow):
                                     # a relative path in the script is relative to the script's
                                     # folder (also "../XML_stackup/..."), not to setupEM's own
                                     # working directory
-                                    if not os.path.isabs(import_value):
+                                    if not is_absolute_path(import_value):
                                         import_value = os.path.normpath(
                                             os.path.join(modelcode_path, import_value)).replace('\\', '/')
                                     saved_values[varname] = import_value
@@ -5384,7 +5405,12 @@ class MainWindowBase(QMainWindow):
                 # often don't resolve here even as a full absolute path (the bare-relative-
                 # path fallback above only fires when there's no directory component at
                 # all) - fall back to a same-named file next to this model script instead
+                script_paths = {key: saved_values.get(key) for key in ("GdsFile", "SubstrateFile")}
                 path_messages = resolve_missing_file_paths(saved_values, modelcode_path)
+                # the paths swapped here are not what the script says: edited in place, the script gets the
+                # path the GUI shows (see _start_preserve_mode)
+                self._swapped_script_paths = {key: path for key, path in script_paths.items()
+                                              if path and saved_values.get(key) != path}
                 for key, label in (("GdsFile", "GDSII file"), ("SubstrateFile", "Stackup file")):
                     path = saved_values.get(key)
                     if path and not os.path.isfile(path):
@@ -5557,7 +5583,7 @@ class MainWindowBase(QMainWindow):
             return int(value)
         if key in ("GdsFile", "SubstrateFile"):
             value = str(value)
-            if not os.path.isabs(value):
+            if not is_absolute_path(value):
                 value = os.path.normpath(os.path.join(modelcode_path, value)).replace('\\', '/')
             return value
         if isinstance(value, tuple):
@@ -6187,6 +6213,12 @@ class MainWindowBase(QMainWindow):
         self.save_all_tabs()
         self.script_model = model
         self.preserve_baseline = self._preserve_snapshot()
+        # a GDS / stackup path of another machine, swapped on import for the same-named file next to the script
+        # (resolve_missing_file_paths): the script still has the old path, so the swap is a change to write,
+        # else the Code tab and Create Model keep a path the GUI doesn't show
+        for key, path in (getattr(self, "_swapped_script_paths", None) or {}).items():
+            self.preserve_baseline["values"][key] = path
+        self._swapped_script_paths = {}
         # Create Model always writes back to this script
         self.create_model_tab.set_output_locked(True)
         self.load_script_runs()

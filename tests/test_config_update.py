@@ -147,3 +147,33 @@ def test_settings_differences():
         "['ABC', 'ABC', 'ABC', 'ABC', 'PORTWALL', 'ABC'] in the config",
         "order: 2 in the script, 3 in the config"]
 
+
+
+from setupEM.config_update import is_absolute_path, join_path  # noqa: E402
+
+
+def test_paths_of_the_other_os_are_absolute():
+    """A script written on Windows names D:/...: on Linux that must not be joined to the script's folder
+    (/mnt/.../D:/github-claude/...)."""
+    for path in ("D:/github-claude/x.xml", r"D:\x\y.xml", r"\\server\share\a.gds", "/mnt/pub/a.gds"):
+        assert is_absolute_path(path), path
+        assert join_path("/somewhere", path) == path
+    for path in ("a.gds", "../XML_stackup/x.xml", "sub/a.gds"):
+        assert not is_absolute_path(path), path
+        assert join_path("base", path) == os.path.join("base", path)
+
+
+def test_missing_stackup_falls_back_to_the_bundled_one(tmp_path):
+    """A stackup path of another machine: the same-named stackup that ships with gds2palace (if there is one)."""
+    from setupEM.setup_common import resolve_missing_file_paths
+    from gds2palace import utilities
+    name = "SG13G2_FEM_200um_passi3D.xml"
+    try:
+        bundled = str(utilities.get_stackup_path(name))
+    except Exception:
+        import pytest
+        pytest.skip("gds2palace without bundled stackups")
+    values = {"SubstrateFile": "D:/elsewhere/" + name, "GdsFile": "D:/elsewhere/missing.gds"}
+    messages = resolve_missing_file_paths(values, str(tmp_path))
+    assert os.path.normcase(os.path.abspath(values["SubstrateFile"])) == os.path.normcase(os.path.abspath(bundled))
+    assert values["GdsFile"] == "D:/elsewhere/missing.gds" and len(messages) == 1

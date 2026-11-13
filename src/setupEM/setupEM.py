@@ -62,11 +62,11 @@ if __package__ in (None, ""):
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths,
+        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
-    from config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from cli_common import add_version_argument, start_file_errors
 else:
     from .setup_common import (
@@ -81,11 +81,11 @@ else:
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths,
+        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
-    from .config_update import LAYOUT_KEYS, layout_differences, port_differences
+    from .config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from .cli_common import add_version_argument, start_file_errors
 
 
@@ -591,6 +591,11 @@ class PortsTab(QWidget):
         self.buttons_layout.setAlignment(Qt.AlignRight)
         self.apply_button.setFixedWidth(button_width)
         self.apply_button.clicked.connect(self.apply_port_values_to_table)
+        # Return in a text field of the form applies it, like the button. Not the combo boxes (Return there also
+        # confirms an open list), and not on focus loss (a click on another row would write into the old one).
+        self.apply_button.setToolTip("Write these settings into the selected row. Return in a text field does the same.")
+        for edit in (self.sourcelayer_edit, self.impedance_edit, self.voltage_edit):
+            edit.returnPressed.connect(self.apply_from_return)
 
         self.remove_button = QPushButton(text="Remove")
         self.buttons_layout.addWidget(self.remove_button)
@@ -694,6 +699,14 @@ class PortsTab(QWidget):
 
         # set this AFTER apply_port_values_to_table(), not earlier!
         self.portslist.itemSelectionChanged.connect(self.portslist_selection_changed)
+
+
+    def apply_from_return(self):
+        """Return in a text field of the form: apply, or say why nothing happens."""
+        if not self.portslist.selectedIndexes():
+            self.MainWindow.statusBar().showMessage("Select a row in the table first, then Apply.", 5000)
+            return
+        self.apply_port_values_to_table()
 
 
     # callback when applying changes to the selected port
@@ -3589,6 +3602,8 @@ class ModelEditorTab(QWidget):
 
         add_text("\n# ===================== input files and settings =======================")
         add_text("settings={}")
+        if forExport:
+            add_text(NO_GUI_EXPORT_LINE)
 
 
         # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before
@@ -4505,7 +4520,7 @@ class MainWindow(MainWindowBase):
         layout = {key: saved[key] for key in LAYOUT_KEYS if key in saved}
         for key in ("GdsFile", "SubstrateFile"):
             if layout.get(key):
-                layout[key] = os.path.join(base_dir, layout[key]).replace("\\", "/")
+                layout[key] = join_path(base_dir, layout[key]).replace("\\", "/")
         resolve_missing_file_paths(layout, base_dir)
         self.saved_values.update(layout)
         self.ports_tab.update_port_from_import(data.get("ports", []))
