@@ -339,6 +339,12 @@ If you then start KLayout using this script, a new menu item is available: Tools
 
 3. Name it e.g. **setupEM via KLayout**  
 
+# How to cite
+
+If you use setupEM in a publication, please cite it. The **Cite this repository** button on the GitHub repository page gives APA and BibTeX entries, generated from [CITATION.cff](./CITATION.cff).
+
+Please also cite [gds2palace](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2), which builds the model, and the [Palace](https://github.com/awslabs/palace) solver that computed your results.
+
 # License
 
 This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later) - see [LICENSE](./LICENSE) for the full text.
