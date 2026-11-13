@@ -6,6 +6,10 @@
 - A script from File > Export runs without a display: gds2palace 0.10.4 and newer builds the model without the gmsh window on Linux with no display (ssh, container, batch job). Before, the script stopped with "Can't open display". The exported script also has the switch as a comment, `# settings['no_gui'] = True`, for unattended runs where a display exists.
 - `combine_extend_snp.py` (`combine_snp`, in `scripts/`) has `--help` and `--version`, and takes the folder to search as an optional argument. Before, any option was ignored and the conversion ran. Same file as in gds2palace 0.10.4.
 
+**Scripts used on two machines** (e.g. Windows and Linux):
+- A model script edited in place whose GDS file was taken from its folder on opening (the script had the other machine's path, e.g. `/mnt/pub/...` for `P:/...`) now gets that path when it is saved or the model is created; the Code tab shows it. Before, the GUI showed the new path and the script kept the old one, and the model was made from the old one.
+- On Linux, a path with a drive letter from Windows (`D:/...`) in a script or settings file is no longer taken as relative to the script's folder (`/mnt/.../D:/...`, "Load a GDSII file and XML stackup first"). A stackup that is not found, also not next to the script, is taken from the stackups that ship with gds2palace if one has that name; the log says so.
+
 # What's New - November 11, 2026 (setupEM 0.18.1)
 
 **Command line fixes** (from issue #52, use without a display):
