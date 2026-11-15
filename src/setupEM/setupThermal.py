@@ -60,13 +60,14 @@ if __package__ in (None, ""):
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
+        find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
     from thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
         device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from script_model import ScriptModel
     from cli_common import add_version_argument, start_file_errors
+    from script_writer import thermal_script_text
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -75,13 +76,14 @@ else:
         MarginSidesDialog, margin_from_saved, margin_to_saved,
         next_available_source_layer, update_missing_layer_column, ensure_table_rows,
         get_preference, get_preference_bool, set_preference, clear_preferences,
-        find_paraview_exe, MODEL_KIND_THERMAL, NO_GUI_EXPORT_LINE,
+        find_paraview_exe, MODEL_KIND_THERMAL,
         protected_script_message,
     )
     from .thermal_results import build_thermal_summary, format_source_table, find_thermal_paraview_file, \
         device_temperatures, format_temperature_table, read_thermal_map, write_temperatures_csv
     from .script_model import ScriptModel
     from .cli_common import add_version_argument, start_file_errors
+    from .script_writer import thermal_script_text
 
 
 '''
@@ -1181,152 +1183,11 @@ class ModelEditorTab(QWidget):
         self.setLayout(self.main_layout)
 
     def create_model_text(self, forExport=False):
-        # Create model text in editor from in-memory data
-        # This can look different from imported Python model code
-
-        def add_text(text):
-            self.model_edit.appendPlainText(text)
-
-        def add_key (key):
-            value = str(saved_values[key])
-            if '\\' in value:
-                # make sure we don't run into escape character issue with Windows paths
-                value = value.replace('\\','/')
-
-            if key in ['fstart','fstop','fstep']:
-                # special case: we have unit Hz in Python code but unit GHz in this GUI program internally
-                value = str(value) + 'e9'
-
-            if key in ['fdump','fpoint']:
-                # special case: we have unit Hz in Python code but unit GHz in this GUI program internally
-                # value is string representation of a list, so make it a list now
-                flist = ast.literal_eval(value)
-                new   = "["
-                for n,f in enumerate(flist):
-                    if n>0:
-                        new = new + ","
-                    new = new + str(f) + "e9"
-                new = new + "]"
-                value = new
-
-
-            if isinstance(saved_values[key],str):
-                # value is a string, enclose in quotes and check for backslash (Windows path!)
-                add_text("settings['" + key + "'] = '" + value+ "'")
-            else:
-                add_text("settings['" + key + "'] = " + str(value) )
-
-
-        # get folder where this GUI application is running and assume we have gds2palace modules there
-        # this_app_path = os.path.abspath(os.path.join(os.path.dirname(__file__))).replace('\\','/')
-
-        # for port tab to update data
+        """The model script from the tabs' values into the Code tab (script_writer.py writes it).
+        This can look different from an imported Python model script."""
         self.MainWindow.save_all_tabs()
-
-        self.model_edit.clear()
-        add_text("# Thermal model for IHP OpenPDK workflow created using " + APP_NAME)
-        add_text("import os, sys, subprocess")
-
-        add_text("\nfrom gds2palace import *")
-
-        add_text("\n# get path for this simulation file")
-        add_text("script_path = utilities.get_script_path(__file__)")
-        add_text("# use script filename as model basename")
-        add_text("model_basename = utilities.get_basename(__file__)")
-        add_text("# set and create directory for simulation output")
-
-        add_text("sim_path = utilities.create_sim_path (script_path,model_basename,dirname='elmer_model')")
-
-        add_text("\n# ========================= workflow settings ==========================")
-        if forExport:
-            add_text("# preview model/mesh only, without running solver?")
-            add_text("start_simulation = False")
-            add_text("\n# Command to start simulation")
-
-            add_text("run_command = ['ElmerSolver']")
-
-        add_text("\n# ===================== input files and settings =======================")
-        add_text("settings={}")
-        if forExport:
-            add_text(NO_GUI_EXPORT_LINE)
-
-
-        # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before
-        special_keylist = ['thermal_objects','materials_list','dielectrics_list','metals_list',
-                           'layernumbers','allpolygons']
-        # List of keys that we don't write to Python model code editor
-        ignore_list     = ['model_basename','sim_path']
-
-
-        if forExport:
-            # these commands are only used within this GUI application to control gmsh
-            ignore_list.extend(['preview_only','no_preview'])
-
-        for key in saved_values.keys():
-            if not key in special_keylist:
-                if not key in ignore_list:
-                    add_key(key)
-
-        # tag for Elmer thermal modcel
-        add_text("settings['elmer_thermal'] = True # create all metals as volumes, enable Elmer thermal output")
-
-
-
-        add_text("\n# ===================== port definitions =======================")
-        add_text("thermal_objects = simulation_setup.all_thermal_objects()")
-
-        for thermalobject in thermal_objects.objects:
-            if isinstance(thermalobject, simulation_setup.heatsource):
-                add_text(f"thermal_objects.add_heatsource(simulation_setup.heatsource("
-                         f"power={str(thermalobject.power)}, "
-                         f"source_layernum={str(thermalobject.source_layernum)}, "
-                         f"target_layername='{thermalobject.target_layername}'))")
-            if isinstance(thermalobject, simulation_setup.constanttemp):
-                add_text(f"thermal_objects.add_consttemp(simulation_setup.constanttemp("
-                         f"temp={str(thermalobject.temp)}, "
-                         f"source_layernum={str(thermalobject.source_layernum)}, "
-                         f"target_layername='{thermalobject.target_layername}'))")
-
-
-
-        add_text("\n# ================= read stackup and geometries =================")
-        add_text("materials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'], variable_overrides=settings['variable_overrides'])")
-        add_text("layernumbers = metals_list.getlayernumbers()")
-        add_text("layernumbers.extend(thermal_objects.layers)")
-        add_text("\n# read geometries from GDSII")
-
-
-        add_text("allpolygons = gds_reader.read_gds(settings['GdsFile'], "
-                "\n\tlayernumbers,"
-                "\n\tcellname=settings['cellname'], "
-                "\n\tpurposelist=settings['purpose'], "
-                "\n\tmetals_list=metals_list, \n\tpreprocess=settings['preprocess_gds'], "
-                "\n\tmerge_polygon_size=settings['merge_polygon_size'],"
-                "\n\tgds_boundary_layers=dielectrics_list.get_boundary_layers())")
-        add_text("\n")
-
-
-        # Now do the special keys that we skipped before
-        for key in special_keylist:
-            add_text("settings['" + key + "'] = " + key)
-        add_text("settings['sim_path'] = sim_path")
-        add_text("settings['model_basename'] = model_basename")
-
-        add_text("\n")
-        add_text("config_name, data_dir = simulation_setup.create_elmer_thermal (settings)")
-
-
-        # When running the model from setupEM GUI, we start the script differently, only write this for export
-        if forExport:
-            add_text("\n# run after creating mesh and Elmer model files ")
-            add_text("if start_simulation:")
-            add_text("  try:")
-            add_text("      os.chdir(sim_path)")
-            add_text("      subprocess.run(run_command, shell=True)")
-            add_text("  except:")
-            add_text("      print(f'Unable to run Elmer using command ',run_command)\n")
-
-
+        self.model_edit.setPlainText(thermal_script_text(saved_values, thermal_objects, for_export=forExport,
+                                                         app_name=APP_NAME))
 
     def save_values(self):
         # preserve mode shows the imported script with the changes instead

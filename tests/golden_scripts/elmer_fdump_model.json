@@ -1,0 +1,73 @@
+{
+ "inputs": {
+  "application": "setupEM",
+  "elmer_mode": true,
+  "for_export": false,
+  "saved_values": {
+   "GdsFile": "D:/designs/chip.gds",
+   "SubstrateFile": "D:/stackups/SG13G2_FEM_200um.xml",
+   "cellname": "",
+   "purpose": [
+    0
+   ],
+   "preprocess_gds": false,
+   "merge_polygon_size": 0.0,
+   "fstart": 1.0,
+   "fstop": 20.0,
+   "fstep": 1.0,
+   "fdump_enabled": true,
+   "iterative": true,
+   "ELMER_MPI_THREADS": 4,
+   "variable_overrides": {},
+   "fill_factor_correction": false,
+   "refined_cellsize": 5.0,
+   "refined_cellsize_override": [],
+   "order": 2,
+   "conductor_model": "surface",
+   "cells_per_wavelength": 10.0,
+   "meshsize_max": 100.0,
+   "adaptive_mesh_iterations": 0,
+   "amr_tol": 0.01,
+   "amr_max_dof": 2000000,
+   "adaptive_mesh_conformal": false,
+   "complex_coarse_solve": true,
+   "solver_maxits": 400,
+   "solver_tol": 1e-06,
+   "boundary": [
+    "ABC",
+    "ABC",
+    "ABC",
+    "ABC",
+    "ABC",
+    "ABC"
+   ],
+   "margin": 200.0,
+   "air_around": 200.0,
+   "model_basename": "chip",
+   "sim_path": ""
+  },
+  "ports": [
+   {
+    "portnumber": 1,
+    "source_layernum": 201,
+    "target_layername": null,
+    "from_layername": "Metal1",
+    "to_layername": "TopMetal2",
+    "direction": "Z",
+    "port_Z0": 50.0,
+    "voltage": 1.0
+   },
+   {
+    "portnumber": 2,
+    "source_layernum": 202,
+    "target_layername": null,
+    "from_layername": "Metal1",
+    "to_layername": "TopMetal2",
+    "direction": "Z",
+    "port_Z0": 50.0,
+    "voltage": 1.0
+   }
+  ]
+ },
+ "text": "# Model for IHP OpenPDK EM workflow created using setupEM\nimport os, sys, subprocess\n\nfrom gds2palace import *\n\n# get path for this simulation file\nscript_path = utilities.get_script_path(__file__)\n# use script filename as model basename\nmodel_basename = utilities.get_basename(__file__)\n# set and create directory for simulation output\nsim_path = utilities.create_sim_path (script_path,model_basename,dirname='elmer_model')\n\n# ========================= workflow settings ==========================\n\n# ===================== input files and settings =======================\nsettings={}\n\n# ---- Input files ----\nsettings['GdsFile'] = 'D:/designs/chip.gds'\nsettings['SubstrateFile'] = 'D:/stackups/SG13G2_FEM_200um.xml'\nsettings['variable_overrides'] = {}\nsettings['cellname'] = ''\nsettings['purpose'] = [0]\nsettings['preprocess_gds'] = False\nsettings['merge_polygon_size'] = 0.0\nsettings['fill_factor_correction'] = False\n\n# ---- Frequencies ----\nsettings['fstart'] = 1.0e9\nsettings['fstop'] = 20.0e9\nsettings['fstep'] = 1.0e9\n\n# ---- Mesh ----\nsettings['refined_cellsize'] = 5.0\nsettings['refined_cellsize_override'] = []\nsettings['cells_per_wavelength'] = 10.0\nsettings['meshsize_max'] = 100.0\nsettings['order'] = 2\n\n# ---- Simulation boundary ----\nsettings['boundary'] = ['ABC', 'ABC', 'ABC', 'ABC', 'ABC', 'ABC']\nsettings['margin'] = 200.0\nsettings['air_around'] = 200.0\n\n# ---- Solver ----\nsettings['iterative'] = True\nsettings['ELMER_MPI_THREADS'] = 4\n\n# 'Enable field dump' checkbox: Elmer dumps fields at every solved\n# frequency once fdump is non-empty, so reuse an already-solved one\nsettings['fdump'] = [settings['fstop']]\n\n# ===================== port definitions =======================\nsimulation_ports = simulation_setup.all_simulation_ports()\nsimulation_ports.add_port(simulation_setup.simulation_port(portnumber=1, voltage=1.0, port_Z0=50.0, source_layernum=201, from_layername='Metal1', to_layername='TopMetal2', direction='Z'))\nsimulation_ports.add_port(simulation_setup.simulation_port(portnumber=2, voltage=1.0, port_Z0=50.0, source_layernum=202, from_layername='Metal1', to_layername='TopMetal2', direction='Z'))\n\n# ================= read stackup and geometries =================\nmaterials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'], variable_overrides=settings['variable_overrides'])\nlayernumbers = metals_list.getlayernumbers()\nlayernumbers.extend(simulation_ports.portlayers)\n\n# read geometries from GDSII\nallpolygons = gds_reader.read_gds(settings['GdsFile'], \n\tlayernumbers,\n\tcellname=settings['cellname'], \n\tpurposelist=settings['purpose'], \n\tmetals_list=metals_list, \n\tpreprocess=settings['preprocess_gds'], \n\tmerge_polygon_size=settings['merge_polygon_size'],\n\tgds_boundary_layers=dielectrics_list.get_boundary_layers(),\n\tmirror=False, \n\toffset_x=0, offset_y=0,\n\tlayernumber_offset=0)\n\n\nsettings['simulation_ports'] = simulation_ports\nsettings['materials_list'] = materials_list\nsettings['dielectrics_list'] = dielectrics_list\nsettings['metals_list'] = metals_list\nsettings['layernumbers'] = layernumbers\nsettings['allpolygons'] = allpolygons\nsettings['sim_path'] = sim_path\nsettings['model_basename'] = model_basename\n\n# list of ports that are excited (set voltage to zero in port excitation to skip an excitation!)\nexcite_ports = simulation_ports.all_active_excitations()\nconfig_name, data_dir = simulation_setup.create_elmer (excite_ports, settings)\n\n# for convenience, write run script to model directory\nutilities.create_elmer_run_script(settings['sim_path'],settings)"
+}

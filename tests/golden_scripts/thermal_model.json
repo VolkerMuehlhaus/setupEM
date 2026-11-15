@@ -1,0 +1,46 @@
+{
+ "inputs": {
+  "application": "setupThermal",
+  "elmer_mode": false,
+  "for_export": false,
+  "saved_values": {
+   "GdsFile": "D:/designs/chip.gds",
+   "SubstrateFile": "D:/stackups/SG13G2_FEM_200um.xml",
+   "cellname": "",
+   "purpose": [
+    0
+   ],
+   "preprocess_gds": false,
+   "merge_polygon_size": 0.0,
+   "refined_cellsize": 1.0,
+   "margin": 100.0,
+   "variable_overrides": {},
+   "fill_factor_correction": false,
+   "meshsize_max": 100.0,
+   "iterative": false,
+   "model_basename": "chip",
+   "sim_path": ""
+  },
+  "thermal": [
+   {
+    "source_layernum": 401,
+    "target_layername": "HEAT_TRANSISTOR",
+    "type": "source",
+    "power": 0.05
+   },
+   {
+    "source_layernum": 402,
+    "target_layername": "HEAT_RESISTOR",
+    "type": "source",
+    "power": 0.01
+   },
+   {
+    "source_layernum": 250,
+    "target_layername": "BACKSIDEGND",
+    "type": "constanttemp",
+    "temp": 300.0
+   }
+  ]
+ },
+ "text": "# Thermal model for IHP OpenPDK workflow created using setupThermal\nimport os, sys, subprocess\n\nfrom gds2palace import *\n\n# get path for this simulation file\nscript_path = utilities.get_script_path(__file__)\n# use script filename as model basename\nmodel_basename = utilities.get_basename(__file__)\n# set and create directory for simulation output\nsim_path = utilities.create_sim_path (script_path,model_basename,dirname='elmer_model')\n\n# ========================= workflow settings ==========================\n\n# ===================== input files and settings =======================\nsettings={}\nsettings['GdsFile'] = 'D:/designs/chip.gds'\nsettings['SubstrateFile'] = 'D:/stackups/SG13G2_FEM_200um.xml'\nsettings['cellname'] = ''\nsettings['purpose'] = [0]\nsettings['preprocess_gds'] = False\nsettings['merge_polygon_size'] = 0.0\nsettings['refined_cellsize'] = 1.0\nsettings['margin'] = 100.0\nsettings['variable_overrides'] = {}\nsettings['fill_factor_correction'] = False\nsettings['meshsize_max'] = 100.0\nsettings['iterative'] = False\nsettings['elmer_thermal'] = True # create all metals as volumes, enable Elmer thermal output\n\n# ===================== port definitions =======================\nthermal_objects = simulation_setup.all_thermal_objects()\nthermal_objects.add_heatsource(simulation_setup.heatsource(power=0.05, source_layernum=401, target_layername='HEAT_TRANSISTOR'))\nthermal_objects.add_heatsource(simulation_setup.heatsource(power=0.01, source_layernum=402, target_layername='HEAT_RESISTOR'))\nthermal_objects.add_consttemp(simulation_setup.constanttemp(temp=300.0, source_layernum=250, target_layername='BACKSIDEGND'))\n\n# ================= read stackup and geometries =================\nmaterials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'], variable_overrides=settings['variable_overrides'])\nlayernumbers = metals_list.getlayernumbers()\nlayernumbers.extend(thermal_objects.layers)\n\n# read geometries from GDSII\nallpolygons = gds_reader.read_gds(settings['GdsFile'], \n\tlayernumbers,\n\tcellname=settings['cellname'], \n\tpurposelist=settings['purpose'], \n\tmetals_list=metals_list, \n\tpreprocess=settings['preprocess_gds'], \n\tmerge_polygon_size=settings['merge_polygon_size'],\n\tgds_boundary_layers=dielectrics_list.get_boundary_layers())\n\n\nsettings['thermal_objects'] = thermal_objects\nsettings['materials_list'] = materials_list\nsettings['dielectrics_list'] = dielectrics_list\nsettings['metals_list'] = metals_list\nsettings['layernumbers'] = layernumbers\nsettings['allpolygons'] = allpolygons\nsettings['sim_path'] = sim_path\nsettings['model_basename'] = model_basename\n\n\nconfig_name, data_dir = simulation_setup.create_elmer_thermal (settings)"
+}

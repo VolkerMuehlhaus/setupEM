@@ -228,7 +228,7 @@ def test_modules_without_qt_do_not_load_it():
     code = ("import sys\n"
             "import setupEM, setupEM.join_pieces, setupEM.thermal_results, setupEM.palace_results\n"
             "import setupEM.script_model, setupEM.script_probe, setupEM.config_update, setupEM.piece_set\n"
-            "import setupEM.cli_common, setupEM.run_with_overrides\n"
+            "import setupEM.cli_common, setupEM.run_with_overrides, setupEM.script_writer\n"
             "loaded = sorted(m for m in sys.modules if m.split('.')[0] in ('PySide6', 'shiboken6'))\n"
             "print(loaded)\n"
             "sys.exit(1 if loaded else 0)\n")

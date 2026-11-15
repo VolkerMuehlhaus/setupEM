@@ -62,12 +62,13 @@ if __package__ in (None, ""):
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
+        protected_script_message, resolve_missing_file_paths,
     )
     from palace_results import build_results_summary, find_output_dir, find_paraview_files
     from script_model import ScriptModel
     from config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from cli_common import add_version_argument, start_file_errors
+    from script_writer import em_script_text
 else:
     from .setup_common import (
         EDIT_STYLE_OPTIONAL, EDIT_STYLE_REQUIRED, COMBO_STYLE_REQUIRED, COMBO_STYLE_OPTIONAL,
@@ -81,12 +82,13 @@ else:
         eval_simple_python_expression, collect_module_level_constants,
         find_paraview_exe, FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS,
         GDS2PALACE_CONDUCTOR_MODELS, MODEL_KIND_EM,
-        protected_script_message, resolve_missing_file_paths, NO_GUI_EXPORT_LINE,
+        protected_script_message, resolve_missing_file_paths,
     )
     from .palace_results import build_results_summary, find_output_dir, find_paraview_files
     from .script_model import ScriptModel
     from .config_update import LAYOUT_KEYS, layout_differences, port_differences, join_path
     from .cli_common import add_version_argument, start_file_errors
+    from .script_writer import em_script_text
 
 
 '''
@@ -3529,261 +3531,11 @@ class ModelEditorTab(QWidget):
         self.setLayout(self.main_layout)
 
     def create_model_text(self, forExport=False):
-        # Create model text in editor from in-memory data
-        # This can look different from imported Python model code
-
-        def add_text(text):
-            self.model_edit.appendPlainText(text)
-
-        def add_key (key):
-            value = str(saved_values[key])
-            if '\\' in value:
-                # make sure we don't run into escape character issue with Windows paths
-                value = value.replace('\\','/')
-
-            if key in ['fstart','fstop','fstep']:
-                # special case: we have unit Hz in Python code but unit GHz in this GUI program internally
-                value = str(value) + 'e9'
-
-            if key in ['fdump','fpoint']:
-                # special case: we have unit Hz in Python code but unit GHz in this GUI program internally
-                # value is string representation of a list, so make it a list now
-                flist = ast.literal_eval(value)
-                new   = "["
-                for n,f in enumerate(flist):
-                    if n>0:
-                        new = new + ","
-                    new = new + str(f) + "e9"
-                new = new + "]"
-                value = new
-
-
-            if isinstance(saved_values[key],str):
-                # value is a string, enclose in quotes and check for backslash (Windows path!)
-                add_text("settings['" + key + "'] = '" + value+ "'")
-            else:
-                add_text("settings['" + key + "'] = " + str(value) )
-
-
-        # get folder where this GUI application is running and assume we have gds2palace modules there
-        # this_app_path = os.path.abspath(os.path.join(os.path.dirname(__file__))).replace('\\','/')
-
-        # for port tab to update data
+        """The model script from the tabs' values into the Code tab (script_writer.py writes it).
+        This can look different from an imported Python model script."""
         self.MainWindow.save_all_tabs()
-
-        self.model_edit.clear()
-        add_text("# Model for IHP OpenPDK EM workflow created using " + APP_NAME)
-        add_text("import os, sys, subprocess")
-
-        add_text("\nfrom gds2palace import *")
-
-        add_text("\n# get path for this simulation file")
-        add_text("script_path = utilities.get_script_path(__file__)")
-        add_text("# use script filename as model basename")
-        add_text("model_basename = utilities.get_basename(__file__)")
-        add_text("# set and create directory for simulation output")
-
-        if self.MainWindow.ElmerMode:
-            add_text("sim_path = utilities.create_sim_path (script_path,model_basename,dirname='elmer_model')")
-        else:
-            add_text("sim_path = utilities.create_sim_path (script_path,model_basename)")
-
-        add_text("\n# ========================= workflow settings ==========================")
-        if forExport:
-            add_text("# preview model/mesh only, without running solver?")
-            add_text("start_simulation = False")
-            add_text("\n# Command to start simulation")
-
-            if self.MainWindow.PalaceMode:
-                add_text("# run_command = ['start', 'wsl.exe']  # Windows Subsystem for Linux")
-                add_text("run_command = ['./run_sim']         # Linux")
-            elif self.MainWindow.ElmerMode:
-                add_text("run_command = ['./run_elmer']     # Linux")
-
-        add_text("\n# ===================== input files and settings =======================")
-        add_text("settings={}")
-        if forExport:
-            add_text(NO_GUI_EXPORT_LINE)
-
-
-        # List of keys that must be included in Python code AFTER reading stackups and GDSII, not before
-        special_keylist = ['simulation_ports','materials_list','dielectrics_list','metals_list',
-                           'layernumbers','allpolygons']
-        # List of keys that we don't write to Python model code editor
-        # fdump_enabled is a GUI-only toggle (Elmer mode), never a real gds2palace setting
-        ignore_list     = ['model_basename','sim_path','fdump_enabled']
-
-
-        # Keywords that are excluded in Palace mode
-        if self.MainWindow.PalaceMode:
-            ignore_list.append('iterative')
-
-        if self.MainWindow.ElmerMode:
-            # Elmer mode shows a plain on/off checkbox (fdump_enabled) instead of Palace's
-            # per-frequency fdump list - suppress the generic per-key emission of fdump
-            # here so a stale Palace-mode list saved earlier in the same session doesn't
-            # leak into an Elmer-mode script; the synthesized settings['fdump'] line
-            # (below, after special_keylist) is emitted instead when the checkbox is on.
-            ignore_list.append('fdump')
-            # conductor_model (filled_metals with an older gds2palace) is Palace-only in the
-            # GUI (its combo box is hidden under Elmer mode) - gds2palace's volume conductors
-            # actually also cover Elmer EM, but that path is untested from setupEM so far, so
-            # exclude it here too, same as 'iterative' is excluded under Palace mode above,
-            # rather than let a value set earlier in Palace mode leak into an Elmer script.
-            ignore_list.extend(['conductor_model', 'filled_metals'])
-            # an older gds2palace supports the via fill factor correction for Palace only
-            if 'elmer' not in FILL_FACTOR_CORRECTION_SOLVERS:
-                ignore_list.append('fill_factor_correction')
-
-        if forExport:
-            # these commands are only used within this GUI application to control gmsh
-            ignore_list.extend(['preview_only','no_preview'])
-
-        # Palace linear solver settings: Palace-only, and only for a gds2palace that
-        # applies them (an older one hardcodes them and would silently ignore the keys)
-        if self.MainWindow.ElmerMode or not PALACE_LINEAR_SOLVER_SETTINGS:
-            ignore_list.extend(['complex_coarse_solve', 'solver_maxits', 'solver_tol'])
-
-        # AMR settings only matter for Palace with at least one AMR iteration
-        if self.MainWindow.ElmerMode:
-            ignore_list.extend(['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof', 'adaptive_mesh_conformal'])
-        elif int(saved_values.get('adaptive_mesh_iterations', 0)) == 0:
-            ignore_list.extend(['amr_tol', 'amr_max_dof', 'adaptive_mesh_conformal'])
-
-        # write settings grouped by topic; keys not listed here end up in "Other",
-        # so a new setting is never silently dropped from the script
-        setting_groups = [
-            ("Input files", ['GdsFile', 'SubstrateFile', 'variable_overrides', 'cellname', 'purpose',
-                             'preprocess_gds', 'merge_polygon_size', 'fill_factor_correction']),
-            ("Frequencies", ['fstart', 'fstop', 'fstep', 'fpoint', 'fdump']),
-            ("Mesh", ['unit', 'refined_cellsize', 'refined_cellsize_override', 'cells_per_wavelength',
-                      'meshsize_max', 'order', 'conductor_model', 'filled_metals']),
-            ("Adaptive mesh refinement", ['adaptive_mesh_iterations', 'amr_tol', 'amr_max_dof',
-                                          'adaptive_mesh_conformal']),
-            ("Simulation boundary", ['boundary', 'margin', 'air_around', 'reference_plane_shift', 'port_wall_extension',
-                                     'wall_extension']),
-            ("Solver", ['complex_coarse_solve', 'solver_maxits', 'solver_tol', 'iterative', 'ELMER_MPI_THREADS']),
-            ("Script control", ['preview_only', 'no_preview']),
-        ]
-        grouped_keys = {key for _, keys in setting_groups for key in keys}
-        setting_groups.append(("Other", [key for key in saved_values if key not in grouped_keys]))
-
-        for group_name, keys in setting_groups:
-            keys = [key for key in keys
-                    if key in saved_values and key not in special_keylist and key not in ignore_list]
-            if keys:
-                add_text(f"\n# ---- {group_name} ----")
-                for key in keys:
-                    add_key(key)
-
-        if self.MainWindow.ElmerMode and bool(saved_values.get('fdump_enabled')):
-            # Elmer has no per-frequency SaveStep like Palace - it dumps fields at every
-            # solved frequency once any fdump value is set, so reuse an already-solved
-            # frequency here rather than asking the user to pick one. This is harmless
-            # (adds no extra solve) as long as util_elmer.write_elmer_frequencies()
-            # dedupes the combined frequency list, which it does.
-            # Known limitation: this line's RHS references "settings", so
-            # parse_assignments() (setup_common.py) skips it entirely on Import -
-            # re-importing an exported Elmer+fdump script loses fdump_enabled (loads
-            # unchecked). Not fixed here since it's a silent no-op, not a crash.
-            add_text("\n# 'Enable field dump' checkbox: Elmer dumps fields at every solved")
-            add_text("# frequency once fdump is non-empty, so reuse an already-solved one")
-            if 'fstop' in saved_values:
-                add_text("settings['fdump'] = [settings['fstop']]")
-            elif saved_values.get('fpoint'):
-                add_text("settings['fdump'] = [settings['fpoint'][0]]")
-
-
-        add_text("\n# ===================== port definitions =======================")
-        add_text("simulation_ports = simulation_setup.all_simulation_ports()")
-        for sim_port in simulation_ports.ports:
-            if "Z" in sim_port.direction.upper():
-                add_text(f"simulation_ports.add_port(simulation_setup.simulation_port("
-                         f"portnumber={str(sim_port.portnumber)}, "
-                         f"voltage={str(sim_port.voltage)}, "
-                         f"port_Z0={str(sim_port.port_Z0)}, "
-                         f"source_layernum={str(sim_port.source_layernum)}, "
-                         f"from_layername='{sim_port.from_layername}', "
-                         f"to_layername='{sim_port.to_layername}', "
-                         f"direction='{sim_port.direction}'))")
-            else:
-                add_text(f"simulation_ports.add_port(simulation_setup.simulation_port("
-                         f"portnumber={str(sim_port.portnumber)}, "
-                         f"voltage={str(sim_port.voltage)}, "
-                         f"port_Z0={str(sim_port.port_Z0)}, "
-                         f"source_layernum={str(sim_port.source_layernum)}, "
-                         f"target_layername='{sim_port.target_layername}', "
-                         f"direction='{sim_port.direction}'))")
-
-        add_text("\n# ================= read stackup and geometries =================")
-        add_text("materials_list, dielectrics_list, metals_list = stackup_reader.read_substrate (settings['SubstrateFile'], variable_overrides=settings['variable_overrides'])")
-        add_text("layernumbers = metals_list.getlayernumbers()")
-        add_text("layernumbers.extend(simulation_ports.portlayers)")
-        add_text("\n# read geometries from GDSII")
-        add_text("allpolygons = gds_reader.read_gds(settings['GdsFile'], "
-                "\n\tlayernumbers,"
-                "\n\tcellname=settings['cellname'], "
-                "\n\tpurposelist=settings['purpose'], "
-                "\n\tmetals_list=metals_list, \n\tpreprocess=settings['preprocess_gds'], "
-                "\n\tmerge_polygon_size=settings['merge_polygon_size'],"
-                "\n\tgds_boundary_layers=dielectrics_list.get_boundary_layers(),"
-                "\n\tmirror=False, "
-                "\n\toffset_x=0, offset_y=0,"
-                "\n\tlayernumber_offset=0)")
-        add_text("\n")
-
-
-        # Now do the special keys that we skipped before
-        for key in special_keylist:
-            add_text("settings['" + key + "'] = " + key)
-        add_text("settings['sim_path'] = sim_path")
-        add_text("settings['model_basename'] = model_basename")
-
-
-        # Now create ports
-        add_text("\n# list of ports that are excited (set voltage to zero in port excitation to skip an excitation!)")
-        add_text("excite_ports = simulation_ports.all_active_excitations()")
-
-        if self.MainWindow.ElmerMode:
-            add_text("config_name, data_dir = simulation_setup.create_elmer (excite_ports, settings)")
-        else:
-            add_text("config_name, data_dir = simulation_setup.create_palace (excite_ports, settings)")
-
-        # Palace, add helper function to start simulation from script
-        if self.MainWindow.PalaceMode:
-            add_text("\n# for convenience, write run script to model directory")
-            add_text("utilities.create_run_script(settings['sim_path'])")
-
-            # When running the model from setupEM GUI, we start the script differently, only write this for export
-            if forExport:
-                add_text("\n# run after creating mesh and Palace config.json ")
-                add_text("if start_simulation:")
-                add_text("  try:")
-                add_text("      os.chdir(sim_path)")
-                add_text("      if sys.platform.startswith('linux'):")
-                add_text("          os.chmod('run_sim', 0o755)")
-                add_text("      subprocess.run(run_command, shell=True)")
-                add_text("  except:")
-                add_text("      print(f'Unable to run Palace using command ',run_command)\n")
-
-        # Elmer, add helper function to start simulation from script
-        if self.MainWindow.ElmerMode:
-            add_text("\n# for convenience, write run script to model directory")
-            add_text("utilities.create_elmer_run_script(settings['sim_path'],settings)")
-
-            # When running the model from setupEM GUI, we start the script differently, only write this for export
-            if forExport:
-                add_text("\n# run after creating mesh and Elmer model files ")
-                add_text("if start_simulation:")
-                add_text("  try:")
-                add_text("      os.chdir(sim_path)")
-                add_text("      if sys.platform.startswith('linux'):")
-                add_text("          os.chmod('run_elmer', 0o755)")
-                add_text("      subprocess.run(run_command, shell=True)")
-                add_text("  except:")
-                add_text("      print(f'Unable to run Elmer using command ',run_command)\n")
-
-
+        self.model_edit.setPlainText(em_script_text(saved_values, simulation_ports, self.MainWindow.ElmerMode,
+                                                    for_export=forExport, app_name=APP_NAME))
 
     def save_values(self):
         # preserve mode shows the imported script with the changes instead

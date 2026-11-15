@@ -65,12 +65,14 @@ if __package__ in (None, ""):
     from script_probe import probe_script
     from config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
                                settings_differences, is_absolute_path)
+    from script_writer import FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS, NO_GUI_EXPORT_LINE
 else:
     from . import gds_hierarchy_scan
     from .script_model import eval_simple_python_expression, ScriptModel, patch_script, LEGACY_SETTINGS
     from .script_probe import probe_script
     from .config_update import (model_scripts, newer_configs, same_path, linked_scripts, model_settings_snapshot,
                                 settings_differences, is_absolute_path)
+    from .script_writer import FILL_FACTOR_CORRECTION_SOLVERS, PALACE_LINEAR_SOLVER_SETTINGS, NO_GUI_EXPORT_LINE
 
 # ------------------------------------------------------------------
 # gds2palace feature-compatibility detection: an older gds2palace (e.g. a stale
@@ -94,17 +96,8 @@ GDS2PALACE_HAS_VARIABLES_LIST = hasattr(stackup_reader, "variables_list") and ha
 GDS2PALACE_SUPPORTS_STACKUP_EDITOR = GDS2PALACE_HAS_PARSE_SUBSTRATE
 GDS2PALACE_SUPPORTS_FILE_DESCRIPTION = GDS2PALACE_HAS_FILE_DESCRIPTION
 GDS2PALACE_OUTDATED = not (GDS2PALACE_SUPPORTS_STACKUP_EDITOR and GDS2PALACE_SUPPORTS_FILE_DESCRIPTION)
-# Solvers ("palace", "elmer", "elmer_thermal") for which the installed gds2palace applies
-# settings['fill_factor_correction']; an older gds2palace silently ignores the setting, so
-# only offer it where it has an effect. gds2palace declares this list itself since Elmer
-# support was added; before that, the feature existed for Palace only.
-FILL_FACTOR_CORRECTION_SOLVERS = getattr(
-    simulation_setup, "FILL_FACTOR_CORRECTION_SOLVERS",
-    ("palace",) if hasattr(gds_reader.all_polygons_list, "compute_via_fill_factors") else ())
-# Palace linear solver settings (settings['complex_coarse_solve'/'solver_maxits'/'solver_tol'])
-# the installed gds2palace understands - empty for an older gds2palace, which hardcodes them
-# and would silently ignore these keys, so the Mesh tab hides its linear solver rows then.
-PALACE_LINEAR_SOLVER_SETTINGS = tuple(getattr(simulation_setup, "PALACE_LINEAR_SOLVER_SETTINGS", ()))
+# FILL_FACTOR_CORRECTION_SOLVERS and PALACE_LINEAR_SOLVER_SETTINGS (what the installed gds2palace applies) are
+# defined in script_writer.py, which writes the model script without Qt, and imported above.
 # Values of settings['conductor_model'] the installed gds2palace understands - empty for an
 # older gds2palace, which only knows settings['filled_metals'] (True = 'solve_inside',
 # False = 'surface') and would silently ignore conductor_model, so the Mesh tab then offers
@@ -449,12 +442,6 @@ def is_openems_model_script(file_path):
     except (OSError, UnicodeDecodeError):
         return False
     return bool(re.search(r'^\s*(?:from|import)\s+(?:openEMS|CSXCAD)\b', text, re.MULTILINE))
-
-
-# File > Export: the switch for running the exported script with no gmsh window, commented out (an import
-# reads no settings from comments). gds2palace 0.10.4 and newer turns it on by itself without a display.
-NO_GUI_EXPORT_LINE = ("# settings['no_gui'] = True   # no gmsh window, for unattended runs "
-                      "(on Linux without a display, gds2palace 0.10.4 and newer skips it by itself)")
 
 
 # Which kind of model each app handles - MainWindow.MODEL_KIND, and the kind
