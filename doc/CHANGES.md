@@ -1,10 +1,12 @@
 # What's New - November 15, 2026 (setupEM 0.18.3)
 
+Needs gds2palace 0.10.7 or newer (`pip install` updates it).
+
 **`combine_extend_snp.py` 1.5** (`combine_snp`, in `scripts/`), the same file as in gds2palace 0.10.7:
 - The `_dc` Touchstone file keeps all simulated frequency points and adds only the 0 Hz point in front. Before, a result with the two low frequency points of a sweep from 0 Hz was resampled to a uniform frequency grid, so the simulated points, among them the two low ones, were replaced by interpolated values. The 0 Hz value itself is unchanged.
 - Port walls (from gds2palace 0.10.6): the line resistance of the standards is taken from the model's lowest frequency, so R and Q of models with port walls are right also below fstop/20.
 
-**Sweep from 0 Hz, the frequencies that replace DC** (a gds2palace change, nothing to set in setupEM; needs gds2palace 0.10.7): with start frequency 0, gds2palace simulates two low frequency points instead of 0 Hz. These were always 10 MHz and 20 MHz. With a mesh finer than 0.5 µm (refined cellsize or a per-layer override), gds2palace 0.10.7 moves them up, to 5 MHz·µm divided by the smallest cell size and twice that (e.g. 25 and 50 MHz at 0.2 µm), because on such a fine mesh Palace could stop with "SuperLUSolver: Found a singular matrix" at 10 MHz. Models with cell sizes of 0.5 µm and more keep 10 and 20 MHz. The user's guide section on DC handling says this now.
+**Sweep from 0 Hz, the frequencies that replace DC** (a gds2palace 0.10.7 change, nothing to set in setupEM): with start frequency 0, gds2palace simulates two low frequency points instead of 0 Hz. These were always 10 MHz and 20 MHz. With a mesh finer than 0.5 µm (refined cellsize or a per-layer override), gds2palace 0.10.7 moves them up, to 5 MHz·µm divided by the smallest cell size and twice that (e.g. 25 and 50 MHz at 0.2 µm), because on such a fine mesh Palace could stop with "SuperLUSolver: Found a singular matrix" at 10 MHz. Models with cell sizes of 0.5 µm and more keep 10 and 20 MHz. The user's guide section on DC handling says this now.
 
 **Citation:** `CITATION.cff` and a "How to cite" section in the README; GitHub's **Cite this repository** button gives APA and BibTeX entries.
 
