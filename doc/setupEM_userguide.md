@@ -180,7 +180,7 @@ For **specific fixed frequencies**, use the "fpoint" field. To additionally **st
 
 <img src="./png/frequencies1.png" alt="frequencies" width="750">
 
-FEM simulation can't run at 0 Hz DC. If you set start frequency to 0, setupEM handles this behind the scenes: two low frequency points (10 MHz, 20 MHz) are simulated instead, and results are extrapolated to 0 Hz during postprocessing.
+FEM simulation can't run at 0 Hz DC. If you set start frequency to 0, gds2palace handles this behind the scenes: two low frequency points are simulated instead, normally 10 MHz and 20 MHz, and the `_dc` result file adds a 0 Hz point extrapolated from them, in front of the simulated data. With a mesh finer than 0.5 µm (refined cellsize or a per-layer override), gds2palace 0.10.7 and newer moves the two points up, because Palace can't solve reliably at very low frequency on such a fine mesh: the first point is 5 MHz·µm divided by the smallest cell size, e.g. 25 MHz and 50 MHz for 0.2 µm. With older gds2palace versions, such a model can stop with "SuperLUSolver: Found a singular matrix".
 
 ## Ports tab
 
