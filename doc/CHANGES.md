@@ -1,8 +1,12 @@
-# What's New - next release (not released yet)
+# What's New - November 15, 2026 (setupEM 0.18.3)
 
 **`combine_extend_snp.py` 1.5** (`combine_snp`, in `scripts/`), the same file as in gds2palace 0.10.7:
 - The `_dc` Touchstone file keeps all simulated frequency points and adds only the 0 Hz point in front. Before, a result with the two low frequency points of a sweep from 0 Hz was resampled to a uniform frequency grid, so the simulated points, among them the two low ones, were replaced by interpolated values. The 0 Hz value itself is unchanged.
 - Port walls (from gds2palace 0.10.6): the line resistance of the standards is taken from the model's lowest frequency, so R and Q of models with port walls are right also below fstop/20.
+
+**Citation:** `CITATION.cff` and a "How to cite" section in the README; GitHub's **Cite this repository** button gives APA and BibTeX entries.
+
+**Internal:** the model script writer of setupEM and setupThermal is now a module without Qt (`script_writer.py`, issue #52). The written scripts are unchanged; `tests/test_script_writer.py` checks 8 recorded scripts against both the GUI and the writer.
 
 # What's New - November 13, 2026 (setupEM 0.18.2)
 
