@@ -1,3 +1,9 @@
+# What's New - November 16, 2026 (setupEM 0.18.4)
+
+**File > Save (Ctrl+S) saves the settings file you opened.** Opened from a `.simcfg` (e.g. the KLayout plug-in's export, with Open in setupEM), Ctrl+S did nothing: the action existed only for a script edited in place, and changes such as a port wall extension were lost without a question when setupEM was closed. Now:
+- Ctrl+S saves into the `.simcfg` / `.tsimcfg` the model was opened from (the menu names it). Its other entries, e.g. the plug-in's link to the model script, are kept. A script edited in place and a piece of a split region are saved as before; a new model asks for a file name.
+- Closing setupEM, opening another file or File > New asks "Save the changes to ...?" when the settings changed since the file was opened or saved.
+
 # What's New - November 15, 2026 (setupEM 0.18.3)
 
 Needs gds2palace 0.10.7 or newer (`pip install` updates it).

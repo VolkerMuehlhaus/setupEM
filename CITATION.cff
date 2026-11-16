@@ -15,8 +15,8 @@ keywords:
   - GDSII
   - Palace
   - IHP SG13G2
-version: 0.18.3
-date-released: 2026-11-15
+version: 0.18.4
+date-released: 2026-11-16
 references:
   - type: software
     title: "gds2palace: Create Palace FEM models from GDSII layout files"

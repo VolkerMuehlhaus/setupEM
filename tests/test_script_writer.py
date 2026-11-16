@@ -87,6 +87,7 @@ def gui_script(monkeypatch, name, export):
         return inputs, text
     finally:
         window._script_dirty = False
+        window._config_baseline = None
         window.close()
 
 

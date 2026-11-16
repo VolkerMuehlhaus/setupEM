@@ -315,6 +315,7 @@ def test_window_opens_the_set_and_switches_pieces(monkeypatch, app, messages, tm
     window.load_configuration_from_file(other)
     assert window.piece_set is None and tab.runs_group.isHidden()
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 
@@ -355,6 +356,7 @@ def test_start_with_every_piece_unchanged_only_joins(monkeypatch, app, messages,
     preferred = PieceSet(path).joined_results()[0]
     assert started and started[0][-1] == preferred and os.path.basename(preferred).startswith("whole_"), started
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 
@@ -380,6 +382,7 @@ def test_a_changed_piece_runs_again(monkeypatch, app, messages, tmp_path):
     assert started == ["p2"]                     # p1 reused, p2 meshed (the process is not started here)
     assert "reused: p1" in tab.log_area.toPlainText()
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 
@@ -406,6 +409,7 @@ def test_a_piece_with_a_script_keeps_its_changes_and_full_stays_unticked(monkeyp
     assert float(window.saved_values["refined_cellsize"]) == 2.5
     assert [t for _, t, _ in table_rows(tab)] == [True, True, False]    # full check model still unticked
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 
@@ -435,6 +439,7 @@ def test_start_simulation_runs_unattended_and_keeps_a_current_mesh(monkeypatch, 
     tab._piece_runner = None
     assert "no_gui=True" not in tab.model_launch_args("p1.py"), "Create Mesh by hand shows the mesh as before"
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 

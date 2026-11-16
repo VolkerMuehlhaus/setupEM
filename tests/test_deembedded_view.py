@@ -51,6 +51,7 @@ def test_viewer_shows_raw_and_deembedded(monkeypatch, app, tmp_path):
     assert viewer.include_deembedded_cb.isChecked() and not viewer.include_dc_cb.isChecked()
     viewer.close()
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 
@@ -68,4 +69,5 @@ def test_model_fit_takes_the_calibrated_result_with_port_walls(monkeypatch, app,
     tab.open_model_fit()
     assert started and os.path.basename(started[0][-1]) == expected, started
     win._script_dirty = False
+    win._config_baseline = None
     win.close()

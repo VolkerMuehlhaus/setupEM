@@ -349,6 +349,13 @@ Choose Built-in or ParaView as the default viewer in Preferences > Viewer. If Pa
 
 Save and load simulation configurations (JSON, extension `.simcfg` for setupEM / `.tsimcfg` for setupThermal). Create Model also writes the settings to `<model>.simcfg` / `<model>.tsimcfg` next to the model script, so that a layout tool's next export keeps them and the KLayout plug-in finds the layout's stackup, datatypes and thermal objects; it overwrites only a settings file of the same application. The script stays the model. Default values for new models are set in **Preferences ...** (see below). You can also drag & drop a `.simcfg`/`.tsimcfg` file onto the main window to load it, instead of using **Load Config ...**.
 
+**File > Save** (Ctrl+S) saves what you opened, under its name in the menu:
+- a settings file (`.simcfg` / `.tsimcfg`), e.g. the export of the KLayout plug-in opened with **Open in setupEM**: the settings go back into that file, and its other entries (such as the plug-in's link to the model script) stay;
+- a script edited in place: the changes go into the script (see below);
+- a piece of a split region: that piece's settings.
+
+A new model (File > New) has no file yet: Ctrl+S asks for one, as **Save Config ...** does. Closing setupEM, opening another file or File > New asks whether to save changes made since the settings file was opened or saved.
+
 **Open Recent** lists your last 10 files of each kind for quick reopening, in three sections: configs, imported \*.py models and \*.py models edited in place. Saving a config file adds it to the list too. A file reopens the same way it was opened before. "Clear Recent Files" empties all three sections.
 
 setupEM warns when a \*.py script is a thermal model (use setupThermal for those), and setupThermal warns for EM models; a `*.simcfg` or `*.tsimcfg` file from the other app is refused with a note naming the right app.
