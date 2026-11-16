@@ -159,4 +159,5 @@ def test_setupthermal_writes_temperatures(tmp_path, monkeypatch):
     csv_path = sim / "cascode_thermal_temperatures.csv"
     assert csv_path.is_file() and 'Q1,"npn13G2@-7230,590"' in csv_path.read_text()
     win._script_dirty = False
+    win._config_baseline = None
     win.close()

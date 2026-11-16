@@ -41,6 +41,7 @@ def open_window(module, monkeypatch):
 
 def close(window, app):
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
     app.processEvents()
 

@@ -98,6 +98,7 @@ def test_load_powers(app, monkeypatch, export):
     powers = {o.source_layernum: o.power for o in setupthermal.thermal_objects.objects if o.type == "source"}
     assert powers == {202: 0.00012, 203: 0.0, 204: 0.0, 205: 0.0025, 301: 0.003}
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 
@@ -107,6 +108,7 @@ def test_device_names_and_layers_past_299(app, monkeypatch, export):
     assert column(win, 5) == ["R1 (rhigh)", "R2 (rhigh)", "R3 (rhigh)", "XCORE.Q1 (npn13G2)", "XCORE.Q2 (npn13G2)",
                               "region outline"]
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 
@@ -129,6 +131,7 @@ def test_placeholder_boundary(app, monkeypatch, export):
     tab.apply_port_values_to_table()
     assert column(win, 1)[boundary] == "Activ" and column(win, 5)[boundary] == "region outline"
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 def test_elmer_environment(monkeypatch):
@@ -168,6 +171,7 @@ def test_create_model_writes_config(app, monkeypatch, export, tmp_path):
     tab.create_model()
     assert json.loads(config.read_text()) == {"application": "something else"}, "a foreign file stays"
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 
@@ -211,6 +215,7 @@ def test_refined_cellsize_override(app, monkeypatch, export):
     win.modeleditor_tab.create_model_text()
     assert "settings['refined_cellsize_override']" not in win.modeleditor_tab.model_edit.toPlainText()
     win._script_dirty = False
+    win._config_baseline = None
     win.close()
 
 
@@ -230,4 +235,5 @@ def test_default_purpose(app, monkeypatch):
         win.file_tab.save_values()
         assert win.saved_values["purpose"] == expected, module.__name__
         win._script_dirty = False
+        win._config_baseline = None
         win.close()

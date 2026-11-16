@@ -40,4 +40,5 @@ def test_export_has_no_gui_comment(monkeypatch, app, tmp_path, module_name):
         assert "no_gui" not in editor.model_edit.toPlainText()
     finally:
         window._script_dirty = False
+        window._config_baseline = None
         window.close()

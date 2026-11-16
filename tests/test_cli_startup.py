@@ -147,6 +147,7 @@ def em(monkeypatch):
     yield start
     for window in windows:
         window._script_dirty = False
+        window._config_baseline = None
         window.close()
     app.processEvents()
 

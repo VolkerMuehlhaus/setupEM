@@ -4822,7 +4822,7 @@ class MainWindowBase(QMainWindow):
 
         self.import_model_action.triggered.connect(lambda: self.import_py_model())
         self.edit_model_action.triggered.connect(lambda: self.edit_py_model())
-        self.save_script_action.triggered.connect(lambda: self.save_script_in_place())
+        self.save_script_action.triggered.connect(lambda: self.save_current_file())
         self.revert_script_action.triggered.connect(lambda: self.revert_script_in_place())
         self.export_model_action.triggered.connect(lambda: self.export_to_python())
         self.preferences_action.triggered.connect(lambda: self.open_preferences_dialog())
@@ -5051,6 +5051,8 @@ class MainWindowBase(QMainWindow):
         self._stop_preserve_mode()
         self.protected_source_model_path = None
         self.backup_before_overwrite = None
+        self.config_file = None                 # a new model: no settings file yet (Ctrl+S asks for one)
+        self._config_baseline = None
         self.saved_values.clear()
         self.materials_list = None
         self.dielectrics_list = None
@@ -5060,6 +5062,7 @@ class MainWindowBase(QMainWindow):
         self.load_all_tabs()
         self.create_model_tab.log_area.clear()
         self.create_model_tab._reset_live_status()
+        self._update_in_place_menu()
 
     def load_user_inputs(self, filename):
         # load of native configuration file
@@ -5207,6 +5210,8 @@ class MainWindowBase(QMainWindow):
                     self.apply_native_config_data(data)
                     self.load_all_tabs()
                     self._add_recent_file(RECENT_SETTINGS_KEY, file_path)
+                    self.config_file = file_path    # Ctrl+S saves to this file
+                    self._mark_config_saved()       # the baseline for unsaved changes
                     if not quiet:
                         # in the log, not a message box: nothing to decide, and a box blocks a start with no display
                         log_area = self.create_model_tab.log_area
@@ -5241,6 +5246,9 @@ class MainWindowBase(QMainWindow):
                     if answer != QMessageBox.Yes:
                         return
                 leave_current_script()
+                self.config_file = None         # a model from a script: no settings file for Ctrl+S to write
+                self._config_baseline = None
+                self._update_in_place_menu()
                 if not quiet and self.piece_set is not None:
                     self.piece_set = None       # another model: the split region is closed
                     self.current_piece = None
@@ -6076,16 +6084,21 @@ class MainWindowBase(QMainWindow):
             action()
 
     def _update_in_place_menu(self):
-        # Save script / Revert only in edit-in-place mode; Save Config (*.simcfg)
-        # is hidden there, a config file next to the script would be a second,
-        # diverging copy of its settings
+        # Save (Ctrl+S) always: the script edited in place, the piece of a split region or the settings file the
+        # model was opened from (save_current_file), named after it. Revert only in edit-in-place mode; Save Config
+        # (*.simcfg) is hidden there, a config file next to the script would be a second, diverging copy of its
+        # settings
         in_place = getattr(self, "script_model", None) is not None
-        self.save_script_action.setVisible(in_place)
         self.revert_script_action.setVisible(in_place)
         if in_place:
             name = os.path.basename(self.script_model.path)
             self.save_script_action.setText(f"Save {name}")
             self.revert_script_action.setText(f"Revert {name}")
+        elif getattr(self, "piece_set", None) is not None and getattr(self, "current_piece", None) is not None:
+            self.save_script_action.setText(f"Save {self.current_piece['piece']}")
+        else:
+            config = self._current_config_file()
+            self.save_script_action.setText(f"Save {os.path.basename(config)}" if config else "Save ...")
         self.save_action.setVisible(not in_place)
 
     # saved_values key -> (tab attribute, [widget attributes]) of the fields that
@@ -6293,7 +6306,7 @@ class MainWindowBase(QMainWindow):
 
     def _set_script_dirty(self, dirty):
         self._script_dirty = dirty
-        self.save_script_action.setEnabled(self.script_model is not None)
+        self._update_in_place_menu()            # Save is always there (save_current_file), named after the file
         self._refresh_title()
 
     def script_has_unsaved_changes(self):
@@ -6385,11 +6398,115 @@ class MainWindowBase(QMainWindow):
                 return
         self.load_configuration_from_file(self.script_model.path, in_place=True, ask_unsaved=False)
 
+    # ---------- the settings file opened: Save (Ctrl+S) and its unsaved changes ----------
+
+    def _current_config_file(self):
+        """The settings file (*.simcfg / *.tsimcfg) the tabs were loaded from or last saved to, if it still exists;
+        None for a script edited in place, a split region (its pieces save themselves), or a model from a script or
+        File > New. (Not user_inputs_file: that stays set while a script is edited in place, for Create Model's link
+        from a layout tool's settings file to the script.)"""
+        if getattr(self, "script_model", None) is not None or getattr(self, "piece_set", None) is not None:
+            return None
+        path = getattr(self, "config_file", None)
+        if path and path.lower().endswith("." + self.CONFIG_SUFFIX.lower()) and os.path.isfile(path):
+            return path
+        return None
+
+    def _config_struct(self):
+        """The settings as a settings file holds them (Save Config)."""
+        struct = {"application": self.APP_NAME, "data_format": "1.0"}
+        struct["saved_values"] = self.saved_values
+        struct.update(self.native_config_extra_struct())
+        return struct
+
+    def _config_fingerprint(self):
+        """The tabs' settings as text, for comparing: saved from the tabs without the tabs' warnings (an invalid field
+        is the user's to find when saving, not when opening or closing)."""
+        shown = {kind: getattr(QMessageBox, kind) for kind in ("warning", "critical", "information")}
+        try:
+            for kind in shown:
+                setattr(QMessageBox, kind, staticmethod(lambda *args, **kwargs: QMessageBox.Ok))
+            self.save_all_tabs()
+        finally:
+            for kind, function in shown.items():
+                setattr(QMessageBox, kind, function)
+        return json.dumps(self._config_struct(), sort_keys=True, default=str)
+
+    def _mark_config_saved(self):
+        """The tabs hold what the settings file holds (just loaded or saved): the baseline for unsaved changes."""
+        self._config_baseline = self._config_fingerprint() if self._current_config_file() else None
+        self._update_in_place_menu()
+
+    def config_has_unsaved_changes(self):
+        if self._current_config_file() is None or getattr(self, "_config_baseline", None) is None:
+            return False
+        return self._config_fingerprint() != self._config_baseline
+
+    def _write_config(self, filename, keep_other_keys):
+        """Write the settings file; keep_other_keys: keep the file's other top-level keys (e.g. a layout tool's
+        model_script link or pieces). Returns True when written. A tab with invalid input says so (its warning) and
+        keeps its last valid values, as Save Config always did."""
+        self.save_all_tabs()
+        data = {}
+        if keep_other_keys and os.path.isfile(filename):
+            try:
+                with open(filename, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+        data.update(self._config_struct())
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except OSError as e:
+            QMessageBox.warning(self, "Error", f"Failed to save config to {filename}: {e}")
+            return False
+        self._add_recent_file(RECENT_SETTINGS_KEY, filename)
+        self.config_file = filename
+        self._mark_config_saved()
+        return True
+
+    def save_current_file(self):
+        """File > Save (Ctrl+S): the script edited in place, the current piece of a split region, or the settings
+        file the model was opened from (an export of a layout tool too); with none of them, Save Config's dialog.
+        Returns True when saved."""
+        if self.script_model is not None:
+            return self.save_script_in_place()
+        if getattr(self, "piece_set", None) is not None and getattr(self, "current_piece", None) is not None:
+            self.leave_piece(self.current_piece)
+            self.create_model_tab.log_area.appendPlainText(f"Saved {self.current_piece['piece']}.\n")
+            return True
+        path = self._current_config_file()
+        if path is None:
+            self.save_ask_filenamefile()
+            return self._current_config_file() is not None
+        if self._write_config(path, keep_other_keys=True):
+            self.create_model_tab.log_area.appendPlainText(f"Config saved to {shorten_path_for_display(path)}\n")
+            return True
+        return False
+
+    def confirm_unsaved_config(self):
+        """Before New, Load, Import, Open or Exit: offer to save changes to the settings file the model was opened
+        from. Returns False to stay."""
+        if not self.config_has_unsaved_changes():
+            return True
+        path = self._current_config_file()
+        answer = QMessageBox.question(
+            self, "Unsaved changes",
+            f"Save the changes to {os.path.basename(path)}?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        if answer == QMessageBox.Save:
+            return self._write_config(path, keep_other_keys=True)
+        return answer == QMessageBox.Discard
+
     def confirm_unsaved_script(self):
         """Before leaving edit-in-place mode (New, Load, Import, Open, Exit): offer
-        to save unsaved changes. Returns False to stay."""
+        to save unsaved changes. Returns False to stay. Without a script edited in place: the same for the settings
+        file the model was opened from (confirm_unsaved_config)."""
         if not self.script_has_unsaved_changes():
-            return True
+            return self.confirm_unsaved_config()
         answer = QMessageBox.question(
             self, "Unsaved changes",
             f"Save the changes to {os.path.basename(self.script_model.path)}?",
@@ -6531,19 +6648,13 @@ class MainWindowBase(QMainWindow):
         raise NotImplementedError
 
     def save_user_inputs_to_file(self, filename):
-        # make sure all tabs save their values
-        self.save_all_tabs()
-
+        # Save Config: the file becomes the one File > Save (Ctrl+S) writes; saved over the file the model was
+        # opened from, that file's other keys (e.g. a layout tool's) are kept
+        current = self._current_config_file()
+        keep = bool(current) and same_path(filename, current)
         try:
-            struct = {"application": self.APP_NAME,
-                        "data_format": "1.0"}
-            struct["saved_values"] = self.saved_values
-            struct.update(self.native_config_extra_struct())
-
-            with open(filename, "w") as f:
-                json.dump(struct, f, indent=4)
-            self._add_recent_file(RECENT_SETTINGS_KEY, filename)
-            QMessageBox.information(self, "Saved", f"Config saved to {filename}")
+            if self._write_config(filename, keep_other_keys=keep):
+                QMessageBox.information(self, "Saved", f"Config saved to {filename}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save config to {filename}: {e}")
 

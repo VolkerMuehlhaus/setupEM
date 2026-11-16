@@ -39,6 +39,7 @@ def open_window(monkeypatch, module_name):
 
 def close_window(window):
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 

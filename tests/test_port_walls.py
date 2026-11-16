@@ -86,6 +86,7 @@ def open_window(monkeypatch, gds=None, ports=(1, 2)):
 
 def close_window(window):
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
 
 

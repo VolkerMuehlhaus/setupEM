@@ -48,6 +48,7 @@ def win(monkeypatch):
     window = MainWindow()
     yield window
     window._script_dirty = False
+    window._config_baseline = None
     window.close()
     app.processEvents()
 
@@ -245,6 +246,7 @@ def test_command_line_choice(win, layout, monkeypatch):
     finally:
         for window in windows:
             window._script_dirty = False
+            window._config_baseline = None
             window.close()
     with pytest.raises(SystemExit):
         module.parse_arguments(["--continue-with-script"])
@@ -311,6 +313,7 @@ def test_load_config_while_editing_in_place(win, layout, monkeypatch):
 
     monkeypatch.setattr(win, "_ask_update_script_from_config", lambda p, d: "new")
     win._script_dirty = False
+    win._config_baseline = None
     monkeypatch.setattr(win, "confirm_unsaved_script", lambda: True)
     win.load_configuration_from_file(config)
     assert win.script_model is None and win.user_inputs_file == config
