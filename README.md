@@ -343,6 +343,10 @@ If you then start KLayout using this script, a new menu item is available: Tools
 
 If you use setupEM in a publication, please cite it. The **Cite this repository** button on the GitHub repository page gives APA and BibTeX entries, generated from [CITATION.cff](./CITATION.cff).
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23766714.svg)](https://doi.org/10.5281/zenodo.23766714)
+
+Each release of setupEM is archived on Zenodo with its own DOI. The DOI above, 10.5281/zenodo.23766714, always resolves to the latest version; the record lists the DOIs of all versions, so you can cite the version you used.
+
 Please also cite [gds2palace](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2), which builds the model, and the [Palace](https://github.com/awslabs/palace) solver that computed your results.
 
 # License

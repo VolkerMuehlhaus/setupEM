@@ -17,6 +17,7 @@ keywords:
   - IHP SG13G2
 version: 0.18.4
 date-released: 2026-11-16
+doi: 10.5281/zenodo.23766714
 references:
   - type: software
     title: "gds2palace: Create Palace FEM models from GDSII layout files"
@@ -25,6 +26,7 @@ references:
         given-names: "Volker"
     license: GPL-3.0-or-later
     repository-code: "https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2"
+    doi: 10.5281/zenodo.23984876
   - type: software
     title: "Palace: 3D Finite Element Solver for Computational Electromagnetics"
     authors:
