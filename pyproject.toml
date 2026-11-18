@@ -12,8 +12,8 @@ authors = [
     { name = "Volker Muehlhaus", email = "volker@muehlhaus.com" }
 ]
 dependencies = [
-    "gds2palace>=0.10.7",
-    "gds_prepare_for_EM>=1.6.0",
+    "gds2palace>=0.11.0",
+    "gds_prepare_for_EM>=1.8.0",
     "PySide6",
     "shiboken6",
     "scipy",
@@ -21,7 +21,7 @@ dependencies = [
     "scikit-rf",
     "matplotlib",
     "numpy",
-    "gdspy",
+    "gdstk",
     "meshio",
     "pyvista",
     "pyvistaqt"
