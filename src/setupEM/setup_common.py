@@ -37,7 +37,6 @@ import importlib.metadata
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
-import gdspy
 import shiboken6
 from scipy.interpolate import interp1d
 from PySide6.QtWidgets import (
@@ -302,7 +301,10 @@ def get_saved_value(saved_values, key, default):
 # (saved_values["cellname"], gds_reader.read_gds()'s cellname= argument, the
 # generated Python model's settings['cellname']), only the combo box display
 # uses this label. Translate at the two boundaries with cellname_for_display()/
-# cellname_from_display() rather than special-casing "" throughout.
+# cellname_from_display() rather than special-casing "" throughout. Once the GDS
+# file is read, the entry names the cell that "" means: "(default: <cell>)", the
+# design cell gds2palace's read_gds() takes (select_design_cell: the largest
+# top-level cell, never KLayout's $$$CONTEXT_INFO$$$).
 CELLNAME_DEFAULT_LABEL = "(default)"
 
 
@@ -310,8 +312,12 @@ def cellname_for_display(cellname):
     return cellname if cellname else CELLNAME_DEFAULT_LABEL
 
 
+def cellname_default_label(design_cell_name):
+    return f"{CELLNAME_DEFAULT_LABEL[:-1]}: {design_cell_name})" if design_cell_name else CELLNAME_DEFAULT_LABEL
+
+
 def cellname_from_display(text):
-    return "" if text == CELLNAME_DEFAULT_LABEL else text
+    return "" if text == CELLNAME_DEFAULT_LABEL or text.startswith(CELLNAME_DEFAULT_LABEL[:-1] + ": ") else text
 
 
 def is_setupem_generated(path):
@@ -908,17 +914,19 @@ class FileInputTab(QWidget):
 
     def update_cellnames_from_gds(self, filename):
         if filename:
-            # get top level cellnames now
+            # get the cellnames now, and the design cell that "(default)" stands for
             try:
-                lib = gdspy.GdsLibrary()
-                lib.read_gds(filename)
-                cellnames = list(lib.cells.keys())
+                import gdstk
+                from gds2palace.util_gds_reader import select_design_cell
+                lib = gdstk.read_gds(filename)
+                cellnames = [c.name for c in lib.cells]
+                default_name = select_design_cell(lib).name if lib.top_level() else ""
             except Exception:
                 # called on a just-resolved path during load_values() now, not only after
                 # the user explicitly picked a file via the Browse dialog - be defensive
                 return False
             self.cellname_box.clear()
-            self.cellname_box.addItem(CELLNAME_DEFAULT_LABEL)
+            self.cellname_box.addItem(cellname_default_label(default_name))
             for cellname in cellnames:
                 self.cellname_box.addItem(cellname)
             return True
@@ -1146,7 +1154,8 @@ class FileInputTab(QWidget):
         # was set) with no way to pick a different one without re-browsing for the file.
         saved_cellname = get_saved_value(saved_values, "cellname", "")
         if os.path.isfile(gdsfile) and self.update_cellnames_from_gds(gdsfile):
-            index = self.cellname_box.findText(cellname_for_display(saved_cellname))
+            # the "(default: ...)" entry is always the first one
+            index = self.cellname_box.findText(saved_cellname) if saved_cellname else 0
             self.cellname_box.setCurrentIndex(index if index >= 0 else 0)
         else:
             self.cellname_box.clear()

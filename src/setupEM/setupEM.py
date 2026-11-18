@@ -22,7 +22,6 @@ import numpy as np
 import importlib.metadata
 import importlib.util
 import requests
-import gdspy
 from scipy.interpolate import interp1d
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,

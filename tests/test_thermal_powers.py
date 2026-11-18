@@ -36,12 +36,12 @@ def app(monkeypatch):
 @pytest.fixture
 def export(tmp_path):
     """A thermal export as the plug-in writes it: GDS (outline on 201, a box per heat source), .tsimcfg, map."""
-    import gdspy
-    lib = gdspy.GdsLibrary()
-    cell = lib.add(gdspy.Cell("cascode", exclude_from_current=True)).cells["cascode"]
-    cell.add(gdspy.Rectangle((0, 0), (100, 100), layer=201))
+    import gdstk
+    lib = gdstk.Library()
+    cell = lib.new_cell("cascode")
+    cell.add(gdstk.rectangle((0, 0), (100, 100), layer=201))
     for n, layer in enumerate(LAYERS):
-        cell.add(gdspy.Rectangle((10 * n, 10), (10 * n + 5, 15), layer=layer))
+        cell.add(gdstk.rectangle((10 * n, 10), (10 * n + 5, 15), layer=layer))
     gds = tmp_path / "cascode_thermal.gds"
     lib.write_gds(str(gds))
     sources = [{"layer": layer, "device": f"dev{n}@{n},0", "pcell": "npn13G2" if "Q" in name else "rhigh",

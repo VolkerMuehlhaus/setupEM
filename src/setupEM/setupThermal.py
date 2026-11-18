@@ -21,7 +21,6 @@ import sys, json, os, pathlib, ast, webbrowser, argparse, math
 import numpy as np
 import importlib.metadata
 import requests
-import gdspy
 from scipy.interpolate import interp1d
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
