@@ -1,4 +1,4 @@
-# What's New - November 18, 2026 (setupEM 0.19.0)
+# What's New - November 19, 2026 (setupEM 0.19.0)
 
 Needs gds2palace 0.11 and gds_prepare_for_EM 1.8 or newer (`pip install` updates them). setupEM, gds2palace and gds_prepare_for_EM read layouts with gdstk now instead of gdspy, which is no longer maintained (its polygon fracturing could hang); gdspy is no longer installed with setupEM.
 
