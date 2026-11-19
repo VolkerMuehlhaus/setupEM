@@ -19,7 +19,7 @@
 """
 gds_hierarchy_scan.py
 
-Cheap, pure-gdspy GDS cell-hierarchy walkers that never call cell.flatten().
+Cheap GDS cell-hierarchy walkers (gdstk objects) that never call cell.flatten().
 gds2palace's own gds_reader.read_gds() flattens the whole chosen cell (every
 array/reference expanded into real, individual polygon objects) before doing
 anything else - fine for actually building a model, but for a densely-arrayed
@@ -47,11 +47,14 @@ def layers_present_in_range(gds_path, cellname, layer_min, layer_max, purposelis
     polygon whose datatype is in purposelist (any datatype if purposelist is
     falsy), anywhere in the cell hierarchy - without flattening. Recursive,
     memoized-per-cell-name, set-union based: unlike estimate_polygon_count,
-    presence needs no CellArray columns*rows multiplication (N copies of a
-    present layer is still just "present"), so CellReference and CellArray
+    presence needs no array columns*rows multiplication (N copies of a
+    present layer is still just "present"), so plain and array references
     are treated identically here. Raises on open/resolve failure, same as
-    open_gds_cell(); callers wrap in their own try/except.
+    open_gds_cell() (gds_prepare_for_EM >= 1.8: gdstk library and cell);
+    callers wrap in their own try/except.
     """
+    import gdstk
+
     library, cell = open_gds_cell(gds_path, cellname)
     wanted = set(range(layer_min, layer_max + 1))
     purposeset = set(int(p) for p in purposelist) if purposelist else None
@@ -62,20 +65,15 @@ def layers_present_in_range(gds_path, cellname, layer_min, layer_max, purposelis
         if c.name in memo:
             return memo[c.name]
         found = set()
-        for polygonset in c.polygons:
-            for layer, datatype in zip(polygonset.layers, polygonset.datatypes):
-                layer = int(layer)
-                if layer in wanted and (purposeset is None or int(datatype) in purposeset):
-                    found.add(layer)
+        for polygon in c.polygons:
+            if polygon.layer in wanted and (purposeset is None or polygon.datatype in purposeset):
+                found.add(polygon.layer)
         for ref in c.references:
             if found >= wanted:
                 break  # already covers every requested layer - nothing left to gain
-            ref_cell = ref.ref_cell
-            if isinstance(ref_cell, str):
-                ref_cell = library.cells.get(ref_cell)
-            if ref_cell is None:
-                continue
-            found |= scan(ref_cell)
+            if not isinstance(ref.cell, gdstk.Cell):
+                continue  # cell missing from the file
+            found |= scan(ref.cell)
         memo[c.name] = found
         return found
 

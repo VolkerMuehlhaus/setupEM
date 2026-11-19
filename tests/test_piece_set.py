@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-import gdspy
+import gdstk
 import numpy as np
 import pytest
 import skrf as rf
@@ -47,17 +47,17 @@ def messages(monkeypatch):
 def _gds(path, x0, x1, ports=(201, 202), ymin_port=None):
     """a line from x0 to x1 between two ground strips; ports: the layers of the port at x0 and at x1 (None: no port
     there); ymin_port: the layer of a port on the lower layout edge"""
-    lib = gdspy.GdsLibrary()
-    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib = gdstk.Library()
+    cell = gdstk.Cell("line")
     lib.add(cell)
-    cell.add(gdspy.Rectangle((x0, -5), (x1, 5), layer=134))
+    cell.add(gdstk.rectangle((x0, -5), (x1, 5), layer=134))
     for y0, y1 in ((-55, -15), (15, 55)):
-        cell.add(gdspy.Rectangle((x0, y0), (x1, y1), layer=134))
+        cell.add(gdstk.rectangle((x0, y0), (x1, y1), layer=134))
     for layer, x in zip(ports, (x0, x1)):
         if layer:
-            cell.add(gdspy.Rectangle((x, -5), (x, 5), layer=layer))
+            cell.add(gdstk.rectangle((x, -5), (x, 5), layer=layer))
     if ymin_port:
-        cell.add(gdspy.Rectangle((x0 + 20, -55), (x0 + 30, -55), layer=ymin_port))
+        cell.add(gdstk.rectangle((x0 + 20, -55), (x0 + 30, -55), layer=ymin_port))
     lib.write_gds(str(path))
     return str(path).replace("\\", "/")
 
