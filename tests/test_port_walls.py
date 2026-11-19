@@ -7,7 +7,7 @@
 import os
 import sys
 
-import gdspy
+import gdstk
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -51,17 +51,17 @@ def answer(monkeypatch, button_text):
 
 def gssg_gds(path, stub_on_ymax=False):
     """GSSG lines from the xmin edge, ports 1 um deep on 201/202; optionally a stub with a port on the ymax edge"""
-    lib = gdspy.GdsLibrary()
-    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib = gdstk.Library()
+    cell = gdstk.Cell("line")
     lib.add(cell)
     for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
-        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
-        cell.add(gdspy.Rectangle((0, y0), (1, y1), layer=201 + k))
+        cell.add(gdstk.rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (1, y1), layer=201 + k))
     for y0, y1 in ((-65, -25), (25, 65)):
-        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (300, y1), layer=134))
     if stub_on_ymax:
-        cell.add(gdspy.Rectangle((150, 65), (160, 80), layer=134))
-        cell.add(gdspy.Rectangle((150, 79), (160, 80), layer=203))
+        cell.add(gdstk.rectangle((150, 65), (160, 80), layer=134))
+        cell.add(gdstk.rectangle((150, 79), (160, 80), layer=203))
     lib.write_gds(str(path))
     return str(path)
 
@@ -205,15 +205,15 @@ def test_a_via_port_row_keeps_topmetal2_as_target(monkeypatch, app, tmp_path):
 
 
 def test_an_error_on_one_wall_still_checks_the_other(monkeypatch, app, messages, tmp_path):
-    lib = gdspy.GdsLibrary()
-    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib = gdstk.Library()
+    cell = gdstk.Cell("line")
     lib.add(cell)
     for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
-        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
-        cell.add(gdspy.Rectangle((0, y0), (1, y1), layer=201 + k))
-        cell.add(gdspy.Rectangle((299, y0), (300, y1), layer=203 + k))
+        cell.add(gdstk.rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (1, y1), layer=201 + k))
+        cell.add(gdstk.rectangle((299, y0), (300, y1), layer=203 + k))
     for y0, y1 in ((-65, -25), (25, 65)):
-        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (300, y1), layer=134))
     lib.write_gds(str(tmp_path / "line.gds"))
     window, module = open_window(monkeypatch, str(tmp_path / "line.gds"), ports=(1, 2, 3, 4))
     window.ports_tab.portslist.item(0, 3).setText("LBE")
@@ -251,13 +251,13 @@ def test_target_and_via_presets_use_the_topmost_metal(monkeypatch, app, stackup,
 
 def test_a_via_port_on_a_port_wall_is_used_as_a_gap_port(monkeypatch, app, messages, tmp_path):
     """the 60 GHz PA case: TopMetal2 lines over a Metal3 plane, via ports Metal3 -> TopMetal2 along the edge"""
-    lib = gdspy.GdsLibrary()
-    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib = gdstk.Library()
+    cell = gdstk.Cell("line")
     lib.add(cell)
     for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
-        cell.add(gdspy.Rectangle((0, y0), (300, y1), layer=134))
-        cell.add(gdspy.Rectangle((0, y0), (0, y1), layer=201 + k))
-    cell.add(gdspy.Rectangle((0, -65), (300, 65), layer=30))
+        cell.add(gdstk.rectangle((0, y0), (300, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (0, y1), layer=201 + k))
+    cell.add(gdstk.rectangle((0, -65), (300, 65), layer=30))
     lib.write_gds(str(tmp_path / "line.gds"))
     window, module = open_window(monkeypatch, str(tmp_path / "line.gds"))
     window.ports_tab.update_port_from_import([
@@ -331,14 +331,14 @@ def test_window_size_and_divider_are_kept_between_sessions(monkeypatch, app):
 
 def test_extension_auto_is_checked_saved_and_shown(monkeypatch, app, messages, tmp_path):
     from setupEM.layout_preview import LayoutPreviewWindow
-    lib = gdspy.GdsLibrary()
-    cell = gdspy.Cell("line", exclude_from_current=True)
+    lib = gdstk.Library()
+    cell = gdstk.Cell("line")
     lib.add(cell)
     for k, (y0, y1) in enumerate([(-15, -5), (5, 15)]):
-        cell.add(gdspy.Rectangle((0, y0), (20, y1), layer=134))
-        cell.add(gdspy.Rectangle((0, y0), (1, y1), layer=201 + k))
-    cell.add(gdspy.Rectangle((20, -40), (120, 40), layer=134))
-    cell.add(gdspy.Rectangle((0, -60), (120, 60), layer=250))
+        cell.add(gdstk.rectangle((0, y0), (20, y1), layer=134))
+        cell.add(gdstk.rectangle((0, y0), (1, y1), layer=201 + k))
+    cell.add(gdstk.rectangle((20, -40), (120, 40), layer=134))
+    cell.add(gdstk.rectangle((0, -60), (120, 60), layer=250))
     lib.write_gds(str(tmp_path / "dev.gds"))
     window, module = open_window(monkeypatch, str(tmp_path / "dev.gds"))
     window.mesh_tab.set_port_wall("xmin")

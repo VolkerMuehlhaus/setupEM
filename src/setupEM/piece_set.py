@@ -103,10 +103,12 @@ def ports_on_edge(gds, cellname, port_layers):
     if stamp in _edge_cache:
         return _edge_cache[stamp]
     try:
-        import gdspy
-        lib = gdspy.GdsLibrary(infile=gds)
-        cell = lib.cells.get(cellname) or (lib.top_level() or [None])[0]
-        by_spec = cell.get_polygons(by_spec=True)
+        import gdstk
+        from gds2palace.util_gds_reader import select_design_cell
+        cell = select_design_cell(gdstk.read_gds(gds), cellname)     # the cell read_gds() reads
+        by_spec = {}
+        for polygon in cell.get_polygons(include_paths=True):
+            by_spec.setdefault((polygon.layer, polygon.datatype), []).append(polygon.points)
     except Exception:       # noqa: BLE001 - an unreadable layout: the caller falls back to the export's record
         return None
     points = [p for polys in by_spec.values() for p in polys if len(p)]

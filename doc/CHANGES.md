@@ -1,3 +1,11 @@
+# What's New - November 18, 2026 (setupEM 0.19.0)
+
+Needs gds2palace 0.11 and gds_prepare_for_EM 1.8 or newer (`pip install` updates them). setupEM, gds2palace and gds_prepare_for_EM read layouts with gdstk now instead of gdspy, which is no longer maintained (its polygon fracturing could hang); gdspy is no longer installed with setupEM.
+
+**The cell read when the Cellname box says "(default)".** gds2palace 0.11 reads the design cell then: the top-level cell with the largest bounding box, never KLayout's `$$$CONTEXT_INFO$$$`. Before, it read the first top-level cell, which depends on the order in the file (for some KLayout files `$$$CONTEXT_INFO$$$`). The box now names that cell, e.g. "(default: T582_BEOL_D1_300u)", so you see which cell the model and the layout preview use; it is still saved as an empty cell name. Tools > Simplify GDS takes the same cell (gds_prepare_for_EM 1.8).
+
+**Tools > Simplify GDS** gets gds_prepare_for_EM 1.8: merged vias are complete (before, rings of vias came out cut open and large via fields lost strips along their fracture lines), circuit blocks whose wiring is drawn as paths are no longer deleted as seal rings, and large layouts are much faster.
+
 # What's New - November 16, 2026 (setupEM 0.18.4)
 
 **File > Save (Ctrl+S) saves the settings file you opened.** Opened from a `.simcfg` (e.g. the KLayout plug-in's export, with Open in setupEM), Ctrl+S did nothing: the action existed only for a script edited in place, and changes such as a port wall extension were lost without a question when setupEM was closed. Now:

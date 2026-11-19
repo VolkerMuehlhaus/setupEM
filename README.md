@@ -95,7 +95,7 @@ The setupEM module also installs these dependencies:
 - scikit-rf
 - matplotlib
 - numpy
-- gdspy
+- gdstk
 - meshio
 - pyvista
 - pyvistaqt
