@@ -88,3 +88,30 @@ def test_uniform_sweep_is_unchanged(tab):
     text = feed(tab, ["Sweeping excitation index 2 (2/8):",
                       "It 1/1: ω/2π = 9.300e+01 GHz (total elapsed time = 1.52e+01 s, solve 9/64)"])
     assert "Port: 2/8" in text and "Freq: 1/1 (solve 9/64)" in text
+
+
+def test_amr_counts_refinements_up_to_the_end(tab):
+    """AMR lines of a MaxIts=2 run, the same in Palace 0.18.1 and 0.19.0: the final summary keeps 2/2"""
+    tab._init_status_state()
+    tab._status_amr_max, tab._status_amr_cur = 2, 0       # as _reset_status_for_run() sets them
+    seen = []
+    for line in ["It 3/3: ω/2π = 5.000e+00 GHz (total elapsed time = 2.06e+00 s, solve 3/6)",
+                 "Adaptive mesh refinement (AMR) iteration 1:",
+                 "Proceeding with solve/estimate iteration 2...",
+                 "Adaptive mesh refinement (AMR) iteration 2:",
+                 "Proceeding with solve/estimate iteration 3...",
+                 "Completed 2 iterations of adaptive mesh refinement (AMR):"]:
+        tab._parse_palace_status_line(line)
+        seen.append(tab.status_line.text().split("AMR iteration: ")[1])
+    assert seen == ["0/2", "0/2", "1/2", "1/2", "2/2", "2/2"]
+
+
+def test_amr_stopped_by_tolerance(tab):
+    """AMR ends before MaxIts when the error indicator is below the tolerance"""
+    tab._init_status_state()
+    tab._status_amr_max, tab._status_amr_cur = 5, 0
+    for line in ["Adaptive mesh refinement (AMR) iteration 1:",
+                 "Proceeding with solve/estimate iteration 2...",
+                 "Completed 1 iteration of adaptive mesh refinement (AMR):"]:
+        tab._parse_palace_status_line(line)
+    assert "AMR iteration: 1/5" in tab.status_line.text()

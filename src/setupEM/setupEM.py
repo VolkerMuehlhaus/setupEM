@@ -2566,20 +2566,17 @@ class CreateModelTab(CreateModelTabBase):
     # all - only these per-port greedy-sampling steps, with no fixed total to divide by:
     #   "Greedy iteration 1 (n = 4): ω* = 2.716e+01 GHz (4.986e-01), error = 7.573e-03, memory = 1/2"
     _RE_GREEDY = re.compile(r"Greedy iteration (\d+) \(n = (\d+)\):")
-    # Different Palace releases report each just-finished AMR pass differently, but both
-    # number 1-based from the very first (unrefined-mesh) solve - there is no "iteration 0"
-    # in either wording. Confirmed two ways: the "global unknowns" figure on these lines
-    # matches the DOF count of the solve that just finished (not a next/refined mesh), and
-    # palace_results.py's own output-folder naming (iteration1/, iteration2/, ...) uses the
-    # same 1-based scheme.
-    #   "Completed 1 iteration of adaptive mesh refinement (AMR): Indicator norm=..., global unknowns=..."   (older release)
-    #   "Adaptive mesh refinement (AMR) iteration 1: Indicator norm=..., global unknowns=..."                 (v0.16.0-34-gea2e7b23)
-    # The newer release also prints "Proceeding with solve/estimate iteration 2..." right
-    # after refining/rebalancing, announcing the *next* iteration before its ports start
-    # solving - matched separately so the display updates immediately instead of lagging one
-    # iteration behind until that next iteration's own report line finally appears.
-    _RE_AMR_ITER_A = re.compile(r"Completed (\d+) iteration.*adaptive mesh refinement \(AMR\)")
-    _RE_AMR_ITER_B = re.compile(r"Adaptive mesh refinement \(AMR\) iteration (\d+):")
+    # AMR lines, the same wording in Palace 0.12 to 0.19 (checked in the sources and in 0.18.1 and
+    # 0.19.0 runs). Palace numbers solve passes from 1, the unrefined mesh being pass 1, like the
+    # output folders iteration1/, iteration2/, ... that palace_results.py reads:
+    #   "Adaptive mesh refinement (AMR) iteration 1:"    after pass 1 is solved, before refining
+    #   "Proceeding with solve/estimate iteration 2..."  pass 2 (on the refined mesh) starts
+    #   "Completed 2 iterations of adaptive mesh refinement (AMR):"  once, at the end
+    # The status line counts refinements instead (the unrefined mesh is 0, the last pass of a
+    # MaxIts=2 run is 2/2): pass numbers minus 1, but the final "Completed N" already counts
+    # refinements and is shown as it is.
+    _RE_AMR_DONE = re.compile(r"Completed (\d+) iterations? of adaptive mesh refinement \(AMR\)")
+    _RE_AMR_ITER = re.compile(r"Adaptive mesh refinement \(AMR\) iteration (\d+):")
     _RE_AMR_PROCEEDING = re.compile(r"Proceeding with solve/estimate iteration (\d+)")
     # Frequency of the solve that follows: "It 7/7: ω/2π = 1.700e+02 GHz (...)" in a uniform
     # sweep, "Greedy iteration 1 (n = 4): ω* = 2.716e+01 GHz (...)" while PROM builds its model.
@@ -2726,20 +2723,16 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
-        for amr_re in (self._RE_AMR_ITER_A, self._RE_AMR_ITER_B, self._RE_AMR_PROCEEDING):
-            m = amr_re.search(line)
-            if m and self._status_amr_max:
-                # Palace's own log numbers the initial, unrefined-mesh solve as "iteration
-                # 1" (confirmed earlier against DOF counts and palace_results.py's own
-                # iteration1/iteration2/... folder naming). Displayed here shifted down by
-                # 1 instead, so the initial solve reads "0" and each subsequent number
-                # counts completed *refinements* - e.g. the 2nd refinement (Palace's
-                # "iteration 3") reads "2/2" against a MaxIts=2 config, not "3/2". Not
-                # clamped to amr_max: MaxIts caps refinement actions, not solve passes, so
-                # the last legitimate pass is Palace's "iteration MaxIts+1" (displayed
-                # "MaxIts") - showing whatever Palace actually reports is more honest than
-                # silently capping it.
-                self._status_amr_cur = int(m.group(1)) - 1
+        if self._status_amr_max:
+            m = self._RE_AMR_DONE.search(line)
+            if m:
+                self._status_amr_cur = int(m.group(1))
+            else:
+                m = self._RE_AMR_ITER.search(line) or self._RE_AMR_PROCEEDING.search(line)
+                if m:
+                    # Not clamped to MaxIts: showing what Palace reports is more honest.
+                    self._status_amr_cur = int(m.group(1)) - 1
+            if m:
                 self._update_status_line()
                 return
 
