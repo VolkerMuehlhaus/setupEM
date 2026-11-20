@@ -2544,13 +2544,23 @@ class CreateModelTab(CreateModelTabBase):
     _RE_STANDARD = re.compile(r"^calibration standard (\d+) of (\d+): ([^,\s]+)")
     _RE_STANDARD_REUSED = re.compile(r"^\s*reused, solved")
     _RE_DEVICE_MODEL = re.compile(r"^device model\s*$")
-    _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
+    # Palace 0.19 prints "Sweeping excitation index 5:" without "(k/N)" in the PROM online
+    # phase, so the position is optional here and then comes from the excitation map below.
+    _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index (\d+)(?: \((\d+)/(\d+)\))?:")
+    # Printed once per excitation before any solve, same wording in Palace 0.15 to 0.19:
+    #   "Excitation 2/3 with index 5 has contributions from:" (several excitations)
+    #   "Excitation with index 1 has contributions from:"     (one excitation)
+    # It maps an excitation index to its position, for log lines that only name the index.
+    _RE_EXCITATION_MAP = re.compile(r"^Excitation(?: (\d+)/(\d+))? with index (\d+) has contributions from:")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
     # (interpolated-evaluation) phase, so the solve suffix is matched separately and is
     # optional; its presence is what distinguishes a real full-order solve from a PROM
     # evaluation (see _parse_palace_status_line).
-    _RE_FREQ = re.compile(r"It (\d+)/(\d+):")
+    # Palace 0.19 names the excitation in the PROM online phase, which runs frequency by
+    # frequency through all excitations: "It 5/119, excitation 2: ω/2π = ..." (0.18 and older:
+    # "It 5/119: ω/2π = ...", one excitation after the other).
+    _RE_FREQ = re.compile(r"It (\d+)/(\d+)(?:, excitation (\d+))?:")
     _RE_SOLVE_SUFFIX = re.compile(r"solve (\d+)/(\d+)\)")
     # PROM's offline phase (building the reduced-order model) has no "It i/n" progress at
     # all - only these per-port greedy-sampling steps, with no fixed total to divide by:
@@ -2598,6 +2608,7 @@ class CreateModelTab(CreateModelTabBase):
         self._status_solve_freq_ghz = None
         self._nonconverged = []
         self._status_stage = None       # with port walls: which solve of run_sim runs (a standard or the model)
+        self._status_excitations = {}   # excitation index -> (position, total), see _RE_EXCITATION_MAP
         self._update_status_line()
 
     def _reset_status_for_run(self):
@@ -2631,6 +2642,7 @@ class CreateModelTab(CreateModelTabBase):
     def _new_solve(self, stage):
         """A new Palace run in run_sim (a calibration standard or the model): its own ports and frequencies"""
         self._status_stage = stage
+        self._status_excitations = {}
         self._status_port_cur = self._status_port_total = None
         self._status_freq_display = None
         self._status_solve_display = ""
@@ -2664,10 +2676,18 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
+        m = self._RE_EXCITATION_MAP.search(line)
+        if m:
+            position, total = (int(m.group(1)), int(m.group(2))) if m.group(1) else (1, 1)
+            self._status_excitations[int(m.group(3))] = (position, total)
+            return
+
         m = self._RE_EXCITATION.search(line)
         if m:
-            self._status_port_cur = int(m.group(1))
-            self._status_port_total = int(m.group(2))
+            if m.group(2):
+                self._status_port_cur, self._status_port_total = int(m.group(2)), int(m.group(3))
+            else:
+                self._set_port_from_excitation_index(int(m.group(1)))
             # New port: the previous port's frequency/solve position no longer applies.
             self._status_freq_display = None
             self._status_solve_display = ""
@@ -2677,6 +2697,11 @@ class CreateModelTab(CreateModelTabBase):
 
         m = self._RE_FREQ.search(line)
         if m:
+            if m.group(3):
+                self._set_port_from_excitation_index(int(m.group(3)))
+            elif self._status_port_cur is None and len(self._status_excitations) == 1:
+                # one excitation: Palace prints no "excitation index" line at all
+                self._status_port_cur = self._status_port_total = 1
             solve_m = self._RE_SOLVE_SUFFIX.search(line)
             if solve_m:
                 # Real per-frequency full-order solve (uniform sweep) - meaningful progress.
@@ -2717,6 +2742,13 @@ class CreateModelTab(CreateModelTabBase):
                 self._status_amr_cur = int(m.group(1)) - 1
                 self._update_status_line()
                 return
+
+    def _set_port_from_excitation_index(self, index):
+        """Port k/N from a log line that only names the excitation index (Palace 0.19)"""
+        if index in self._status_excitations:
+            self._status_port_cur, self._status_port_total = self._status_excitations[index]
+        else:
+            self._status_port_cur, self._status_port_total = index, "?"
 
     def _report_nonconvergence(self, iterations):
         """Flag an unconverged Palace linear solve right away in the log, and remember
