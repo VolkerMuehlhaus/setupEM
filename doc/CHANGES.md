@@ -6,6 +6,7 @@ Needs gds2palace 0.12.0 or newer (`pip install` updates it).
 
 **Status line with Palace 0.19.** Palace 0.19 writes the progress of the adaptive frequency sweep in a new form, and the status line stayed at "Port: n/a | Freq: ROM build" for the whole sweep. It now shows port and frequency progress with Palace 0.19 as with older versions, and a model with one excitation shows "Port 1/1". After a run with adaptive mesh refinement, the AMR iteration no longer drops back by one at the end (e.g. from 2/2 to 1/2).
 
+# What's New - November 19, 2026 (setupEM 0.19.0)
 
 Needs gds2palace 0.11 and gds_prepare_for_EM 1.8 or newer (`pip install` updates them). setupEM, gds2palace and gds_prepare_for_EM read layouts with gdstk now instead of gdspy, which is no longer maintained (its polygon fracturing could hang); gdspy is no longer installed with setupEM.
 
