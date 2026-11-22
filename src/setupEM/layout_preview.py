@@ -167,6 +167,17 @@ VIA_POSITIVE_COLOR = PORT_OUTLINE_COLOR  # pink/magenta: +Z, current out of the 
 VIA_NEGATIVE_COLOR = "#3399ff"           # blue: -Z, current into the page
 
 
+def _via_port_is_tube(size_x, size_y):
+    """True if gds2palace makes a tube port (four side walls) from a via port shape of this size:
+    gds2palace 0.12.0 and newer, for a shape whose short side is more than 10 % of its long side.
+    Always False with an older gds2palace, which makes one sheet from any shape."""
+    try:
+        from gds2palace import simulation_setup
+        return bool(simulation_setup.via_port_is_tube(size_x, size_y))
+    except (ImportError, AttributeError):
+        return False
+
+
 def _via_marker_items(negative):
     """Graphics item for a Z/-Z via port's marker: a filled circle at the port
     location - pink for current out of the page (+Z), blue for into the page
@@ -1406,12 +1417,15 @@ class LayoutPreviewWindow(QDialog):
 
                         # A via port (from_layername/to_layername, not target_layername)
                         # whose drawn marker polygon has finite size in BOTH x and y isn't
-                        # actually meshed as that full rectangle - gds2palace's add_ports()
-                        # (util_simulation_setup.py) collapses whichever axis is shorter
-                        # down to its minimum edge (not its true center, despite what the
-                        # user guide says) and keeps only the longer axis at full extent,
-                        # to get a single 2D sheet. Show that effective line so a
-                        # finite-area via port doesn't look like it becomes a full sheet.
+                        # meshed as that full rectangle. gds2palace's add_ports()
+                        # (util_simulation_setup.py) makes one of two things from it:
+                        # - a narrow box (a line): one sheet along the longer axis, at the
+                        #   min edge of the shorter axis (not its center);
+                        # - a shape with area (gds2palace 0.12.0 and newer, see
+                        #   via_port_is_tube()): a tube port, the four side walls of the
+                        #   bounding box.
+                        # Show those effective sheets so a finite-area via port doesn't
+                        # look like it becomes a full sheet.
                         # Unlike the fixed-pixel-size markers above, this must scale/pan
                         # with the real geometry, so it's added directly rather than
                         # through the ItemIgnoresTransformations + setPos() path.
@@ -1419,25 +1433,34 @@ class LayoutPreviewWindow(QDialog):
                             size_x = poly.xmax - poly.xmin
                             size_y = poly.ymax - poly.ymin
                             if size_x > 0 and size_y > 0:
-                                if size_y > size_x:
-                                    line = QLineF(QPointF(poly.xmin, -poly.ymin), QPointF(poly.xmin, -poly.ymax))
+                                is_tube = _via_port_is_tube(size_x, size_y)
+                                x0, x1, y0, y1 = poly.xmin, poly.xmax, -poly.ymin, -poly.ymax
+                                if is_tube:
+                                    lines = [QLineF(QPointF(x0, y0), QPointF(x0, y1)), QLineF(QPointF(x1, y0), QPointF(x1, y1)),
+                                             QLineF(QPointF(x0, y0), QPointF(x1, y0)), QLineF(QPointF(x0, y1), QPointF(x1, y1))]
+                                    sheet_tooltip = (" - tube port: the four side walls of the drawn shape "
+                                                     "(for a port that stands for a conductor, not de-embedded)")
+                                elif size_y > size_x:
+                                    lines = [QLineF(QPointF(x0, y0), QPointF(x0, y1))]
                                 else:
-                                    line = QLineF(QPointF(poly.xmin, -poly.ymin), QPointF(poly.xmax, -poly.ymin))
-                                centerline_item = QGraphicsLineItem(line)
-                                # fat and dashed, deliberately much bolder than the
-                                # input frame's own solid MARKER_OUTLINE_WIDTH
-                                # outline, so it reads as the actual simulated line
-                                # rather than getting lost inside the drawn rectangle
-                                centerline_pen = QPen(QColor(outline_color), MARKER_OUTLINE_WIDTH * 2)
-                                centerline_pen.setCosmetic(True)
-                                centerline_pen.setStyle(Qt.DashLine)
-                                centerline_item.setPen(centerline_pen)
-                                centerline_item.setToolTip(
-                                    tooltip + " - effective via port sheet "
-                                    "(gds2palace pins the shorter axis to its min edge)")
-                                centerline_item.setZValue(marker_zvalue + 1)
-                                scene.addItem(centerline_item)
-                                group.add(centerline_item)
+                                    lines = [QLineF(QPointF(x0, y0), QPointF(x1, y0))]
+                                if not is_tube:
+                                    sheet_tooltip = (" - effective via port sheet "
+                                                     "(gds2palace pins the shorter axis to its min edge)")
+                                for line in lines:
+                                    centerline_item = QGraphicsLineItem(line)
+                                    # fat and dashed, deliberately much bolder than the
+                                    # input frame's own solid MARKER_OUTLINE_WIDTH
+                                    # outline, so it reads as the actual simulated sheet
+                                    # rather than getting lost inside the drawn rectangle
+                                    centerline_pen = QPen(QColor(outline_color), MARKER_OUTLINE_WIDTH * 2)
+                                    centerline_pen.setCosmetic(True)
+                                    centerline_pen.setStyle(Qt.DashLine)
+                                    centerline_item.setPen(centerline_pen)
+                                    centerline_item.setToolTip(tooltip + sheet_tooltip)
+                                    centerline_item.setZValue(marker_zvalue + 1)
+                                    scene.addItem(centerline_item)
+                                    group.add(centerline_item)
 
                         text = QGraphicsSimpleTextItem(label_text)
                         font = QFont()
