@@ -184,7 +184,7 @@ FEM simulation can't run at 0 Hz DC. If you set start frequency to 0, gds2palace
 
 ## Ports tab
 
-Ports are created by drawing rectangles on special GDSII layers (see the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) for the exact layer/shape rules - in-plane ports use rectangles, via ports use zero-size lines). Each port needs its own source layer. On this tab, you map each source layer to a port number, direction, and target layer(s) - direction matters for polarity when multiple ports share a ground.
+Ports are created by drawing rectangles on special GDSII layers (see the [gds2palace documentation](https://github.com/VolkerMuehlhaus/gds2palace_ihp_sg13g2/blob/main/doc/gds2palace_workflow_userguide.pdf) for the exact layer/shape rules - in-plane ports use rectangles, via ports use zero-size lines). A via port shape drawn with an area becomes a tube port (gds2palace 0.12.0 and newer): its four side walls form one port, for a port that stands for a real conductor such as a copper pillar between two chips simulated separately. The layout preview shows it as four walls. Each port needs its own source layer. On this tab, you map each source layer to a port number, direction, and target layer(s) - direction matters for polarity when multiple ports share a ground.
 
 Make your settings in the upper part of the tab, then **Apply** to add/update the row in the port list below.
 

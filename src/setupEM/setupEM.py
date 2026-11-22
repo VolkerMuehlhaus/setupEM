@@ -2544,32 +2544,39 @@ class CreateModelTab(CreateModelTabBase):
     _RE_STANDARD = re.compile(r"^calibration standard (\d+) of (\d+): ([^,\s]+)")
     _RE_STANDARD_REUSED = re.compile(r"^\s*reused, solved")
     _RE_DEVICE_MODEL = re.compile(r"^device model\s*$")
-    _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index \d+ \((\d+)/(\d+)\):")
+    # Palace 0.19 prints "Sweeping excitation index 5:" without "(k/N)" in the PROM online
+    # phase, so the position is optional here and then comes from the excitation map below.
+    _RE_EXCITATION = re.compile(r"(?:Sweeping|Adding) excitation index (\d+)(?: \((\d+)/(\d+)\))?:")
+    # Printed once per excitation before any solve, same wording in Palace 0.15 to 0.19:
+    #   "Excitation 2/3 with index 5 has contributions from:" (several excitations)
+    #   "Excitation with index 1 has contributions from:"     (one excitation)
+    # It maps an excitation index to its position, for log lines that only name the index.
+    _RE_EXCITATION_MAP = re.compile(r"^Excitation(?: (\d+)/(\d+))? with index (\d+) has contributions from:")
     # "It i/n: ... (total elapsed time = t s, solve k/N)" in a uniform sweep, but only
     # "It i/n: ... (total elapsed time = t s)" - no trailing solve k/N - during PROM's online
     # (interpolated-evaluation) phase, so the solve suffix is matched separately and is
     # optional; its presence is what distinguishes a real full-order solve from a PROM
     # evaluation (see _parse_palace_status_line).
-    _RE_FREQ = re.compile(r"It (\d+)/(\d+):")
+    # Palace 0.19 names the excitation in the PROM online phase, which runs frequency by
+    # frequency through all excitations: "It 5/119, excitation 2: ω/2π = ..." (0.18 and older:
+    # "It 5/119: ω/2π = ...", one excitation after the other).
+    _RE_FREQ = re.compile(r"It (\d+)/(\d+)(?:, excitation (\d+))?:")
     _RE_SOLVE_SUFFIX = re.compile(r"solve (\d+)/(\d+)\)")
     # PROM's offline phase (building the reduced-order model) has no "It i/n" progress at
     # all - only these per-port greedy-sampling steps, with no fixed total to divide by:
     #   "Greedy iteration 1 (n = 4): ω* = 2.716e+01 GHz (4.986e-01), error = 7.573e-03, memory = 1/2"
     _RE_GREEDY = re.compile(r"Greedy iteration (\d+) \(n = (\d+)\):")
-    # Different Palace releases report each just-finished AMR pass differently, but both
-    # number 1-based from the very first (unrefined-mesh) solve - there is no "iteration 0"
-    # in either wording. Confirmed two ways: the "global unknowns" figure on these lines
-    # matches the DOF count of the solve that just finished (not a next/refined mesh), and
-    # palace_results.py's own output-folder naming (iteration1/, iteration2/, ...) uses the
-    # same 1-based scheme.
-    #   "Completed 1 iteration of adaptive mesh refinement (AMR): Indicator norm=..., global unknowns=..."   (older release)
-    #   "Adaptive mesh refinement (AMR) iteration 1: Indicator norm=..., global unknowns=..."                 (v0.16.0-34-gea2e7b23)
-    # The newer release also prints "Proceeding with solve/estimate iteration 2..." right
-    # after refining/rebalancing, announcing the *next* iteration before its ports start
-    # solving - matched separately so the display updates immediately instead of lagging one
-    # iteration behind until that next iteration's own report line finally appears.
-    _RE_AMR_ITER_A = re.compile(r"Completed (\d+) iteration.*adaptive mesh refinement \(AMR\)")
-    _RE_AMR_ITER_B = re.compile(r"Adaptive mesh refinement \(AMR\) iteration (\d+):")
+    # AMR lines, the same wording in Palace 0.12 to 0.19 (checked in the sources and in 0.18.1 and
+    # 0.19.0 runs). Palace numbers solve passes from 1, the unrefined mesh being pass 1, like the
+    # output folders iteration1/, iteration2/, ... that palace_results.py reads:
+    #   "Adaptive mesh refinement (AMR) iteration 1:"    after pass 1 is solved, before refining
+    #   "Proceeding with solve/estimate iteration 2..."  pass 2 (on the refined mesh) starts
+    #   "Completed 2 iterations of adaptive mesh refinement (AMR):"  once, at the end
+    # The status line counts refinements instead (the unrefined mesh is 0, the last pass of a
+    # MaxIts=2 run is 2/2): pass numbers minus 1, but the final "Completed N" already counts
+    # refinements and is shown as it is.
+    _RE_AMR_DONE = re.compile(r"Completed (\d+) iterations? of adaptive mesh refinement \(AMR\)")
+    _RE_AMR_ITER = re.compile(r"Adaptive mesh refinement \(AMR\) iteration (\d+):")
     _RE_AMR_PROCEEDING = re.compile(r"Proceeding with solve/estimate iteration (\d+)")
     # Frequency of the solve that follows: "It 7/7: ω/2π = 1.700e+02 GHz (...)" in a uniform
     # sweep, "Greedy iteration 1 (n = 4): ω* = 2.716e+01 GHz (...)" while PROM builds its model.
@@ -2598,6 +2605,7 @@ class CreateModelTab(CreateModelTabBase):
         self._status_solve_freq_ghz = None
         self._nonconverged = []
         self._status_stage = None       # with port walls: which solve of run_sim runs (a standard or the model)
+        self._status_excitations = {}   # excitation index -> (position, total), see _RE_EXCITATION_MAP
         self._update_status_line()
 
     def _reset_status_for_run(self):
@@ -2631,6 +2639,7 @@ class CreateModelTab(CreateModelTabBase):
     def _new_solve(self, stage):
         """A new Palace run in run_sim (a calibration standard or the model): its own ports and frequencies"""
         self._status_stage = stage
+        self._status_excitations = {}
         self._status_port_cur = self._status_port_total = None
         self._status_freq_display = None
         self._status_solve_display = ""
@@ -2664,10 +2673,18 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
+        m = self._RE_EXCITATION_MAP.search(line)
+        if m:
+            position, total = (int(m.group(1)), int(m.group(2))) if m.group(1) else (1, 1)
+            self._status_excitations[int(m.group(3))] = (position, total)
+            return
+
         m = self._RE_EXCITATION.search(line)
         if m:
-            self._status_port_cur = int(m.group(1))
-            self._status_port_total = int(m.group(2))
+            if m.group(2):
+                self._status_port_cur, self._status_port_total = int(m.group(2)), int(m.group(3))
+            else:
+                self._set_port_from_excitation_index(int(m.group(1)))
             # New port: the previous port's frequency/solve position no longer applies.
             self._status_freq_display = None
             self._status_solve_display = ""
@@ -2677,6 +2694,11 @@ class CreateModelTab(CreateModelTabBase):
 
         m = self._RE_FREQ.search(line)
         if m:
+            if m.group(3):
+                self._set_port_from_excitation_index(int(m.group(3)))
+            elif self._status_port_cur is None and len(self._status_excitations) == 1:
+                # one excitation: Palace prints no "excitation index" line at all
+                self._status_port_cur = self._status_port_total = 1
             solve_m = self._RE_SOLVE_SUFFIX.search(line)
             if solve_m:
                 # Real per-frequency full-order solve (uniform sweep) - meaningful progress.
@@ -2701,22 +2723,25 @@ class CreateModelTab(CreateModelTabBase):
             self._update_status_line()
             return
 
-        for amr_re in (self._RE_AMR_ITER_A, self._RE_AMR_ITER_B, self._RE_AMR_PROCEEDING):
-            m = amr_re.search(line)
-            if m and self._status_amr_max:
-                # Palace's own log numbers the initial, unrefined-mesh solve as "iteration
-                # 1" (confirmed earlier against DOF counts and palace_results.py's own
-                # iteration1/iteration2/... folder naming). Displayed here shifted down by
-                # 1 instead, so the initial solve reads "0" and each subsequent number
-                # counts completed *refinements* - e.g. the 2nd refinement (Palace's
-                # "iteration 3") reads "2/2" against a MaxIts=2 config, not "3/2". Not
-                # clamped to amr_max: MaxIts caps refinement actions, not solve passes, so
-                # the last legitimate pass is Palace's "iteration MaxIts+1" (displayed
-                # "MaxIts") - showing whatever Palace actually reports is more honest than
-                # silently capping it.
-                self._status_amr_cur = int(m.group(1)) - 1
+        if self._status_amr_max:
+            m = self._RE_AMR_DONE.search(line)
+            if m:
+                self._status_amr_cur = int(m.group(1))
+            else:
+                m = self._RE_AMR_ITER.search(line) or self._RE_AMR_PROCEEDING.search(line)
+                if m:
+                    # Not clamped to MaxIts: showing what Palace reports is more honest.
+                    self._status_amr_cur = int(m.group(1)) - 1
+            if m:
                 self._update_status_line()
                 return
+
+    def _set_port_from_excitation_index(self, index):
+        """Port k/N from a log line that only names the excitation index (Palace 0.19)"""
+        if index in self._status_excitations:
+            self._status_port_cur, self._status_port_total = self._status_excitations[index]
+        else:
+            self._status_port_cur, self._status_port_total = index, "?"
 
     def _report_nonconvergence(self, iterations):
         """Flag an unconverged Palace linear solve right away in the log, and remember
